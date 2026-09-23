@@ -2,6 +2,10 @@
 
 轻量 macOS 文件夹同步工具。适合在本地频繁编译 LaTeX 等会产生大量小文件的项目，再按较长间隔同步到 OneDrive 或其他已挂载的目标目录。
 
+## 下载
+
+[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.1.0)（macOS 13+）。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
+
 ## 功能
 
 - 添加多组本地目录和目标目录；每组可独立启用、命名和设置定时方向。
