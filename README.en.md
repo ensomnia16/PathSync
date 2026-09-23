@@ -12,8 +12,8 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.3.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.4.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
-The icon is reproducible from `GenerateIcon.swift` with `swift GenerateIcon.swift PathSyncIcon.png`.
+The interface uses native SwiftUI sidebar, form, and toolbar controls. The blue icon uses two opposing arrows to represent two-way sync. Recreate it with `swift GenerateIcon.swift PathSyncIcon.png`.
