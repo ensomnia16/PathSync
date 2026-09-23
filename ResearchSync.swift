@@ -7,7 +7,7 @@ private let fm = FileManager.default
 private let home = fm.homeDirectoryForCurrentUser.path
 private let supportDirectory = home + "/Library/Application Support/ResearchSync"
 private let defaultConfigPath = supportDirectory + "/config.json"
-private let logPath = supportDirectory + "/sync.log"
+let logPath = supportDirectory + "/sync.log"
 private let agentPath = home + "/Library/LaunchAgents/" + appID + ".plist"
 
 struct SyncPair: Codable, Identifiable {
@@ -22,12 +22,16 @@ struct SyncPair: Codable, Identifiable {
 struct SyncConfig: Codable {
     var pairs: [SyncPair] = [SyncPair()]
     var intervalHours = 24
-    var nightlyAt23 = true
+    var scheduleMode = "daily"
+    var dailyHour = 23
+    var dailyMinute = 0
     var excludeLatexIntermediates = true
     var enabled = true
+    var language = "zh-Hans"
 
     enum CodingKeys: String, CodingKey {
-        case pairs, intervalHours, nightlyAt23, excludeLatexIntermediates, enabled
+        case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
+        case excludeLatexIntermediates, enabled, language
         case source, destination, scheduledDirection
     }
 
@@ -36,9 +40,13 @@ struct SyncConfig: Codable {
     init(from decoder: Decoder) throws {
         let data = try decoder.container(keyedBy: CodingKeys.self)
         intervalHours = try data.decodeIfPresent(Int.self, forKey: .intervalHours) ?? 24
-        nightlyAt23 = try data.decodeIfPresent(Bool.self, forKey: .nightlyAt23) ?? true
+        let oldNightly = try data.decodeIfPresent(Bool.self, forKey: .nightlyAt23) ?? true
+        scheduleMode = try data.decodeIfPresent(String.self, forKey: .scheduleMode) ?? (oldNightly ? "daily" : "interval")
+        dailyHour = try data.decodeIfPresent(Int.self, forKey: .dailyHour) ?? 23
+        dailyMinute = try data.decodeIfPresent(Int.self, forKey: .dailyMinute) ?? 0
         excludeLatexIntermediates = try data.decodeIfPresent(Bool.self, forKey: .excludeLatexIntermediates) ?? true
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
             pairs = saved
         } else {
@@ -54,9 +62,12 @@ struct SyncConfig: Codable {
         var data = encoder.container(keyedBy: CodingKeys.self)
         try data.encode(pairs, forKey: .pairs)
         try data.encode(intervalHours, forKey: .intervalHours)
-        try data.encode(nightlyAt23, forKey: .nightlyAt23)
+        try data.encode(scheduleMode, forKey: .scheduleMode)
+        try data.encode(dailyHour, forKey: .dailyHour)
+        try data.encode(dailyMinute, forKey: .dailyMinute)
         try data.encode(excludeLatexIntermediates, forKey: .excludeLatexIntermediates)
         try data.encode(enabled, forKey: .enabled)
+        try data.encode(language, forKey: .language)
     }
 }
 
@@ -224,9 +235,10 @@ func installSchedule(_ config: SyncConfig) throws {
         "StandardOutPath": supportDirectory + "/launchd.out.log",
         "StandardErrorPath": supportDirectory + "/launchd.err.log"
     ]
-    if config.nightlyAt23 && config.intervalHours == 24 {
-        plist["StartCalendarInterval"] = ["Hour": 23, "Minute": 0]
-    } else { plist["StartInterval"] = max(6, config.intervalHours) * 3600 }
+    if config.scheduleMode == "daily" {
+        plist["StartCalendarInterval"] = ["Hour": min(23, max(0, config.dailyHour)),
+                                           "Minute": min(59, max(0, config.dailyMinute))]
+    } else { plist["StartInterval"] = min(168, max(6, config.intervalHours)) * 3600 }
     let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     try plistData.write(to: URL(fileURLWithPath: agentPath), options: .atomic)
     let start = Process()
@@ -245,7 +257,9 @@ func installSchedule(_ config: SyncConfig) throws {
 final class SyncModel: ObservableObject {
     @Published var config: SyncConfig
     @Published var selectedID: UUID?
-    @Published var status = "准备就绪"
+    @Published var page = "schedule"
+    @Published var statusKey = "ready"
+    @Published var statusDetail: String?
     @Published var busy = false
 
     init() {
@@ -260,14 +274,18 @@ final class SyncModel: ObservableObject {
         let pair = SyncPair()
         config.pairs.append(pair)
         selectedID = pair.id
-        status = "选择这组路径的本地和云端文件夹，启用后保存。"
+        page = "pair"
+        statusKey = "chooseFoldersHint"
+        statusDetail = nil
     }
 
     func removeSelected() {
         guard let index = selectedIndex else { return }
         config.pairs.remove(at: index)
         selectedID = config.pairs.first?.id
-        status = "路径已从列表移除；点击“保存设置”后生效。"
+        page = selectedID == nil ? "schedule" : "pair"
+        statusKey = "removedHint"
+        statusDetail = nil
     }
 
     func chooseFolder(local: Bool) {
@@ -289,258 +307,36 @@ final class SyncModel: ObservableObject {
             }
             for pair in config.pairs where pair.enabled { _ = try validatedPaths(pair) }
             config.intervalHours = min(168, max(6, config.intervalHours))
+            config.dailyHour = min(23, max(0, config.dailyHour))
+            config.dailyMinute = min(59, max(0, config.dailyMinute))
             try saveConfig(config)
             try installSchedule(config)
-            status = config.enabled ? "已保存 · 定时同步已启用" : "已保存 · 定时同步已关闭"
-        } catch { status = error.localizedDescription }
+            statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
+            statusDetail = nil
+        } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
     }
 
     func syncNow(_ direction: SyncDirection? = nil, all: Bool = false) {
         guard all || selectedID != nil else { return }
         busy = true
-        status = all ? "正在同步所有已启用路径…" : "正在同步所选路径…"
+        statusKey = all ? "syncingAll" : "syncingPair"
+        statusDetail = nil
         let current = config
         let id = all ? nil : selectedID
         DispatchQueue.global(qos: .utility).async {
-            let result: String
+            let resultKey: String
+            let resultDetail: String?
             do {
                 _ = try runSync(current, pairID: id, direction: direction)
-                result = all ? "所有已启用路径同步完成。" : "所选路径同步完成。"
-            } catch { result = error.localizedDescription }
+                resultKey = all ? "doneAll" : "donePair"
+                resultDetail = nil
+            } catch { resultKey = "error"; resultDetail = uiError(error, language: current.language) }
             DispatchQueue.main.async {
-                self.status = result
+                self.statusKey = resultKey
+                self.statusDetail = resultDetail
                 self.busy = false
             }
         }
-    }
-}
-
-struct ContentView: View {
-    @StateObject private var model = SyncModel()
-    private let navy = Color(red: 0.08, green: 0.15, blue: 0.29)
-    private let blue = Color(red: 0.23, green: 0.43, blue: 0.77)
-
-    var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-                .frame(width: 258)
-            Rectangle().fill(Color.black.opacity(0.09)).frame(width: 1)
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(minWidth: 860, minHeight: 610)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .background(LinearGradient(colors: [blue, navy], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 12))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("路径同步").font(.system(size: 19, weight: .bold))
-                    Text("PATH  ↔  PATH").font(.system(size: 9, weight: .semibold, design: .rounded)).tracking(1.1).foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 20).padding(.top, 27).padding(.bottom, 28)
-
-            HStack {
-                Text("同步路径").font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary).tracking(1)
-                Spacer()
-                Text("\(model.config.pairs.count)").font(.caption).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 21).padding(.bottom, 8)
-
-            ScrollView {
-                VStack(spacing: 5) {
-                    ForEach(model.config.pairs) { pair in
-                        Button { model.selectedID = pair.id } label: {
-                            HStack(spacing: 11) {
-                                Image(systemName: pair.enabled ? "folder.fill" : "folder")
-                                    .font(.system(size: 16)).foregroundStyle(pair.enabled ? blue : .gray)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(pair.name.isEmpty ? "未命名路径" : pair.name)
-                                        .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                                    Text(pair.enabled ? (SyncDirection(rawValue: pair.scheduledDirection)?.label ?? "本地 → 云端") : "未启用")
-                                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                                }
-                                Spacer(minLength: 0)
-                                if pair.enabled { Circle().fill(Color.green).frame(width: 6, height: 6) }
-                            }
-                            .padding(.horizontal, 12).padding(.vertical, 11)
-                            .background(model.selectedID == pair.id ? blue.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 11))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-            }
-
-            VStack(spacing: 8) {
-                Button { model.addPair() } label: {
-                    Label("添加路径", systemImage: "plus").frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .padding(10)
-                Button { model.removeSelected() } label: {
-                    Label("移除所选", systemImage: "minus").frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .padding(10)
-                .disabled(model.selectedID == nil)
-            }
-            .font(.system(size: 12, weight: .medium))
-            .padding(12)
-        }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-    }
-
-    private var detail: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("同步设置").font(.system(size: 27, weight: .bold, design: .rounded))
-                    Text("多路径管理、定时执行与手动双向同步。")
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("查看日志") { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) }
-                    .font(.system(size: 12))
-            }
-            .padding(.bottom, 20)
-
-            if let index = model.selectedIndex {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        pairCard(index)
-                        scheduleCard
-                        actionCard
-                    }
-                    .padding(.bottom, 8)
-                }
-            } else {
-                Spacer()
-                VStack(spacing: 10) {
-                    Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 35)).foregroundStyle(.secondary)
-                    Text("还没有同步路径").font(.headline)
-                    Text("点击左侧“添加路径”开始设置。").font(.caption).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                Spacer()
-            }
-            HStack(spacing: 10) {
-                Image(systemName: model.busy ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill")
-                    .foregroundStyle(model.busy ? blue : .green)
-                Text(model.status).font(.system(size: 12)).lineLimit(2)
-                Spacer()
-                if model.busy { ProgressView().controlSize(.small) }
-            }
-            .padding(.top, 12)
-        }
-        .padding(.horizontal, 28).padding(.top, 26).padding(.bottom, 19)
-    }
-
-    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 14, content: content)
-            .padding(19)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.black.opacity(0.055)))
-    }
-
-    private func pairCard(_ index: Int) -> some View {
-        card {
-            HStack {
-                Label("路径配置", systemImage: "folder.badge.gearshape")
-                    .font(.system(size: 15, weight: .semibold))
-                Spacer()
-                Toggle("启用此路径", isOn: $model.config.pairs[index].enabled)
-                    .toggleStyle(.switch).controlSize(.small)
-            }
-            HStack {
-                Text("名称").frame(width: 54, alignment: .leading).foregroundStyle(.secondary)
-                TextField("例如：论文项目", text: $model.config.pairs[index].name)
-                    .textFieldStyle(.roundedBorder)
-            }
-            pathRow("本地", path: $model.config.pairs[index].localPath) { model.chooseFolder(local: true) }
-            pathRow("云端", path: $model.config.pairs[index].cloudPath) { model.chooseFolder(local: false) }
-            HStack(spacing: 10) {
-                Text("定时方向").foregroundStyle(.secondary)
-                Spacer()
-                Picker("", selection: $model.config.pairs[index].scheduledDirection) {
-                    Text("双向合并").tag("merge")
-                    Text("本地 → 云端").tag("upload")
-                    Text("云端 → 本地").tag("download")
-                }
-                .labelsHidden().pickerStyle(.segmented).frame(width: 350)
-            }
-            .font(.system(size: 12))
-        }
-    }
-
-    private func pathRow(_ title: String, path: Binding<String>, choose: @escaping () -> Void) -> some View {
-        HStack(spacing: 10) {
-            Text(title).frame(width: 54, alignment: .leading).foregroundStyle(.secondary)
-            TextField("选择\(title)文件夹", text: path).textFieldStyle(.roundedBorder)
-            Button("选择…", action: choose)
-        }
-        .font(.system(size: 12))
-    }
-
-    private var scheduleCard: some View {
-        card {
-            Label("定时与过滤", systemImage: "clock.arrow.circlepath")
-                .font(.system(size: 15, weight: .semibold))
-            HStack(spacing: 10) {
-                Text("每隔").foregroundStyle(.secondary)
-                TextField("小时", value: $model.config.intervalHours, format: .number)
-                    .textFieldStyle(.roundedBorder).frame(width: 54)
-                Text("小时").foregroundStyle(.secondary)
-                Spacer()
-                Toggle("每天 23:00", isOn: $model.config.nightlyAt23)
-                    .disabled(model.config.intervalHours != 24)
-            }
-            HStack {
-                Toggle("排除 LaTeX 中间文件", isOn: $model.config.excludeLatexIntermediates)
-                Spacer()
-                Toggle("启用后台同步", isOn: $model.config.enabled)
-            }
-            Text("至少间隔 6 小时 · 不删除文件 · 跳过虚拟环境和缓存")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-        }
-        .font(.system(size: 12))
-    }
-
-    private var actionCard: some View {
-        card {
-            Label("立即执行", systemImage: "arrow.left.arrow.right")
-                .font(.system(size: 15, weight: .semibold))
-            HStack(spacing: 10) {
-                Button { model.syncNow(.merge) } label: { Label("双向合并", systemImage: "arrow.left.arrow.right") }
-                    .buttonStyle(.borderedProminent).tint(blue)
-                Button { model.syncNow(.upload) } label: { Label("本地 → 云端", systemImage: "arrow.up") }
-                    .buttonStyle(.bordered)
-                Button { model.syncNow(.download) } label: { Label("云端 → 本地", systemImage: "arrow.down") }
-                    .buttonStyle(.bordered)
-            }
-            HStack(spacing: 10) {
-                Button("同步所有已启用路径") { model.syncNow(all: true) }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Button("保存设置") { model.save() }
-                    .keyboardShortcut("s", modifiers: .command)
-            }
-            .disabled(model.busy)
-            Text("双向合并会保留两侧同时修改的文件并报告冲突；不会自动删除文件。")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-        }
-        .font(.system(size: 12))
     }
 }
 
