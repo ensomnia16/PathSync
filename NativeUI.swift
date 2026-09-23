@@ -240,7 +240,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
             }
             Section {
-                LabeledContent(t("version"), value: "2.4.0")
+                LabeledContent(t("version"), value: "2.4.1")
                 LabeledContent(t("source")) {
                     Link("github.com/ensomnia16/PathSync", destination: URL(string: "https://github.com/ensomnia16/PathSync")!)
                 }
