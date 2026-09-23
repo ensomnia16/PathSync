@@ -99,6 +99,12 @@ struct ContentView: View {
         }
         .frame(minWidth: 780, minHeight: 520)
         .environment(\.locale, model.config.language == "system" ? .current : Locale(identifier: model.config.language))
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshConflicts()
+        }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            model.refreshConflicts()
+        }
     }
 
     private var detail: some View {
@@ -276,7 +282,15 @@ struct ContentView: View {
                     }
                 }
             } header: {
-                Text(t("conflicts"))
+                HStack {
+                    Text(t("conflicts"))
+                    Spacer()
+                    Button { model.refreshConflicts() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(t("refreshConflicts"))
+                }
             } footer: {
                 Text(t("conflictHint"))
             }
@@ -295,7 +309,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
             }
             Section {
-                LabeledContent(t("version"), value: "2.5.0")
+                LabeledContent(t("version"), value: "2.5.1")
                 LabeledContent(t("source")) {
                     Link("github.com/ensomnia16/PathSync", destination: URL(string: "https://github.com/ensomnia16/PathSync")!)
                 }

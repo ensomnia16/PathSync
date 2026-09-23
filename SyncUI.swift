@@ -54,6 +54,7 @@ private let translations: [String: (zh: String, en: String)] = [
     "download": ("云端 → 本地", "Cloud → local"),
     "directionHint": ("发现不同版本时暂停该文件，并在下方列出待处理冲突。", "Differing versions pause that file and appear below for review."),
     "conflicts": ("待处理冲突", "Pending conflicts"),
+    "refreshConflicts": ("刷新冲突列表", "Refresh conflicts"),
     "noConflicts": ("当前没有待处理冲突。", "No pending conflicts."),
     "viewLocal": ("查看本地", "Show local"),
     "viewCloud": ("查看云端", "Show cloud"),
