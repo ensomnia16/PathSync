@@ -13,6 +13,7 @@ fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$source_dir/Info.plist" "$app/Contents/Info.plist"
 cp "$source_dir/sync_tree.py" "$app/Contents/Resources/sync_tree.py"
+cp "$source_dir/sync_merge.py" "$app/Contents/Resources/sync_merge.py"
 
 iconset="$output_dir/PathSync.iconset"
 mkdir -p "$iconset"

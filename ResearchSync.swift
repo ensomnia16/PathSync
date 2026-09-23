@@ -15,7 +15,7 @@ struct SyncPair: Codable, Identifiable {
     var name: String = "新路径"
     var localPath: String = ""
     var cloudPath: String = ""
-    var scheduledDirection: String = "upload"
+    var scheduledDirection: String = "merge"
     var enabled: Bool = false
 }
 
@@ -61,8 +61,14 @@ struct SyncConfig: Codable {
 }
 
 enum SyncDirection: String {
-    case upload, download
-    var label: String { self == .upload ? "本地 → 云端" : "云端 → 本地" }
+    case upload, download, merge
+    var label: String {
+        switch self {
+        case .upload: return "本地 → 云端"
+        case .download: return "云端 → 本地"
+        case .merge: return "双向合并"
+        }
+    }
 }
 
 private let latexExcludes = [
@@ -130,9 +136,17 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool, dryRun: Bool) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
-    let (source, destination) = direction == .upload ? (local, cloud) : (cloud, local)
+    let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
-    if direction == .download {
+    if direction == .merge {
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+        let state = supportDirectory + "/merge-state/" + pair.id.uuidString.lowercased() + ".json"
+        var arguments = [helper, local, cloud, state]
+        if excludeLatex { arguments.append("--exclude-latex") }
+        if dryRun { arguments.append("--dry-run") }
+        process.arguments = arguments
+    } else if direction == .download {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_tree.py").path
         var arguments = [helper, source, destination]
@@ -350,7 +364,7 @@ struct ContentView: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(pair.name.isEmpty ? "未命名路径" : pair.name)
                                         .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                                    Text(pair.enabled ? (pair.scheduledDirection == "download" ? "云端 → 本地" : "本地 → 云端") : "未启用")
+                                    Text(pair.enabled ? (SyncDirection(rawValue: pair.scheduledDirection)?.label ?? "本地 → 云端") : "未启用")
                                         .font(.system(size: 11)).foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 0)
@@ -460,10 +474,11 @@ struct ContentView: View {
                 Text("定时方向").foregroundStyle(.secondary)
                 Spacer()
                 Picker("", selection: $model.config.pairs[index].scheduledDirection) {
+                    Text("双向合并").tag("merge")
                     Text("本地 → 云端").tag("upload")
                     Text("云端 → 本地").tag("download")
                 }
-                .labelsHidden().pickerStyle(.segmented).frame(width: 252)
+                .labelsHidden().pickerStyle(.segmented).frame(width: 350)
             }
             .font(.system(size: 12))
         }
@@ -507,10 +522,14 @@ struct ContentView: View {
             Label("立即执行", systemImage: "arrow.left.arrow.right")
                 .font(.system(size: 15, weight: .semibold))
             HStack(spacing: 10) {
-                Button { model.syncNow(.upload) } label: { Label("本地 → 云端", systemImage: "arrow.up") }
+                Button { model.syncNow(.merge) } label: { Label("双向合并", systemImage: "arrow.left.arrow.right") }
                     .buttonStyle(.borderedProminent).tint(blue)
+                Button { model.syncNow(.upload) } label: { Label("本地 → 云端", systemImage: "arrow.up") }
+                    .buttonStyle(.bordered)
                 Button { model.syncNow(.download) } label: { Label("云端 → 本地", systemImage: "arrow.down") }
                     .buttonStyle(.bordered)
+            }
+            HStack(spacing: 10) {
                 Button("同步所有已启用路径") { model.syncNow(all: true) }
                     .buttonStyle(.bordered)
                 Spacer()
@@ -518,7 +537,7 @@ struct ContentView: View {
                     .keyboardShortcut("s", modifiers: .command)
             }
             .disabled(model.busy)
-            Text("两个方向均为单向复制；以较新的文件为准，不自动清理目标端。")
+            Text("双向合并会保留两侧同时修改的文件并报告冲突；不会自动删除文件。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .font(.system(size: 12))
@@ -539,13 +558,14 @@ struct ResearchSyncApp: App {
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
-        if args.contains("--sync") || args.contains("--dry-run") || args.contains("--push") || args.contains("--pull") {
+        if args.contains("--sync") || args.contains("--dry-run") || args.contains("--push") || args.contains("--pull") || args.contains("--merge") {
             let configPath: String
             if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
             else { configPath = defaultConfigPath }
             do {
                 let config = try loadConfig(configPath)
-                let direction: SyncDirection? = args.contains("--pull") ? .download : (args.contains("--push") ? .upload : nil)
+                let direction: SyncDirection? = args.contains("--merge") ? .merge :
+                    (args.contains("--pull") ? .download : (args.contains("--push") ? .upload : nil))
                 let id: UUID?
                 if let index = args.firstIndex(of: "--pair"), args.indices.contains(index + 1) { id = UUID(uuidString: args[index + 1]) }
                 else { id = nil }
