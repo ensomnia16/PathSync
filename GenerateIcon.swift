@@ -1,7 +1,7 @@
 import AppKit
 
-// One continuous silhouette per arrow keeps the shaft and head joined cleanly.
-// The blue tile is intentionally quiet so the bidirectional mark reads small.
+// Two opposing, gently curved arrows are the complete mark.
+// The modest depth of the blue tile keeps the icon distinct at Dock sizes.
 let bitmap = NSBitmapImageRep(
     bitmapDataPlanes: nil, pixelsWide: 1024, pixelsHigh: 1024,
     bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -26,55 +26,40 @@ color(255, 255, 255, 0.22).setStroke()
 tile.lineWidth = 3
 tile.stroke()
 
-func arrow() -> NSBezierPath {
+func arrow(start: NSPoint, control1: NSPoint, control2: NSPoint,
+           end: NSPoint, headUpper: NSPoint, headLower: NSPoint,
+           ink: NSColor) {
     let path = NSBezierPath()
-    path.move(to: NSPoint(x: 226, y: 649))
-    path.curve(to: NSPoint(x: 664, y: 649),
-               controlPoint1: NSPoint(x: 354, y: 670),
-               controlPoint2: NSPoint(x: 538, y: 670))
-    path.line(to: NSPoint(x: 664, y: 690))
-    path.curve(to: NSPoint(x: 686, y: 698),
-               controlPoint1: NSPoint(x: 664, y: 704),
-               controlPoint2: NSPoint(x: 677, y: 707))
-    path.line(to: NSPoint(x: 790, y: 641))
-    path.curve(to: NSPoint(x: 790, y: 619),
-               controlPoint1: NSPoint(x: 808, y: 630),
-               controlPoint2: NSPoint(x: 808, y: 630))
-    path.line(to: NSPoint(x: 686, y: 562))
-    path.curve(to: NSPoint(x: 664, y: 570),
-               controlPoint1: NSPoint(x: 677, y: 553),
-               controlPoint2: NSPoint(x: 664, y: 556))
-    path.line(to: NSPoint(x: 664, y: 606))
-    path.curve(to: NSPoint(x: 226, y: 606),
-               controlPoint1: NSPoint(x: 538, y: 627),
-               controlPoint2: NSPoint(x: 354, y: 627))
-    path.curve(to: NSPoint(x: 226, y: 649),
-               controlPoint1: NSPoint(x: 193, y: 606),
-               controlPoint2: NSPoint(x: 193, y: 649))
-    path.close()
-    return path
-}
+    path.lineWidth = 67
+    path.lineCapStyle = .round
+    path.lineJoinStyle = .round
+    path.move(to: start)
+    path.curve(to: end, controlPoint1: control1, controlPoint2: control2)
+    path.move(to: headUpper)
+    path.line(to: end)
+    path.line(to: headLower)
 
-func paint(_ path: NSBezierPath, ink: NSColor) {
     let shadow = NSShadow()
-    shadow.shadowColor = color(0, 0, 0, 0.13)
-    shadow.shadowBlurRadius = 14
-    shadow.shadowOffset = NSSize(width: 0, height: -7)
+    shadow.shadowColor = color(0, 0, 0, 0.18)
+    shadow.shadowBlurRadius = 17
+    shadow.shadowOffset = NSSize(width: 0, height: -10)
     NSGraphicsContext.saveGraphicsState()
     shadow.set()
-    ink.setFill()
-    path.fill()
+    ink.setStroke()
+    path.stroke()
     NSGraphicsContext.restoreGraphicsState()
 }
 
-let upper = arrow()
-paint(upper, ink: color(252, 251, 248))
-
-let lower = arrow()
-var turn = AffineTransform(translationByX: 1024, byY: 1024)
-turn.rotate(byDegrees: 180)
-lower.transform(using: turn)
-paint(lower, ink: color(224, 239, 251))
+arrow(start: NSPoint(x: 244, y: 619),
+      control1: NSPoint(x: 370, y: 696), control2: NSPoint(x: 610, y: 696),
+      end: NSPoint(x: 766, y: 619),
+      headUpper: NSPoint(x: 651, y: 713), headLower: NSPoint(x: 651, y: 525),
+      ink: color(252, 251, 248))
+arrow(start: NSPoint(x: 780, y: 405),
+      control1: NSPoint(x: 654, y: 328), control2: NSPoint(x: 414, y: 328),
+      end: NSPoint(x: 258, y: 405),
+      headUpper: NSPoint(x: 373, y: 499), headLower: NSPoint(x: 373, y: 311),
+      ink: color(219, 237, 250))
 
 NSGraphicsContext.current?.flushGraphics()
 NSGraphicsContext.restoreGraphicsState()
