@@ -40,14 +40,26 @@ struct ContentView: View {
         NavigationSplitView {
             List(selection: selectedRoute) {
                 Section {
-                    Label(t("schedule"), systemImage: "calendar")
-                        .tag("schedule")
+                    HStack {
+                        Label(t("schedule"), systemImage: "calendar")
+                        Spacer()
+                        if model.conflictCount > 0 {
+                            Text("\(model.conflictCount)")
+                                .foregroundStyle(.orange)
+                        }
+                    }.tag("schedule")
                 }
                 Section(t("folders")) {
                     ForEach(model.config.pairs) { pair in
-                        Label(pair.name.isEmpty ? t("unnamed") : pair.name,
-                              systemImage: pair.enabled ? "folder" : "folder.badge.questionmark")
-                            .tag("pair:\(pair.id.uuidString)")
+                        HStack {
+                            Label(pair.name.isEmpty ? t("unnamed") : pair.name,
+                                  systemImage: pair.enabled ? "folder" : "folder.badge.questionmark")
+                            Spacer()
+                            if let count = model.conflictsByPair[pair.id]?.count, count > 0 {
+                                Text("\(count)")
+                                    .foregroundStyle(.orange)
+                            }
+                        }.tag("pair:\(pair.id.uuidString)")
                     }
                 }
                 Section {
@@ -105,7 +117,9 @@ struct ContentView: View {
             Divider()
             HStack(spacing: 8) {
                 if model.busy { ProgressView().controlSize(.small) }
-                else { Image(systemName: "checkmark.circle").foregroundStyle(.secondary) }
+                else if model.conflictCount > 0 {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                } else { Image(systemName: "checkmark.circle").foregroundStyle(.secondary) }
                 Text(model.statusDetail ?? t(model.statusKey))
                     .lineLimit(2)
                 Spacer()
@@ -225,6 +239,47 @@ struct ContentView: View {
                 }
                 .disabled(model.busy)
             }
+
+            Section {
+                if model.selectedConflicts.isEmpty {
+                    Text(t("noConflicts")).foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.selectedConflicts) { conflict in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(conflict.name).font(.body).textSelection(.enabled)
+                            Text("\(t("local")) \(ByteCountFormatter.string(fromByteCount: conflict.localBytes, countStyle: .file)) · \(t("cloud")) \(ByteCountFormatter.string(fromByteCount: conflict.cloudBytes, countStyle: .file))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button(t("viewLocal")) {
+                                    NSWorkspace.shared.activateFileViewerSelecting([
+                                        URL(fileURLWithPath: model.config.pairs[index].localPath)
+                                            .appendingPathComponent(conflict.name)
+                                    ])
+                                }
+                                Button(t("viewCloud")) {
+                                    NSWorkspace.shared.activateFileViewerSelecting([
+                                        URL(fileURLWithPath: model.config.pairs[index].cloudPath)
+                                            .appendingPathComponent(conflict.name)
+                                    ])
+                                }
+                                Spacer()
+                                Menu(t("resolve")) {
+                                    Button(t("useLocal")) { model.resolveConflict(conflict.name, choice: "local") }
+                                    Button(t("useCloud")) { model.resolveConflict(conflict.name, choice: "cloud") }
+                                    Button(t("keepBoth")) { model.resolveConflict(conflict.name, choice: "both") }
+                                }
+                                .disabled(model.busy)
+                            }
+                            .controlSize(.small)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            } header: {
+                Text(t("conflicts"))
+            } footer: {
+                Text(t("conflictHint"))
+            }
         }
         .formStyle(.grouped)
     }
@@ -240,7 +295,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
             }
             Section {
-                LabeledContent(t("version"), value: "2.4.0")
+                LabeledContent(t("version"), value: "2.5.0")
                 LabeledContent(t("source")) {
                     Link("github.com/ensomnia16/PathSync", destination: URL(string: "https://github.com/ensomnia16/PathSync")!)
                 }

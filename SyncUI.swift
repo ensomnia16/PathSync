@@ -14,6 +14,7 @@ private let translations: [String: (zh: String, en: String)] = [
     "log": ("打开日志", "Open log"),
     "save": ("保存设置", "Save settings"),
     "ready": ("准备就绪", "Ready"),
+    "conflictsPending": ("有待处理冲突，请打开对应路径查看。", "Pending conflicts need review. Open the affected folder."),
     "chooseFoldersHint": ("选择本地和云端文件夹，然后保存。", "Choose local and cloud folders, then save."),
     "removedHint": ("已从列表移除；保存后生效。", "Removed from the list. Save to apply."),
     "savedEnabled": ("已保存，后台同步已启用。", "Saved. Scheduled sync is on."),
@@ -23,6 +24,8 @@ private let translations: [String: (zh: String, en: String)] = [
     "doneAll": ("所有已启用路径同步完成。", "All enabled folders are synced."),
     "donePair": ("所选路径同步完成。", "Selected folder is synced."),
     "error": ("操作失败", "Operation failed"),
+    "resolving": ("正在处理冲突…", "Resolving conflict…"),
+    "resolved": ("冲突已处理；两侧原件已备份。", "Conflict resolved. Both originals were backed up."),
     "daily": ("每天固定时间", "Every day at a time"),
     "interval": ("固定间隔", "At an interval"),
     "runMode": ("运行方式", "Run mode"),
@@ -49,7 +52,16 @@ private let translations: [String: (zh: String, en: String)] = [
     "merge": ("双向合并", "Two-way merge"),
     "upload": ("本地 → 云端", "Local → cloud"),
     "download": ("云端 → 本地", "Cloud → local"),
-    "directionHint": ("两侧同时修改同一文件时会报告冲突，并保留原件。", "Conflicting edits are reported and both originals are preserved."),
+    "directionHint": ("发现不同版本时暂停该文件，并在下方列出待处理冲突。", "Differing versions pause that file and appear below for review."),
+    "conflicts": ("待处理冲突", "Pending conflicts"),
+    "noConflicts": ("当前没有待处理冲突。", "No pending conflicts."),
+    "viewLocal": ("查看本地", "Show local"),
+    "viewCloud": ("查看云端", "Show cloud"),
+    "resolve": ("选择版本", "Choose version"),
+    "useLocal": ("采用本地版本", "Use local version"),
+    "useCloud": ("采用云端版本", "Use cloud version"),
+    "keepBoth": ("保留两份（本地为主文件）", "Keep both (local as main file)"),
+    "conflictHint": ("处理前会把两侧原件备份到本机的 merge-state 目录。若文件在选择后发生变化，请先重新同步。", "Both originals are backed up locally under merge-state before resolution. Sync again if a file has changed since it was listed."),
     "usingSchedule": ("使用默认计划", "Uses default schedule"),
     "editSchedule": ("编辑计划", "Edit schedule"),
     "runNow": ("立即执行", "Run now"),
@@ -87,7 +99,10 @@ func uiError(_ error: Error, language: String) -> String {
     case 4: return "A folder pair cannot use the same directory or nested directories."
     case 6: return "Another sync is already running."
     case 7: return "There are no folders to sync."
+    case 8: return "Some folders need attention. Review pending conflicts or open the log."
     case 9: return "Enable at least one folder before turning on scheduled sync."
+    case 10: return "The folder paths no longer match their conflict records. Check this pair's paths."
+    case 12: return "The conflict could not be resolved. Sync again if a file changed, then open the log for details."
     default: return "The operation did not complete. Open the log for details."
     }
 }

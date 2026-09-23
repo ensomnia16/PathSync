@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -54,6 +55,114 @@ class MergeTests(unittest.TestCase):
         self.assertIn('CONFLICT\tpaper.tex', result.stdout)
         self.assertEqual((self.local / 'paper.tex').read_text(), 'local changed')
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud changed')
+        state = json.loads(self.state.read_text())
+        self.assertIn('paper.tex', state['conflicts'])
+
+    def test_resolve_with_local_keeps_verified_backups(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local version')
+        (self.cloud / 'paper.tex').write_text('cloud version')
+        self.assertEqual(self.run_merge().returncode, 2)
+
+        result = self.run_merge('--resolve', 'paper.tex', '--choice', 'local')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'local version')
+        backup = Path(result.stdout.split('backup=', 1)[1].strip())
+        self.assertEqual((backup / 'local.tex').read_text(), 'local version')
+        self.assertEqual((backup / 'cloud.tex').read_text(), 'cloud version')
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+        self.assertEqual(self.run_merge().returncode, 0)
+
+    def test_resolve_with_cloud_updates_local(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local version')
+        (self.cloud / 'paper.tex').write_text('cloud version')
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge('--resolve', 'paper.tex', '--choice', 'cloud')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud version')
+
+    def test_keep_both_propagates_labeled_cloud_copy(self):
+        (self.local / 'chapter.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'chapter.tex').write_text('local version')
+        (self.cloud / 'chapter.tex').write_text('cloud version')
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge('--resolve', 'chapter.tex', '--choice', 'both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'chapter.tex').read_text(), 'local version')
+        self.assertEqual((self.cloud / 'chapter.tex').read_text(), 'local version')
+        copies = list(self.local.glob('chapter (cloud conflict *).tex'))
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), 'cloud version')
+        self.assertEqual((self.cloud / copies[0].name).read_text(), 'cloud version')
+        self.assertEqual(self.run_merge().returncode, 0)
+
+    def test_keep_both_rejects_sidecar_name_collision_before_writing(self):
+        (self.local / 'chapter.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'chapter.tex').write_text('local')
+        (self.cloud / 'chapter.tex').write_text('cloud')
+        self.assertEqual(self.run_merge().returncode, 2)
+        suffix = hashlib.sha256(b'cloud').hexdigest()[:12]
+        sidecar = f'chapter (cloud conflict {suffix}).tex'
+        (self.local / sidecar).write_text('unrelated file')
+        result = self.run_merge('--resolve', 'chapter.tex', '--choice', 'both')
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.cloud / sidecar).exists())
+        self.assertEqual((self.local / 'chapter.tex').read_text(), 'local')
+        self.assertEqual((self.cloud / 'chapter.tex').read_text(), 'cloud')
+
+    def test_changed_after_listing_requires_refresh(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local old')
+        (self.cloud / 'paper.tex').write_text('cloud old')
+        self.assertEqual(self.run_merge().returncode, 2)
+        (self.local / 'paper.tex').write_text('local new')
+        result = self.run_merge('--resolve', 'paper.tex', '--choice', 'cloud')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'local new')
+        self.assertEqual(self.run_merge().returncode, 2)
+        self.assertEqual(self.run_merge('--resolve', 'paper.tex', '--choice', 'cloud').returncode, 0)
+
+    def test_directional_runs_do_not_overwrite_divergent_destination(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.cloud / 'paper.tex').write_text('cloud edited')
+        result = self.run_merge('--direction', 'upload')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edited')
+        self.assertIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
+
+    def test_directional_upload_of_source_change_succeeds(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('new local content')
+        result = self.run_merge('--direction', 'upload')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'new local content')
+
+    def test_first_directional_run_does_not_pick_a_winner(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        result = self.run_merge('--direction', 'download')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'local')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud')
+
+    def test_symlinked_destination_parent_is_not_followed(self):
+        (self.local / 'chapter').mkdir()
+        (self.local / 'chapter' / 'paper.tex').write_text('safe')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (self.cloud / 'chapter').symlink_to(outside, target_is_directory=True)
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((outside / 'paper.tex').exists())
+        self.assertIn('FAILED\tchapter/paper.tex', result.stdout)
 
     def test_first_run_does_not_choose_a_winner_for_divergent_file(self):
         left = self.local / 'same-name.tex'

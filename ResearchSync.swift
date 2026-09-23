@@ -10,6 +10,10 @@ private let defaultConfigPath = supportDirectory + "/config.json"
 let logPath = supportDirectory + "/sync.log"
 private let agentPath = home + "/Library/LaunchAgents/" + appID + ".plist"
 
+private func mergeStatePath(_ pair: SyncPair) -> String {
+    supportDirectory + "/merge-state/" + pair.id.uuidString.lowercased() + ".json"
+}
+
 struct SyncPair: Codable, Identifiable {
     var id: UUID = UUID()
     var name: String = "新路径"
@@ -82,14 +86,6 @@ enum SyncDirection: String {
     }
 }
 
-private let latexExcludes = [
-    "*.aux", "*.log", "*.synctex.gz", "*.fls", "*.fdb_latexmk", "*.out",
-    "*.toc", "*.lof", "*.lot", "*.blg", "*.bcf", "*.run.xml",
-    "*.nav", "*.snm", "*.vrb", "*.xdv", "*.acn", "*.acr", "*.alg",
-    "*.glg", "*.glo", "*.ist", "*.ilg", "*.idx", "_minted-*/",
-    "*.synctex(busy)", ".DS_Store"
-]
-
 func loadConfig(_ path: String = defaultConfigPath) throws -> SyncConfig {
     if !fm.fileExists(atPath: path) { return SyncConfig() }
     return try JSONDecoder().decode(SyncConfig.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -123,6 +119,39 @@ func validatedPaths(_ pair: SyncPair) throws -> (String, String) {
     return (local, cloud)
 }
 
+struct PendingConflict: Identifiable {
+    let name: String
+    let localBytes: Int64
+    let cloudBytes: Int64
+    var id: String { name }
+}
+
+private struct StoredConflict: Decodable {
+    let local: [Int64]
+    let cloud: [Int64]
+}
+
+private struct ConflictState: Decodable {
+    let local: String
+    let cloud: String
+    let conflicts: [String: StoredConflict]?
+}
+
+func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
+    let path = mergeStatePath(pair)
+    guard fm.fileExists(atPath: path) else { return [] }
+    let state = try JSONDecoder().decode(ConflictState.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+    let local = URL(fileURLWithPath: pair.localPath).standardizedFileURL.resolvingSymlinksInPath().path
+    let cloud = URL(fileURLWithPath: pair.cloudPath).standardizedFileURL.resolvingSymlinksInPath().path
+    guard state.local == local, state.cloud == cloud else {
+        throw NSError(domain: appID, code: 10, userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」的路径与冲突记录不一致。请检查路径配置。"])
+    }
+    return (state.conflicts ?? [:]).map { name, record in
+        PendingConflict(name: name, localBytes: record.local.first ?? 0,
+                        cloudBytes: record.cloud.first ?? 0)
+    }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+}
+
 func appendLog(_ message: String) {
     try? fm.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
     let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
@@ -149,32 +178,12 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     let (local, cloud) = try validatedPaths(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
-    if direction == .merge {
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
-        let state = supportDirectory + "/merge-state/" + pair.id.uuidString.lowercased() + ".json"
-        var arguments = [helper, local, cloud, state]
-        if excludeLatex { arguments.append("--exclude-latex") }
-        if dryRun { arguments.append("--dry-run") }
-        process.arguments = arguments
-    } else if direction == .download {
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_tree.py").path
-        var arguments = [helper, source, destination]
-        if excludeLatex { arguments.append("--exclude-latex") }
-        if dryRun { arguments.append("--dry-run") }
-        process.arguments = arguments
-    } else {
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-        var arguments = ["-a", "--update", "--stats", "--timeout=120"]
-        for pattern in ["*.researchsync-partial", ".venv/", "__pycache__/", "pycache/", "*.pyc", "node_modules/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/"] {
-            arguments += ["--exclude", pattern]
-        }
-        if dryRun { arguments.append("--dry-run") }
-        if excludeLatex { for pattern in latexExcludes { arguments += ["--exclude", pattern] } }
-        arguments += [source + "/", destination + "/"]
-        process.arguments = arguments
-    }
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+    var arguments = [helper, local, cloud, mergeStatePath(pair), "--direction", direction.rawValue]
+    if excludeLatex { arguments.append("--exclude-latex") }
+    if dryRun { arguments.append("--dry-run") }
+    process.arguments = arguments
     let output = Pipe()
     process.standardOutput = output
     process.standardError = output
@@ -188,6 +197,31 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
         throw NSError(domain: appID, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」未完全成功：\(summary)。详情见日志。"])
     }
     return result
+}
+
+func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String) throws -> String {
+    guard ["local", "cloud", "both"].contains(choice) else {
+        throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "无效的冲突处理方式。"])
+    }
+    return try withSyncLock {
+        let (local, cloud) = try validatedPaths(pair)
+        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [helper, local, cloud, mergeStatePath(pair), "--resolve", name, "--choice", choice]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        appendLog("解决冲突 [\(pair.name)] \(name)：\(choice)")
+        try process.run()
+        let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        appendLog("冲突处理 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: appID, code: 12, userInfo: [NSLocalizedDescriptionKey: "「\(name)」处理失败：\(result.trimmingCharacters(in: .whitespacesAndNewlines))"])
+        }
+        return result
+    }
 }
 
 @discardableResult
@@ -261,14 +295,36 @@ final class SyncModel: ObservableObject {
     @Published var statusKey = "ready"
     @Published var statusDetail: String?
     @Published var busy = false
+    @Published var conflictsByPair: [UUID: [PendingConflict]] = [:]
 
     init() {
         config = (try? loadConfig()) ?? SyncConfig()
         selectedID = config.pairs.first?.id
+        refreshConflicts()
     }
 
     var selectedIndex: Int? { config.pairs.firstIndex { $0.id == selectedID } }
     var selectedPair: SyncPair? { selectedIndex.map { config.pairs[$0] } }
+    var selectedConflicts: [PendingConflict] {
+        guard let selectedID else { return [] }
+        return conflictsByPair[selectedID] ?? []
+    }
+    var conflictCount: Int { conflictsByPair.values.reduce(0) { $0 + $1.count } }
+
+    func refreshConflicts() {
+        var updated: [UUID: [PendingConflict]] = [:]
+        for pair in config.pairs {
+            do { updated[pair.id] = try pendingConflicts(for: pair) }
+            catch {
+                statusKey = "error"
+                statusDetail = uiError(error, language: config.language)
+            }
+        }
+        conflictsByPair = updated
+        if statusKey == "ready" || statusKey == "conflictsPending" {
+            statusKey = conflictCount > 0 ? "conflictsPending" : "ready"
+        }
+    }
 
     func addPair() {
         let pair = SyncPair()
@@ -286,6 +342,7 @@ final class SyncModel: ObservableObject {
         page = selectedID == nil ? "schedule" : "pair"
         statusKey = "removedHint"
         statusDetail = nil
+        refreshConflicts()
     }
 
     func chooseFolder(local: Bool) {
@@ -297,6 +354,7 @@ final class SyncModel: ObservableObject {
         if panel.runModal() == .OK, let path = panel.url?.path {
             if local { config.pairs[index].localPath = path }
             else { config.pairs[index].cloudPath = path }
+            refreshConflicts()
         }
     }
 
@@ -305,7 +363,10 @@ final class SyncModel: ObservableObject {
             if config.enabled && !config.pairs.contains(where: { $0.enabled }) {
                 throw NSError(domain: appID, code: 9, userInfo: [NSLocalizedDescriptionKey: "启用后台同步前，请至少启用一组路径。"])
             }
-            for pair in config.pairs where pair.enabled { _ = try validatedPaths(pair) }
+            for pair in config.pairs where pair.enabled {
+                _ = try validatedPaths(pair)
+                _ = try pendingConflicts(for: pair)
+            }
             config.intervalHours = min(168, max(6, config.intervalHours))
             config.dailyHour = min(23, max(0, config.dailyHour))
             config.dailyMinute = min(59, max(0, config.dailyMinute))
@@ -313,6 +374,7 @@ final class SyncModel: ObservableObject {
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
             statusDetail = nil
+            refreshConflicts()
         } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
     }
 
@@ -335,6 +397,33 @@ final class SyncModel: ObservableObject {
                 self.statusKey = resultKey
                 self.statusDetail = resultDetail
                 self.busy = false
+                self.refreshConflicts()
+            }
+        }
+    }
+
+    func resolveConflict(_ name: String, choice: String) {
+        guard let pair = selectedPair, !busy else { return }
+        let language = config.language
+        busy = true
+        statusKey = "resolving"
+        statusDetail = nil
+        DispatchQueue.global(qos: .utility).async {
+            let resultKey: String
+            let resultDetail: String?
+            do {
+                _ = try resolvePendingConflict(pair, name: name, choice: choice)
+                resultKey = "resolved"
+                resultDetail = nil
+            } catch {
+                resultKey = "error"
+                resultDetail = uiError(error, language: language)
+            }
+            DispatchQueue.main.async {
+                self.statusKey = resultKey
+                self.statusDetail = resultDetail
+                self.busy = false
+                self.refreshConflicts()
             }
         }
     }
@@ -347,10 +436,32 @@ struct ResearchSyncApp: App {
         if args.contains("--install") {
             do {
                 let config = try loadConfig()
-                for pair in config.pairs where pair.enabled { _ = try validatedPaths(pair) }
+                for pair in config.pairs where pair.enabled {
+                    _ = try validatedPaths(pair)
+                    _ = try pendingConflicts(for: pair)
+                }
                 try saveConfig(config)
                 try installSchedule(config)
                 print("定时任务已安装：\(agentPath)")
+                exit(0)
+            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
+        if let resolution = args.firstIndex(of: "--resolve") {
+            do {
+                guard args.indices.contains(resolution + 1),
+                      let choiceIndex = args.firstIndex(of: "--choice"), args.indices.contains(choiceIndex + 1),
+                      let pairIndex = args.firstIndex(of: "--pair"), args.indices.contains(pairIndex + 1),
+                      let id = UUID(uuidString: args[pairIndex + 1]) else {
+                    throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "解决冲突需要 --resolve 路径、--choice local|cloud|both 和 --pair UUID。"])
+                }
+                let configPath: String
+                if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
+                else { configPath = defaultConfigPath }
+                let config = try loadConfig(configPath)
+                guard let pair = config.pairs.first(where: { $0.id == id }) else {
+                    throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
+                }
+                print(try resolvePendingConflict(pair, name: args[resolution + 1], choice: args[choiceIndex + 1]))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
