@@ -90,8 +90,10 @@ struct ContentView: View {
                         }
                         .help(t("log"))
                     }
-                    ToolbarItem(placement: .primaryAction) {
-                        Button(t("save")) { model.save() }
+                    ToolbarItem(placement: .automatic) {
+                        Button { model.save() } label: {
+                            Label(t("save"), systemImage: "square.and.arrow.down")
+                        }
                             .keyboardShortcut("s", modifiers: .command)
                             .disabled(model.busy)
                     }
@@ -109,6 +111,7 @@ struct ContentView: View {
 
     private var detail: some View {
         VStack(spacing: 0) {
+            if model.page != "about" { syncActionBar }
             if model.page == "schedule" { scheduleForm }
             else if model.page == "about" { aboutForm }
             else if let index = model.selectedIndex { pairForm(index) }
@@ -135,6 +138,32 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .frame(height: 34)
         }
+    }
+
+    private var syncActionBar: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.page == "pair" ? t("syncPairNow") : t("syncAllNow"))
+                    .font(.headline)
+                Text(model.page == "pair" ? t("syncPairHint") : t("syncAllHint"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                model.syncNow(all: model.page != "pair")
+            } label: {
+                Label(t("syncNow"), systemImage: "arrow.triangle.2.circlepath")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.busy || (model.page == "pair"
+                ? model.selectedID == nil
+                : !model.config.pairs.contains(where: { $0.enabled })))
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(.regularMaterial)
     }
 
     private var dailyTime: Binding<Date> {
@@ -175,13 +204,13 @@ struct ContentView: View {
             Section {
                 Toggle(t("background"), isOn: $model.config.enabled)
                 Toggle(t("latex"), isOn: $model.config.excludeLatexIntermediates)
+                Picker(t("conflictHandling"), selection: $model.config.conflictPolicy) {
+                    Text(t("autoKeepBoth")).tag("keep-both")
+                    Text(t("askForConflicts")).tag("ask")
+                }
+                .pickerStyle(.menu)
             } footer: {
-                Text(t("backgroundHint") + " " + t("filterHint"))
-            }
-
-            Section {
-                Button(t("runAll")) { model.syncNow(all: true) }
-                    .disabled(model.busy || !model.config.pairs.contains(where: { $0.enabled }))
+                Text(t("backgroundHint") + " " + t("filterHint") + " " + t("conflictPolicyHint"))
             }
         }
         .formStyle(.grouped)
@@ -234,7 +263,7 @@ struct ContentView: View {
                         .buttonStyle(.link)
                 }
             } footer: {
-                Text(t("directionHint"))
+                Text(t(model.config.conflictPolicy == "keep-both" ? "directionHintAuto" : "directionHintAsk"))
             }
 
             Section(t("runNow")) {
@@ -309,7 +338,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
             }
             Section {
-                LabeledContent(t("version"), value: "2.5.1")
+                LabeledContent(t("version"), value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                 LabeledContent(t("source")) {
                     Link("github.com/ensomnia16/PathSync", destination: URL(string: "https://github.com/ensomnia16/PathSync")!)
                 }

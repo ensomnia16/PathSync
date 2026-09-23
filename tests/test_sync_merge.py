@@ -22,10 +22,65 @@ class MergeTests(unittest.TestCase):
         self.cloud.mkdir()
         self.state = self.root / 'state.json'
 
-    def run_merge(self, *extra):
-        return subprocess.run([sys.executable, str(HELPER), str(self.local), str(self.cloud),
-                               str(self.state), '--exclude-latex', *extra],
+    def run_merge(self, *extra, policy='ask'):
+        arguments = [sys.executable, str(HELPER), str(self.local), str(self.cloud),
+                     str(self.state), '--exclude-latex']
+        if policy is not None:
+            arguments.extend(['--conflict-policy', policy])
+        return subprocess.run([*arguments, *extra],
                               capture_output=True, text=True, timeout=15)
+
+    def test_default_keeps_both_versions_automatically(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        (self.local / 'paper.tex').write_text('local revision')
+        (self.cloud / 'paper.tex').write_text('cloud revision')
+        result = self.run_merge(policy=None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('kept_both=1', result.stdout)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'local revision')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'local revision')
+        copies = list(self.local.glob('paper (cloud conflict *).tex'))
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), 'cloud revision')
+        self.assertEqual((self.cloud / copies[0].name).read_text(), 'cloud revision')
+        backup = Path(result.stdout.split('backup=', 1)[1].splitlines()[0])
+        self.assertEqual((backup / 'local.tex').read_text(), 'local revision')
+        self.assertEqual((backup / 'cloud.tex').read_text(), 'cloud revision')
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+
+    def test_existing_pending_conflict_is_kept_on_next_default_run(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'local')
+        self.assertEqual(len(list(self.local.glob('paper (cloud conflict *).tex'))), 1)
+
+    def test_download_conflict_keeps_cloud_at_original_path(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        (self.local / 'paper.tex').write_text('local changed')
+        (self.cloud / 'paper.tex').write_text('cloud changed')
+        result = self.run_merge('--direction', 'download', policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud changed')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud changed')
+        copies = list(self.local.glob('paper (local conflict *).tex'))
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), 'local changed')
+        self.assertEqual((self.cloud / copies[0].name).read_text(), 'local changed')
+
+    def test_default_dry_run_plans_keep_both_without_writing(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        result = self.run_merge('--dry-run', policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('WOULD_KEEP_BOTH\tpaper.tex', result.stdout)
+        self.assertFalse(self.state.exists())
+        self.assertFalse(list(self.local.glob('paper (* conflict *).tex')))
 
     def test_unique_files_and_one_sided_updates(self):
         (self.local / 'paper.tex').write_text('local v1')
@@ -114,6 +169,19 @@ class MergeTests(unittest.TestCase):
         self.assertFalse((self.cloud / sidecar).exists())
         self.assertEqual((self.local / 'chapter.tex').read_text(), 'local')
         self.assertEqual((self.cloud / 'chapter.tex').read_text(), 'cloud')
+
+    def test_auto_keep_both_collision_leaves_originals_and_pending_state(self):
+        (self.local / 'chapter.tex').write_text('local')
+        (self.cloud / 'chapter.tex').write_text('cloud')
+        suffix = hashlib.sha256(b'cloud').hexdigest()[:12]
+        sidecar = f'chapter (cloud conflict {suffix}).tex'
+        (self.local / sidecar).write_text('unrelated file')
+        result = self.run_merge(policy=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('FAILED\tchapter.tex', result.stdout)
+        self.assertEqual((self.local / 'chapter.tex').read_text(), 'local')
+        self.assertEqual((self.cloud / 'chapter.tex').read_text(), 'cloud')
+        self.assertIn('chapter.tex', json.loads(self.state.read_text())['conflicts'])
 
     def test_changed_after_listing_requires_refresh(self):
         (self.local / 'paper.tex').write_text('base')

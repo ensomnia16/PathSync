@@ -30,12 +30,13 @@ struct SyncConfig: Codable {
     var dailyHour = 23
     var dailyMinute = 0
     var excludeLatexIntermediates = true
+    var conflictPolicy = "keep-both"
     var enabled = true
     var language = "zh-Hans"
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
-        case excludeLatexIntermediates, enabled, language
+        case excludeLatexIntermediates, conflictPolicy, enabled, language
         case source, destination, scheduledDirection
     }
 
@@ -49,6 +50,7 @@ struct SyncConfig: Codable {
         dailyHour = try data.decodeIfPresent(Int.self, forKey: .dailyHour) ?? 23
         dailyMinute = try data.decodeIfPresent(Int.self, forKey: .dailyMinute) ?? 0
         excludeLatexIntermediates = try data.decodeIfPresent(Bool.self, forKey: .excludeLatexIntermediates) ?? true
+        conflictPolicy = try data.decodeIfPresent(String.self, forKey: .conflictPolicy) ?? "keep-both"
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
@@ -70,6 +72,7 @@ struct SyncConfig: Codable {
         try data.encode(dailyHour, forKey: .dailyHour)
         try data.encode(dailyMinute, forKey: .dailyMinute)
         try data.encode(excludeLatexIntermediates, forKey: .excludeLatexIntermediates)
+        try data.encode(conflictPolicy, forKey: .conflictPolicy)
         try data.encode(enabled, forKey: .enabled)
         try data.encode(language, forKey: .language)
     }
@@ -174,13 +177,15 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
     return try body()
 }
 
-private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool, dryRun: Bool) throws -> String {
+private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
+                     conflictPolicy: String, dryRun: Bool) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
     let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
-    var arguments = [helper, local, cloud, mergeStatePath(pair), "--direction", direction.rawValue]
+    var arguments = [helper, local, cloud, mergeStatePath(pair), "--direction", direction.rawValue,
+                     "--conflict-policy", conflictPolicy]
     if excludeLatex { arguments.append("--exclude-latex") }
     if dryRun { arguments.append("--dry-run") }
     process.arguments = arguments
@@ -236,7 +241,10 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
         for pair in selected {
             do {
                 let chosen = direction ?? SyncDirection(rawValue: pair.scheduledDirection) ?? .upload
-                outputs.append("[\(pair.name)] \(try syncOne(pair, direction: chosen, excludeLatex: config.excludeLatexIntermediates, dryRun: dryRun))")
+                let result = try syncOne(pair, direction: chosen,
+                                         excludeLatex: config.excludeLatexIntermediates,
+                                         conflictPolicy: config.conflictPolicy, dryRun: dryRun)
+                outputs.append("[\(pair.name)] \(result)")
             } catch {
                 errors.append(error.localizedDescription)
                 appendLog("失败 [\(pair.name)]：\(error.localizedDescription)")
@@ -370,6 +378,9 @@ final class SyncModel: ObservableObject {
             config.intervalHours = min(168, max(6, config.intervalHours))
             config.dailyHour = min(23, max(0, config.dailyHour))
             config.dailyMinute = min(59, max(0, config.dailyMinute))
+            if !["keep-both", "ask"].contains(config.conflictPolicy) {
+                config.conflictPolicy = "keep-both"
+            }
             try saveConfig(config)
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
@@ -389,9 +400,12 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try runSync(current, pairID: id, direction: direction)
+                let output = try runSync(current, pairID: id, direction: direction)
+                let kept = output.split(separator: "\n").filter { $0.contains("KEPT_BOTH\t") }.count
                 resultKey = all ? "doneAll" : "donePair"
-                resultDetail = nil
+                resultDetail = kept > 0
+                    ? String(format: uiText("keptBothResult", language: current.language), kept)
+                    : nil
             } catch { resultKey = "error"; resultDetail = uiError(error, language: current.language) }
             DispatchQueue.main.async {
                 self.statusKey = resultKey

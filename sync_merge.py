@@ -122,13 +122,67 @@ def conflict_record(local_sig, cloud_sig, hashes, reason):
             'reason': reason, 'detectedAt': datetime.now(timezone.utc).isoformat()}
 
 
+def backup_original(source, destination, expected_hash):
+    if destination.exists():
+        if digest(destination) != expected_hash:
+            raise OSError(f'备份文件与预期不同：{destination}')
+        return
+    copy_atomic(source, destination, signature(source), None)
+    if digest(destination) != expected_hash:
+        raise OSError(f'备份文件校验失败：{destination}')
+
+
+def backup_pair(state_path, name, local_file, cloud_file, local_sig, cloud_sig, hashes):
+    key = hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]
+    version = hashes[0][:12] + '-' + hashes[1][:12]
+    backup_dir = state_path.parent / (state_path.stem + '-conflict-backups') / key / version
+    suffix = local_file.suffix
+    local_backup = backup_dir / ('local' + suffix)
+    cloud_backup = backup_dir / ('cloud' + suffix)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_original(local_file, local_backup, hashes[0])
+    backup_original(cloud_file, cloud_backup, hashes[1])
+    if checked_digests(local_file, cloud_file, local_sig, cloud_sig) != hashes:
+        raise OSError('备份期间文件发生变化；请重新同步')
+    return backup_dir, local_backup, cloud_backup
+
+
+def preserve_both(state_path, local, cloud, name, local_sig, cloud_sig, hashes,
+                  backups=None, primary='local'):
+    local_file = safe_path(local, name)
+    cloud_file = safe_path(cloud, name)
+    backup_dir, local_backup, cloud_backup = backups or backup_pair(
+        state_path, name, local_file, cloud_file, local_sig, cloud_sig, hashes)
+    relative = Path(name)
+    secondary = 'cloud' if primary == 'local' else 'local'
+    secondary_hash = hashes[1] if primary == 'local' else hashes[0]
+    secondary_backup = cloud_backup if primary == 'local' else local_backup
+    sidecar_name = str(relative.with_name(
+        relative.stem + f' ({secondary} conflict {secondary_hash[:12]})' + relative.suffix))
+    local_sidecar = safe_path(local, sidecar_name)
+    cloud_sidecar = safe_path(cloud, sidecar_name)
+    for target in (cloud_sidecar, local_sidecar):
+        if signature(target) is not None and digest(target) != secondary_hash:
+            raise OSError(f'冲突副本名称已被其他文件占用：{target}')
+    for target in (cloud_sidecar, local_sidecar):
+        if signature(target) is None:
+            copy_atomic(secondary_backup, target, signature(secondary_backup), None)
+    if checked_digests(local_file, cloud_file, local_sig, cloud_sig) != hashes:
+        raise OSError('创建冲突副本期间原文件发生变化；请重新同步')
+    if primary == 'local':
+        copy_atomic(local_backup, cloud_file, signature(local_backup), cloud_sig)
+    else:
+        copy_atomic(cloud_backup, local_file, signature(cloud_backup), local_sig)
+    return sidecar_name, backup_dir
+
+
 def sync_files(args, local, cloud, files, conflicts):
     next_files = dict(files)
     next_conflicts = dict(conflicts)
     errors = []
     names = scan(local, args.exclude_latex, errors) | scan(cloud, args.exclude_latex, errors)
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
-              'skipped': 0, 'conflicts': 0, 'failed': 0}
+              'kept_both': 0, 'skipped': 0, 'conflicts': 0, 'failed': 0}
 
     for name in sorted(names):
         try:
@@ -187,11 +241,32 @@ def sync_files(args, local, cloud, files, conflicts):
                             next_conflicts.pop(name, None)
                         counts['unchanged'] += 1
                         continue
-                reason = 'pending' if pending else ('initial' if previous is None else 'both_changed')
-                if not args.dry_run:
-                    next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes, reason)
-                print(f'CONFLICT\t{name}\t两侧内容不同，等待选择版本')
-                counts['conflicts'] += 1
+                if args.conflict_policy == 'keep-both':
+                    if not args.dry_run:
+                        # Persist the conflict first. A failed backup or cloud write
+                        # must leave it visible for a later retry.
+                        next_conflicts[name] = conflict_record(
+                            local_sig, cloud_sig, hashes,
+                            'pending' if pending else ('initial' if previous is None else 'both_changed'))
+                        save_state(args.state, local, cloud, next_files, next_conflicts)
+                        sidecar_name, backup_dir = preserve_both(
+                            args.state, local, cloud, name, local_sig, cloud_sig, hashes,
+                            primary='cloud' if args.direction == 'download' else 'local')
+                        next_files[name] = {'local': signature(local_file), 'cloud': signature(cloud_file)}
+                        next_files[sidecar_name] = {
+                            'local': signature(local / sidecar_name),
+                            'cloud': signature(cloud / sidecar_name)}
+                        next_conflicts.pop(name, None)
+                        print(f'KEPT_BOTH\t{name}\tcopy={sidecar_name}\tbackup={backup_dir}')
+                    else:
+                        print(f'WOULD_KEEP_BOTH\t{name}')
+                    counts['kept_both'] += 1
+                else:
+                    reason = 'pending' if pending else ('initial' if previous is None else 'both_changed')
+                    if not args.dry_run:
+                        next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes, reason)
+                    print(f'CONFLICT\t{name}\t两侧内容不同，等待选择版本')
+                    counts['conflicts'] += 1
                 continue
 
             upload = args.direction == 'upload' or (args.direction == 'merge' and local_changed)
@@ -217,16 +292,6 @@ def sync_files(args, local, cloud, files, conflicts):
     return 2 if counts['conflicts'] or counts['failed'] else 0
 
 
-def backup_original(source, destination, expected_hash):
-    if destination.exists():
-        if digest(destination) != expected_hash:
-            raise OSError(f'备份文件与预期不同：{destination}')
-        return
-    copy_atomic(source, destination, signature(source), None)
-    if digest(destination) != expected_hash:
-        raise OSError(f'备份文件校验失败：{destination}')
-
-
 def resolve_conflict(args, local, cloud, files, conflicts):
     name = args.resolve
     if name not in conflicts:
@@ -242,18 +307,9 @@ def resolve_conflict(args, local, cloud, files, conflicts):
     if hashes != (record['localHash'], record['cloudHash']):
         raise OSError('冲突文件内容在列出后发生变化；请先重新同步')
 
-    key = hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]
-    version = hashes[0][:12] + '-' + hashes[1][:12]
-    backup_dir = args.state.parent / (args.state.stem + '-conflict-backups') / key / version
-    suffix = local_file.suffix
-    local_backup = backup_dir / ('local' + suffix)
-    cloud_backup = backup_dir / ('cloud' + suffix)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_original(local_file, local_backup, hashes[0])
-    backup_original(cloud_file, cloud_backup, hashes[1])
-
-    if checked_digests(local_file, cloud_file, local_sig, cloud_sig) != hashes:
-        raise OSError('备份期间文件发生变化；请重新同步')
+    backups = backup_pair(args.state, name, local_file, cloud_file,
+                          local_sig, cloud_sig, hashes)
+    backup_dir, local_backup, cloud_backup = backups
 
     next_files = dict(files)
     next_conflicts = dict(conflicts)
@@ -263,23 +319,10 @@ def resolve_conflict(args, local, cloud, files, conflicts):
     elif args.choice == 'cloud':
         copy_atomic(cloud_backup, local_file, signature(cloud_backup), local_sig)
     else:
-        relative = Path(name)
-        sidecar_name = str(relative.with_name(
-            relative.stem + ' (cloud conflict ' + hashes[1][:12] + ')' + relative.suffix))
-        local_sidecar = safe_path(local, sidecar_name)
-        cloud_sidecar = safe_path(cloud, sidecar_name)
-        for target in (cloud_sidecar, local_sidecar):
-            if signature(target) is not None and digest(target) != hashes[1]:
-                raise OSError(f'冲突副本名称已被其他文件占用：{target}')
-        for target in (cloud_sidecar, local_sidecar):
-            existing = signature(target)
-            if existing is None:
-                copy_atomic(cloud_backup, target, signature(cloud_backup), None)
-        if checked_digests(local_file, cloud_file, local_sig, cloud_sig) != hashes:
-            raise OSError('创建冲突副本期间原文件发生变化；请重新同步')
-        copy_atomic(local_backup, cloud_file, signature(local_backup), cloud_sig)
-        next_files[sidecar_name] = {'local': signature(local_sidecar),
-                                    'cloud': signature(cloud_sidecar)}
+        sidecar_name, _ = preserve_both(args.state, local, cloud, name,
+                                        local_sig, cloud_sig, hashes, backups=backups)
+        next_files[sidecar_name] = {'local': signature(local / sidecar_name),
+                                    'cloud': signature(cloud / sidecar_name)}
 
     next_files[name] = {'local': signature(local_file), 'cloud': signature(cloud_file)}
     next_conflicts.pop(name)
@@ -295,6 +338,7 @@ def main():
     parser.add_argument('cloud', type=Path)
     parser.add_argument('state', type=Path)
     parser.add_argument('--direction', choices=('merge', 'upload', 'download'), default='merge')
+    parser.add_argument('--conflict-policy', choices=('keep-both', 'ask'), default='keep-both')
     parser.add_argument('--exclude-latex', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--resolve', metavar='RELATIVE_PATH')

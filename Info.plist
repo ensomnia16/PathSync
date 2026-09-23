@@ -8,8 +8,8 @@
     <key>CFBundleExecutable</key><string>ResearchSync</string>
     <key>CFBundleIconFile</key><string>ResearchSync.icns</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.5.1</string>
-    <key>CFBundleVersion</key><string>8</string>
+    <key>CFBundleShortVersionString</key><string>2.6.0</string>
+    <key>CFBundleVersion</key><string>9</string>
     <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
     <key>NSHumanReadableCopyright</key><string>© 2026 ensomnia16</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
