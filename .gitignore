@@ -1,0 +1,5 @@
+.build/
+.DS_Store
+*.app/
+*.zip
+__pycache__/
