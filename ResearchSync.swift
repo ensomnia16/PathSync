@@ -199,7 +199,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
     guard process.terminationStatus == 0 else {
         let summary = result.split(separator: "\n").last.map(String.init) ?? "退出码 \(process.terminationStatus)"
-        throw NSError(domain: appID, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」未完全成功：\(summary)。详情见日志。"])
+        throw NSError(domain: appID, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」未完全成功：\(summary)。详情见同步记录。"])
     }
     return result
 }
@@ -304,11 +304,14 @@ final class SyncModel: ObservableObject {
     @Published var statusDetail: String?
     @Published var busy = false
     @Published var conflictsByPair: [UUID: [PendingConflict]] = [:]
+    @Published var history: [SyncHistoryRecord] = []
+    @Published var historyError: String?
 
     init() {
         config = (try? loadConfig()) ?? SyncConfig()
         selectedID = config.pairs.first?.id
         refreshConflicts()
+        refreshHistory()
     }
 
     var selectedIndex: Int? { config.pairs.firstIndex { $0.id == selectedID } }
@@ -318,6 +321,20 @@ final class SyncModel: ObservableObject {
         return conflictsByPair[selectedID] ?? []
     }
     var conflictCount: Int { conflictsByPair.values.reduce(0) { $0 + $1.count } }
+
+    func refreshHistory() {
+        do {
+            history = try readSyncHistory(at: logPath).filter { record in
+                config.pairs.contains { pair in
+                    (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
+                    || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+                }
+            }
+            historyError = nil
+        } catch {
+            historyError = uiError(error, language: config.language)
+        }
+    }
 
     func refreshConflicts() {
         var updated: [UUID: [PendingConflict]] = [:]
@@ -412,6 +429,7 @@ final class SyncModel: ObservableObject {
                 self.statusDetail = resultDetail
                 self.busy = false
                 self.refreshConflicts()
+                self.refreshHistory()
             }
         }
     }

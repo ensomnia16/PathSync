@@ -24,6 +24,7 @@ struct ContentView: View {
     private var pageTitle: String {
         switch model.page {
         case "about": return t("about")
+        case "history": return t("history")
         case "pair": return model.selectedPair?.name.isEmpty == false ? model.selectedPair!.name : t("unnamed")
         default: return t("schedule")
         }
@@ -63,6 +64,8 @@ struct ContentView: View {
                     }
                 }
                 Section {
+                    Label(t("history"), systemImage: "clock.arrow.circlepath")
+                        .tag("history")
                     Label(t("about"), systemImage: "info.circle")
                         .tag("about")
                 }
@@ -85,10 +88,6 @@ struct ContentView: View {
                             }
                             .help(t("removeFolder"))
                         }
-                        Button { NSWorkspace.shared.open(URL(fileURLWithPath: logPath)) } label: {
-                            Label(t("log"), systemImage: "doc.text")
-                        }
-                        .help(t("log"))
                     }
                     ToolbarItem(placement: .automatic) {
                         Button { model.save() } label: {
@@ -103,16 +102,23 @@ struct ContentView: View {
         .environment(\.locale, model.config.language == "system" ? .current : Locale(identifier: model.config.language))
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshConflicts()
+            model.refreshHistory()
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             model.refreshConflicts()
+            model.refreshHistory()
         }
     }
 
     private var detail: some View {
         VStack(spacing: 0) {
-            if model.page != "about" { syncActionBar }
+            if model.page == "schedule" || model.page == "pair" { syncActionBar }
             if model.page == "schedule" { scheduleForm }
+            else if model.page == "history" {
+                HistoryPage(records: model.history, pairs: model.config.pairs,
+                            language: model.config.language, error: model.historyError,
+                            refresh: model.refreshHistory)
+            }
             else if model.page == "about" { aboutForm }
             else if let index = model.selectedIndex { pairForm(index) }
             else {

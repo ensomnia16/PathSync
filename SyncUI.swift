@@ -9,9 +9,40 @@ private let translations: [String: (zh: String, en: String)] = [
     "addFolder": ("添加路径", "Add folder"),
     "removeFolder": ("移除路径", "Remove folder"),
     "about": ("关于", "About"),
+    "history": ("同步记录", "History"),
     "unnamed": ("未命名路径", "Unnamed folder"),
     "disabled": ("未启用", "Disabled"),
-    "log": ("打开日志", "Open log"),
+    "log": ("查看原始日志", "Open raw log"),
+    "historyTitle": ("最近的同步", "Recent syncs"),
+    "historyCount": ("共 %d 条记录 · 当前显示 %d 条", "%d records · showing %d"),
+    "historyRefresh": ("刷新", "Refresh"),
+    "historyFolderFilter": ("路径", "Folder"),
+    "historyResultFilter": ("结果", "Result"),
+    "historyAllFolders": ("全部路径", "All folders"),
+    "historyAllResults": ("全部结果", "All results"),
+    "historyWithChanges": ("有变更", "With changes"),
+    "historyCompleted": ("已完成", "Completed"),
+    "historyPreview": ("预览", "Preview"),
+    "historyAttention": ("当时有问题", "Issues at the time"),
+    "historyFailed": ("未完成", "Incomplete"),
+    "historyInterrupted": ("记录中断", "Interrupted"),
+    "historyDirection": ("同步方向", "Direction"),
+    "historyResult": ("本次结果", "This run"),
+    "historyUploaded": ("上传", "Uploaded"),
+    "historyDownloaded": ("下载", "Downloaded"),
+    "historyCopied": ("已复制", "Copied"),
+    "historyKeptBoth": ("保留两份", "Kept both"),
+    "historyWouldKeepBoth": ("计划保留两份", "Would keep both"),
+    "historyConflicts": ("冲突", "Conflicts"),
+    "historyFailures": ("失败", "Failed"),
+    "historyNoChanges": ("没有文件变更", "No file changes"),
+    "historyNoSummary": ("未取得文件统计", "File counts unavailable"),
+    "historyNoFileDetails": ("没有需要逐文件处理的冲突或错误。", "No per-file conflicts or errors were recorded."),
+    "historyCopy": ("冲突副本：", "Conflict copy:"),
+    "historyEmpty": ("还没有这几组路径的同步记录。", "No sync records for these folders yet."),
+    "historyFilterEmpty": ("没有符合筛选条件的记录。", "No records match these filters."),
+    "historyLogHint": ("原始日志仅用于排查问题", "Raw log for troubleshooting"),
+    "historyHistoricalHint": ("记录显示当时的结果；当前冲突请查看对应路径。", "Records show the result at the time. Check each folder for current conflicts."),
     "save": ("保存设置", "Save settings"),
     "syncNow": ("立即同步", "Sync now"),
     "syncAllNow": ("同步全部路径", "Sync all folders"),
@@ -103,7 +134,7 @@ func uiText(_ key: String, language: String) -> String {
 func uiError(_ error: Error, language: String) -> String {
     guard usesEnglish(language) else { return error.localizedDescription }
     let value = error as NSError
-    guard value.domain == "com.ensom.ResearchSync" else { return "The operation failed. Open the log for details." }
+    guard value.domain == "com.ensom.ResearchSync" else { return "The operation failed. Check History for details." }
     switch value.code {
     case 1: return "Choose both local and cloud folders for this pair."
     case 2: return "The local folder does not exist. Check its path."
@@ -111,10 +142,10 @@ func uiError(_ error: Error, language: String) -> String {
     case 4: return "A folder pair cannot use the same directory or nested directories."
     case 6: return "Another sync is already running."
     case 7: return "There are no folders to sync."
-    case 8: return "Some folders need attention. Review pending conflicts or open the log."
+    case 8: return "Some folders need attention. Review pending conflicts or History."
     case 9: return "Enable at least one folder before turning on scheduled sync."
     case 10: return "The folder paths no longer match their conflict records. Check this pair's paths."
-    case 12: return "The conflict could not be resolved. Sync again if a file changed, then open the log for details."
-    default: return "The operation did not complete. Open the log for details."
+    case 12: return "The conflict could not be resolved. Sync again if a file changed, then check History."
+    default: return "The operation did not complete. Check History for details."
     }
 }
