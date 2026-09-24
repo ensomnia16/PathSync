@@ -297,13 +297,30 @@ struct ContentView: View {
                     ForEach(model.selectedConflicts) { conflict in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(conflict.name).font(.body).textSelection(.enabled)
-                            if let sidecar = conflict.sidecar {
+                            if conflict.isTree {
+                                Label(t("directoryConflict"), systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.caption)
+                                HStack {
+                                    Button(t("viewLocal")) {
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: model.config.pairs[index].localPath))
+                                    }
+                                    Button(t("viewCloud")) {
+                                        NSWorkspace.shared.open(URL(fileURLWithPath: model.config.pairs[index].cloudPath))
+                                    }
+                                }
+                                .controlSize(.small)
+                            } else if let sidecar = conflict.sidecar {
                                 Label(t("reviewOutstanding"), systemImage: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.orange)
                                     .font(.caption)
                                 Text("\(t("reviewCopy")) \(sidecar)")
                                     .font(.caption).foregroundStyle(.secondary)
                                     .textSelection(.enabled)
+                                if conflict.blockedByTree != nil {
+                                    Text(t("childBlockedByTree"))
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
                                 HStack {
                                     Button(t("viewMainFile")) {
                                         NSWorkspace.shared.activateFileViewerSelecting([
@@ -319,9 +336,9 @@ struct ContentView: View {
                                     }
                                     Spacer()
                                     Button(t("chooseNewest")) { model.chooseNewestForReview(conflict.name) }
-                                        .disabled(model.busy)
+                                        .disabled(model.busy || conflict.blockedByTree != nil)
                                     Button(t("confirmReviewed")) { model.acknowledgeConflict(conflict.name) }
-                                        .disabled(model.busy)
+                                        .disabled(model.busy || conflict.blockedByTree != nil)
                                 }
                                 .controlSize(.small)
                             } else {
@@ -329,6 +346,10 @@ struct ContentView: View {
                                      ? t("deleteEditConflict")
                                      : "\(t("local")) \(ByteCountFormatter.string(fromByteCount: conflict.localBytes, countStyle: .file)) · \(t("cloud")) \(ByteCountFormatter.string(fromByteCount: conflict.cloudBytes, countStyle: .file))")
                                     .font(.caption).foregroundStyle(.secondary)
+                                if conflict.blockedByTree != nil {
+                                    Text(t("childBlockedByTree"))
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
                                 HStack {
                                     Button(t("viewLocal")) {
                                         NSWorkspace.shared.activateFileViewerSelecting([
@@ -357,7 +378,7 @@ struct ContentView: View {
                                             Button(t("keepBoth")) { model.resolveConflict(conflict.name, choice: "both") }
                                         }
                                     }
-                                    .disabled(model.busy)
+                                    .disabled(model.busy || conflict.blockedByTree != nil)
                                 }
                                 .controlSize(.small)
                             }

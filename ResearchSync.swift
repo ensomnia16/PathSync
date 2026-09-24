@@ -150,6 +150,8 @@ struct PendingConflict: Identifiable {
     let sidecar: String?
     let localMissing: Bool
     let cloudMissing: Bool
+    let isTree: Bool
+    let blockedByTree: String?
     var id: String { name }
     var isReview: Bool { sidecar != nil }
 }
@@ -159,6 +161,7 @@ private struct StoredConflict: Decodable {
     let cloud: [Int64]?
     let status: String?
     let sidecar: String?
+    let kind: String?
 }
 
 private struct ConflictState: Decodable {
@@ -176,11 +179,15 @@ func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
     guard state.local == local, state.cloud == cloud else {
         throw NSError(domain: appID, code: 10, userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」的路径与冲突记录不一致。请检查路径配置。"])
     }
-    return (state.conflicts ?? [:]).map { name, record in
+    let records = state.conflicts ?? [:]
+    let treeNames = records.compactMap { name, record in record.kind == "tree" ? name : nil }
+    return records.map { name, record in
         PendingConflict(name: name, localBytes: record.local?.first ?? 0,
                         cloudBytes: record.cloud?.first ?? 0,
                         sidecar: record.status == "preserved" ? record.sidecar : nil,
-                        localMissing: record.local == nil, cloudMissing: record.cloud == nil)
+                        localMissing: record.local == nil, cloudMissing: record.cloud == nil,
+                        isTree: record.kind == "tree",
+                        blockedByTree: treeNames.first { name.hasPrefix($0 + "/") })
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 }
 
@@ -238,7 +245,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
 
 func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
                             retentionDays: Int = 15) throws -> String {
-    guard ["local", "cloud", "both"].contains(choice) else {
+    guard ["local", "cloud", "both", "newest"].contains(choice) else {
         throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "无效的冲突处理方式。"])
     }
     return try withSyncLock {

@@ -11,6 +11,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
 - Conflicts are measured against the last common content anchor. When both sides changed, you may also choose the version with the later absolute modification time; equal timestamps pause for manual review.
 - Deletion propagation is optional and off by default. Deletes and edits are compared with the same last common anchor. A one-sided change may propagate; a concurrent edit and delete remains a conflict. The remaining file is backed up before this tool deletes it.
+- If one side deletes a previously synced folder while the other changes files inside it, the whole subtree pauses. Make the two folders agree manually and refresh conflicts; unrelated files continue syncing.
 - Every actual overwrite or propagated deletion has a verified local backup with a Restore button in History. Backups default to 15 days and are cleaned on a later sync; the retention period is configurable.
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
 - LaTeX build files, virtual environments, and common caches can be excluded.

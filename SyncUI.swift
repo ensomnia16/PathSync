@@ -135,6 +135,8 @@ private let translations: [String: (zh: String, en: String)] = [
     "useCloud": ("采用云端版本", "Use cloud version"),
     "keepDeletion": ("保留删除", "Keep deletion"),
     "deleteEditConflict": ("一侧删除、另一侧编辑；请选择保留文件或删除。", "One side deleted and the other edited; choose whether to keep the file or deletion."),
+    "directoryConflict": ("一侧删除了目录，另一侧修改了内部文件。整个目录已暂停同步。请检查两侧并手动使其一致，或都删除，再刷新冲突列表。", "One side deleted this folder while the other changed a file inside it. Sync is paused for the whole folder. Make both folders agree, or delete both, then refresh conflicts."),
+    "childBlockedByTree": ("上级目录仍有冲突；请先整体处理该目录。", "The parent folder has a conflict. Resolve the folder as a whole first."),
     "keepBoth": ("保留两份（仍待合并）", "Keep both (review still needed)"),
     "conflictHint": ("保留两份后，请检查另一版本并自行合并，或确认无需合并，再点“确认已处理”。其他文件会照常同步；副本和备份不会删除。", "After preserving both versions, inspect and merge the other version or decide to keep them separate, then mark it reviewed. Other files continue syncing; copies and backups remain."),
     "usingSchedule": ("使用默认计划", "Uses default schedule"),

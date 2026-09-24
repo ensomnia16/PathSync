@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 import unittest
 
@@ -550,6 +551,144 @@ class MergeTests(unittest.TestCase):
         result = self.run_merge('--propagate-deletions')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex']['anchorHash'], None)
+
+    def test_directory_delete_and_child_edit_blocks_entire_subtree(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'edited.tex').write_text('base edit')
+        (chapter / 'sibling.tex').write_text('base sibling')
+        (self.local / 'unrelated.tex').write_text('first')
+        self.assertEqual(self.run_merge().returncode, 0)
+        state_before = json.loads(self.state.read_text())
+        shutil.rmtree(chapter)
+        (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
+        (self.local / 'unrelated.tex').write_text('second')
+
+        for _ in range(2):
+            result = self.run_merge('--propagate-deletions', policy='newest')
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('CONFLICT\tchapter\t目录删除与内部修改', result.stdout)
+            self.assertFalse(chapter.exists())
+            self.assertEqual((self.cloud / 'chapter' / 'edited.tex').read_text(), 'cloud edit')
+            self.assertEqual((self.cloud / 'chapter' / 'sibling.tex').read_text(), 'base sibling')
+            state = json.loads(self.state.read_text())
+            self.assertEqual(state['conflicts']['chapter']['kind'], 'tree')
+            self.assertEqual(state['conflicts']['chapter']['deletedSide'], 'local')
+            for name in ('chapter/edited.tex', 'chapter/sibling.tex'):
+                self.assertEqual(state['files'][name]['anchorHash'],
+                                 state_before['files'][name]['anchorHash'])
+        self.assertEqual((self.cloud / 'unrelated.tex').read_text(), 'second')
+        (self.cloud / 'chapter' / 'sibling.tex').write_text('later cloud edit')
+        later = self.run_merge('--propagate-deletions')
+        self.assertEqual(later.returncode, 2, later.stdout + later.stderr)
+        self.assertFalse(chapter.exists())
+        self.assertEqual((self.cloud / 'chapter' / 'sibling.tex').read_text(), 'later cloud edit')
+
+    def test_directory_conflict_clears_after_manual_tree_merge(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'edited.tex').write_text('base')
+        (chapter / 'sibling.tex').write_text('sibling')
+        self.assertEqual(self.run_merge().returncode, 0)
+        shutil.rmtree(chapter)
+        (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        shutil.copytree(self.cloud / 'chapter', chapter)
+        result = self.run_merge('--propagate-deletions')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('chapter', json.loads(self.state.read_text())['conflicts'])
+        self.assertEqual(json.loads(self.state.read_text())['files']['chapter/edited.tex']['anchorHash'],
+                         hashlib.sha256(b'cloud edit').hexdigest())
+
+    def test_directory_conflict_clears_when_edit_is_reverted(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'edited.tex').write_text('base')
+        (chapter / 'sibling.tex').write_text('sibling')
+        self.assertEqual(self.run_merge().returncode, 0)
+        shutil.rmtree(chapter)
+        (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        (self.cloud / 'chapter' / 'edited.tex').write_text('base')
+        result = self.run_merge('--propagate-deletions')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('chapter', json.loads(self.state.read_text())['conflicts'])
+        self.assertFalse((self.cloud / 'chapter' / 'edited.tex').exists())
+        self.assertFalse((self.cloud / 'chapter' / 'sibling.tex').exists())
+
+    def test_directory_conflict_rejects_file_level_resolution(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'edited.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        shutil.rmtree(chapter)
+        (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'local')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('目录级冲突', result.stderr)
+        self.assertEqual((self.cloud / 'chapter' / 'edited.tex').read_text(), 'cloud edit')
+
+    def test_cloud_directory_delete_and_local_new_child_blocks_subtree(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'old.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        shutil.rmtree(self.cloud / 'chapter')
+        (chapter / 'new.tex').write_text('new local file')
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertFalse((self.cloud / 'chapter').exists())
+        self.assertEqual((chapter / 'old.tex').read_text(), 'anchor')
+        self.assertEqual((chapter / 'new.tex').read_text(), 'new local file')
+        record = json.loads(self.state.read_text())['conflicts']['chapter']
+        self.assertEqual(record['kind'], 'tree')
+        self.assertEqual(record['deletedSide'], 'cloud')
+
+    def test_new_empty_subdirectory_is_treated_as_tree_change(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'old.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        shutil.rmtree(chapter)
+        (self.cloud / 'chapter' / 'new-empty-folder').mkdir()
+        result = self.run_merge('--propagate-deletions')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('CONFLICT\tchapter', result.stdout)
+        self.assertEqual((self.cloud / 'chapter' / 'old.tex').read_text(), 'anchor')
+
+    def test_directory_delete_with_legacy_unknown_anchor_is_conservative(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'edited.tex').write_text('base')
+        (chapter / 'sibling.tex').write_text('sibling')
+        self.assertEqual(self.run_merge().returncode, 0)
+        state = json.loads(self.state.read_text())
+        for name in ('chapter/edited.tex', 'chapter/sibling.tex'):
+            state['files'][name].pop('anchorHash')
+        self.state.write_text(json.dumps(state))
+        shutil.rmtree(chapter)
+        (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
+        result = self.run_merge('--propagate-deletions')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('CONFLICT\tchapter', result.stdout)
+        self.assertEqual((self.cloud / 'chapter' / 'sibling.tex').read_text(), 'sibling')
+
+    def test_existing_child_conflict_cannot_bypass_tree_barrier(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'edited.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (chapter / 'edited.tex').write_text('local edit')
+        (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge().returncode, 2)
+        shutil.rmtree(chapter)
+        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        result = self.run_merge('--resolve', 'chapter/edited.tex', '--choice', 'cloud')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('上级目录', result.stderr)
+        self.assertFalse(chapter.exists())
+        self.assertEqual((self.cloud / 'chapter' / 'edited.tex').read_text(), 'cloud edit')
 
     def test_interrupted_keep_both_recovery_preserves_review(self):
         (self.local / 'paper.tex').write_text('base')

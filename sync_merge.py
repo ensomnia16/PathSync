@@ -29,6 +29,12 @@ def clear_pending(conflicts, name):
         conflicts.pop(name)
 
 
+def ensure_no_tree_barrier(name, conflicts):
+    for directory, record in conflicts.items():
+        if record.get('kind') == 'tree' and within_directory(name, directory):
+            raise ValueError(f'上级目录「{directory}」仍有目录级冲突；请先整体核对目录')
+
+
 def preserved_record(original, sidecar, primary):
     return {**original, 'status': 'preserved', 'sidecar': sidecar,
             'primary': primary, 'preservedAt': datetime.now(timezone.utc).isoformat()}
@@ -126,6 +132,71 @@ def scan(root, exclude_latex, errors):
             if not path.is_symlink():
                 found.add(path.relative_to(root).as_posix())
     return found
+
+
+def ancestor_directories(name):
+    parts = Path(name).parts
+    return ('/'.join(parts[:index]) for index in range(1, len(parts)))
+
+
+def within_directory(name, directory):
+    return name.startswith(directory + '/')
+
+
+def directory_snapshot(root, name, exclude_latex):
+    """Read the tracked subtree, including empty directories, or confirm absence."""
+    path = safe_path(root, name)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f'目录被其他类型的项目替代：{path}')
+    found_files = {}
+    found_dirs = {name}
+
+    def walk_error(error):
+        raise error
+
+    for current, dirs, files in os.walk(path, onerror=walk_error):
+        kept_dirs = []
+        for child in dirs:
+            child_path = Path(current) / child
+            if child in ALWAYS_EXCLUDE_DIRS or (
+                    exclude_latex and any(child.startswith(prefix)
+                                          for prefix in LATEX_EXCLUDE_DIRS)):
+                continue
+            if child_path.is_symlink():
+                continue
+            kept_dirs.append(child)
+            found_dirs.add(child_path.relative_to(root).as_posix())
+        dirs[:] = kept_dirs
+        for child in files:
+            if excluded(child, exclude_latex):
+                continue
+            child_path = Path(current) / child
+            if child_path.is_symlink():
+                continue
+            before = signature(child_path)
+            content_hash = digest(child_path)
+            if signature(child_path) != before:
+                raise OSError(f'读取目录期间文件发生变化：{child_path}')
+            found_files[child_path.relative_to(root).as_posix()] = content_hash
+    return {'files': found_files, 'dirs': found_dirs}
+
+
+def anchor_directory_snapshot(directory, files):
+    anchored_files = {
+        name: (record.get('anchorHash') or '<unknown-anchor>')
+        for name, record in files.items()
+        if within_directory(name, directory)
+        and (record.get('anchorHash') is not None
+             or record.get('local') is not None or record.get('cloud') is not None)}
+    anchored_dirs = {directory}
+    for name in anchored_files:
+        anchored_dirs.update(parent for parent in ancestor_directories(name)
+                             if parent == directory or within_directory(parent, directory))
+    return {'files': anchored_files, 'dirs': anchored_dirs}
 
 
 def copy_atomic(source, destination, source_sig, destination_sig,
@@ -376,7 +447,91 @@ def sync_files(args, local, cloud, files, conflicts):
                 'localCtime': change_time(safe_path(local, path_name)),
                 'cloudCtime': change_time(safe_path(cloud, path_name))}
 
+    tree_record_names = {name for name, record in conflicts.items()
+                         if record.get('kind') == 'tree'}
+    blocked_directories = set()
+
+    def blocked(name):
+        return any(name == directory or within_directory(name, directory)
+                   for directory in blocked_directories)
+
+    # A deletion of a parent and an edit below it is one tree conflict. Resolve
+    # existing barriers first, then detect new ones before touching any child.
+    for directory in sorted(tree_record_names, key=lambda item: (item.count('/'), item)):
+        if blocked(directory):
+            continue
+        record = conflicts[directory]
+        try:
+            left = directory_snapshot(local, directory, args.exclude_latex)
+            right = directory_snapshot(cloud, directory, args.exclude_latex)
+            anchor_tree = anchor_directory_snapshot(directory, files)
+            reverted_edit = ((left is None and right == anchor_tree
+                              and record.get('deletedSide') == 'local') or
+                             (right is None and left == anchor_tree
+                              and record.get('deletedSide') == 'cloud'))
+            if left == right or reverted_edit:
+                if not args.dry_run:
+                    next_conflicts.pop(directory, None)
+                continue
+            blocked_directories.add(directory)
+            print(f'CONFLICT\t{directory}\t目录删除与内部修改尚未解决，已暂停整个目录')
+            counts['conflicts'] += 1
+        except (OSError, ValueError) as error:
+            blocked_directories.add(directory)
+            print(f'FAILED\t{directory}\t无法核验目录冲突：{error}')
+            counts['failed'] += 1
+
+    anchored_directories = {directory for name, record in files.items()
+                            if (record.get('anchorHash') is not None
+                                or record.get('local') is not None
+                                or record.get('cloud') is not None)
+                            for directory in ancestor_directories(name)}
+    for directory in sorted(anchored_directories, key=lambda item: (item.count('/'), item)):
+        if directory in tree_record_names or blocked(directory) or errors:
+            continue
+        try:
+            left_path = safe_path(local, directory)
+            right_path = safe_path(cloud, directory)
+
+            def directory_exists(path):
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    return False
+                if not stat.S_ISDIR(info.st_mode):
+                    raise OSError(f'目录被其他类型的项目替代：{path}')
+                return True
+
+            left_exists = directory_exists(left_path)
+            right_exists = directory_exists(right_path)
+            if left_exists == right_exists:
+                continue
+            deleted_side = 'cloud' if left_exists else 'local'
+            surviving_root = local if left_exists else cloud
+            surviving = directory_snapshot(surviving_root, directory, args.exclude_latex)
+            if surviving == anchor_directory_snapshot(directory, files):
+                continue
+            blocked_directories.add(directory)
+            tree_record_names.add(directory)
+            if not args.dry_run:
+                next_conflicts[directory] = {
+                    'kind': 'tree', 'reason': 'directory_delete_edit',
+                    'deletedSide': deleted_side,
+                    'local': None, 'cloud': None,
+                    'detectedAt': datetime.now(timezone.utc).isoformat()}
+            print(f'CONFLICT\t{directory}\t目录删除与内部修改冲突，已暂停整个目录')
+            counts['conflicts'] += 1
+        except (OSError, ValueError) as error:
+            blocked_directories.add(directory)
+            print(f'FAILED\t{directory}\t无法核验目录状态：{error}')
+            counts['failed'] += 1
+
     for name in sorted(names):
+        if name in tree_record_names:
+            continue
+        if blocked(name):
+            counts['skipped'] += 1
+            continue
         try:
             local_file = safe_path(local, name)
             cloud_file = safe_path(cloud, name)
@@ -596,9 +751,12 @@ def sync_files(args, local, cloud, files, conflicts):
 
 def resolve_conflict(args, local, cloud, files, conflicts):
     name = args.resolve
+    ensure_no_tree_barrier(name, conflicts)
     if name not in conflicts:
         raise ValueError(f'没有待处理冲突：{name}')
     record = conflicts[name]
+    if record.get('kind') == 'tree':
+        raise ValueError('这是目录级冲突；请先在文件管理器中核对整个目录，使两侧内容一致或都删除，随后重新同步')
     if is_review(record):
         raise ValueError('两个版本已经保留，仍待人工合并或确认；请使用 --acknowledge')
     local_file = safe_path(local, name)
@@ -678,6 +836,7 @@ def resolve_conflict(args, local, cloud, files, conflicts):
 
 def resolve_review_newest(args, local, cloud, files, conflicts):
     name = args.review_newest
+    ensure_no_tree_barrier(name, conflicts)
     record = conflicts.get(name)
     if record is None or not is_review(record):
         raise ValueError(f'没有待确认的已保留版本：{name}')
@@ -717,6 +876,7 @@ def resolve_review_newest(args, local, cloud, files, conflicts):
 
 def acknowledge_review(args, local, cloud, files, conflicts):
     name = args.acknowledge
+    ensure_no_tree_barrier(name, conflicts)
     record = conflicts.get(name)
     if record is None or not is_review(record):
         raise ValueError(f'没有待确认的已保留版本：{name}')
