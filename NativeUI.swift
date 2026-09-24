@@ -288,30 +288,57 @@ struct ContentView: View {
                     ForEach(model.selectedConflicts) { conflict in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(conflict.name).font(.body).textSelection(.enabled)
-                            Text("\(t("local")) \(ByteCountFormatter.string(fromByteCount: conflict.localBytes, countStyle: .file)) · \(t("cloud")) \(ByteCountFormatter.string(fromByteCount: conflict.cloudBytes, countStyle: .file))")
-                                .font(.caption).foregroundStyle(.secondary)
-                            HStack {
-                                Button(t("viewLocal")) {
-                                    NSWorkspace.shared.activateFileViewerSelecting([
-                                        URL(fileURLWithPath: model.config.pairs[index].localPath)
-                                            .appendingPathComponent(conflict.name)
-                                    ])
+                            if let sidecar = conflict.sidecar {
+                                Label(t("reviewOutstanding"), systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.caption)
+                                Text("\(t("reviewCopy")) \(sidecar)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                HStack {
+                                    Button(t("viewMainFile")) {
+                                        NSWorkspace.shared.activateFileViewerSelecting([
+                                            URL(fileURLWithPath: model.config.pairs[index].localPath)
+                                                .appendingPathComponent(conflict.name)
+                                        ])
+                                    }
+                                    Button(t("viewReviewCopy")) {
+                                        NSWorkspace.shared.activateFileViewerSelecting([
+                                            URL(fileURLWithPath: model.config.pairs[index].localPath)
+                                                .appendingPathComponent(sidecar)
+                                        ])
+                                    }
+                                    Spacer()
+                                    Button(t("confirmReviewed")) { model.acknowledgeConflict(conflict.name) }
+                                        .disabled(model.busy)
                                 }
-                                Button(t("viewCloud")) {
-                                    NSWorkspace.shared.activateFileViewerSelecting([
-                                        URL(fileURLWithPath: model.config.pairs[index].cloudPath)
-                                            .appendingPathComponent(conflict.name)
-                                    ])
+                                .controlSize(.small)
+                            } else {
+                                Text("\(t("local")) \(ByteCountFormatter.string(fromByteCount: conflict.localBytes, countStyle: .file)) · \(t("cloud")) \(ByteCountFormatter.string(fromByteCount: conflict.cloudBytes, countStyle: .file))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                HStack {
+                                    Button(t("viewLocal")) {
+                                        NSWorkspace.shared.activateFileViewerSelecting([
+                                            URL(fileURLWithPath: model.config.pairs[index].localPath)
+                                                .appendingPathComponent(conflict.name)
+                                        ])
+                                    }
+                                    Button(t("viewCloud")) {
+                                        NSWorkspace.shared.activateFileViewerSelecting([
+                                            URL(fileURLWithPath: model.config.pairs[index].cloudPath)
+                                                .appendingPathComponent(conflict.name)
+                                        ])
+                                    }
+                                    Spacer()
+                                    Menu(t("resolve")) {
+                                        Button(t("useLocal")) { model.resolveConflict(conflict.name, choice: "local") }
+                                        Button(t("useCloud")) { model.resolveConflict(conflict.name, choice: "cloud") }
+                                        Button(t("keepBoth")) { model.resolveConflict(conflict.name, choice: "both") }
+                                    }
+                                    .disabled(model.busy)
                                 }
-                                Spacer()
-                                Menu(t("resolve")) {
-                                    Button(t("useLocal")) { model.resolveConflict(conflict.name, choice: "local") }
-                                    Button(t("useCloud")) { model.resolveConflict(conflict.name, choice: "cloud") }
-                                    Button(t("keepBoth")) { model.resolveConflict(conflict.name, choice: "both") }
-                                }
-                                .disabled(model.busy)
+                                .controlSize(.small)
                             }
-                            .controlSize(.small)
                         }
                         .padding(.vertical, 4)
                     }

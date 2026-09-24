@@ -51,6 +51,10 @@ struct HistoryPage: View {
     private func resultText(_ record: SyncHistoryRecord) -> String {
         if record.finishedAt == nil { return t("historyInterrupted") }
         if record.hasFailures { return t("historyFailed") }
+        if record.counts["reviews", default: 0] > 0
+            || (!record.isPreview && record.counts["kept_both", default: 0] > 0) {
+            return t("historyReview")
+        }
         if record.needsAttention { return t("historyAttention") }
         return record.isPreview ? t("historyPreview") : t("historyCompleted")
     }
@@ -77,14 +81,16 @@ struct HistoryPage: View {
             ("historyUploaded", uploaded),
             ("historyDownloaded", downloaded),
             ("historyCopied", record.direction == "双向合并" ? copied : 0),
-            ("historyKeptBoth", record.counts["kept_both", default: 0]),
+            (record.isPreview ? "historyWouldKeepBoth" : "historyKeptBoth",
+             record.counts["kept_both", default: 0]),
+            ("historyReviews", record.counts["reviews", default: 0]),
             ("historyConflicts", record.counts["conflicts", default: 0]),
             ("historyFailures", record.counts["failed", default: 0])
         ]
         let parts = values.filter { $0.1 > 0 }.map { "\(t($0.0)) \($0.1)" }
         if !parts.isEmpty { return parts.joined(separator: " · ") }
         let hasCounts = ["uploaded", "downloaded", "copied", "unchanged", "skipped",
-                         "kept_both", "conflicts", "failed"].contains { record.counts[$0] != nil }
+                         "kept_both", "reviews", "conflicts", "failed"].contains { record.counts[$0] != nil }
         return hasCounts ? t("historyNoChanges") : t("historyNoSummary")
     }
 
@@ -92,6 +98,7 @@ struct HistoryPage: View {
         switch event.kind {
         case "KEPT_BOTH": return t("historyKeptBoth")
         case "WOULD_KEEP_BOTH": return t("historyWouldKeepBoth")
+        case "NEEDS_REVIEW": return t("historyReview")
         case "CONFLICT": return t("historyConflicts")
         default: return t("historyFailures")
         }

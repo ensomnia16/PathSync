@@ -23,7 +23,9 @@ struct SyncHistoryRecord: Identifiable {
     var events: [SyncHistoryEvent] = []
 
     var needsAttention: Bool {
-        exitCode != nil && (counts["failed", default: 0] > 0 || exitCode != 0)
+        exitCode != nil && (counts["failed", default: 0] > 0 || exitCode != 0
+            || counts["reviews", default: 0] > 0
+            || (!isPreview && counts["kept_both", default: 0] > 0))
     }
 
     var hasFailures: Bool {
@@ -31,7 +33,7 @@ struct SyncHistoryRecord: Identifiable {
     }
 
     var hasChanges: Bool {
-        ["uploaded", "downloaded", "copied", "kept_both", "conflicts", "failed"]
+        ["uploaded", "downloaded", "copied", "kept_both", "reviews", "conflicts", "failed"]
             .contains { counts[$0, default: 0] > 0 }
     }
 
@@ -52,7 +54,7 @@ struct SyncHistoryRecord: Identifiable {
             }
             let columns = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
             guard columns.count >= 2,
-                  ["FAILED", "CONFLICT", "KEPT_BOTH", "WOULD_KEEP_BOTH"].contains(columns[0]) else { continue }
+                  ["FAILED", "CONFLICT", "KEPT_BOTH", "WOULD_KEEP_BOTH", "NEEDS_REVIEW"].contains(columns[0]) else { continue }
             let copy = columns.first(where: { $0.hasPrefix("copy=") }).map { String($0.dropFirst(5)) }
             let detail = columns.dropFirst(2)
                 .filter { !$0.hasPrefix("copy=") && !$0.hasPrefix("backup=") }

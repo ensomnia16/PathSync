@@ -8,19 +8,19 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
 - Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Filter by folder or result; the raw log remains available for troubleshooting.
-- By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. You can choose to pause for a manual decision instead.
+- By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
 - Sync never propagates deletions. LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.7.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.8.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
 The interface uses native SwiftUI sidebar, form, and toolbar controls. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
 
-In two-way merge and upload, the local version remains at the original path while a labeled cloud copy appears in both folders. In download, the cloud version remains at the original path and a labeled local copy appears in both folders. Backups are stored under `~/Library/Application Support/ResearchSync/merge-state/`. Manual conflicts stay pending until resolved; if either original changes after listing, sync again before choosing a version.
+In two-way merge and upload, the local version remains at the original path while a labeled cloud copy appears in both folders. In download, the cloud version remains at the original path and a labeled local copy appears in both folders. Backups are stored under `~/Library/Application Support/ResearchSync/merge-state/`. Keeping both preserves content but does not merge it into the original file. Review the two versions and explicitly acknowledge when finished; the copy and backup remain. Manual conflicts stay pending until resolved; if either original changes after listing, sync again before choosing a version.
 
 History reads the existing `sync.log`, so older runs remain visible. It shows records for currently configured folder pairs, loading up to the last 2 MB of the log and displaying the newest 200 runs. Ordinary transfers show counts; conflicts and failures include filenames.

@@ -126,12 +126,16 @@ struct PendingConflict: Identifiable {
     let name: String
     let localBytes: Int64
     let cloudBytes: Int64
+    let sidecar: String?
     var id: String { name }
+    var isReview: Bool { sidecar != nil }
 }
 
 private struct StoredConflict: Decodable {
     let local: [Int64]
     let cloud: [Int64]
+    let status: String?
+    let sidecar: String?
 }
 
 private struct ConflictState: Decodable {
@@ -151,7 +155,8 @@ func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
     }
     return (state.conflicts ?? [:]).map { name, record in
         PendingConflict(name: name, localBytes: record.local.first ?? 0,
-                        cloudBytes: record.cloud.first ?? 0)
+                        cloudBytes: record.cloud.first ?? 0,
+                        sidecar: record.status == "preserved" ? record.sidecar : nil)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 }
 
@@ -224,6 +229,28 @@ func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String) thro
         appendLog("冲突处理 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
         guard process.terminationStatus == 0 else {
             throw NSError(domain: appID, code: 12, userInfo: [NSLocalizedDescriptionKey: "「\(name)」处理失败：\(result.trimmingCharacters(in: .whitespacesAndNewlines))"])
+        }
+        return result
+    }
+}
+
+func acknowledgePreservedConflict(_ pair: SyncPair, name: String) throws -> String {
+    try withSyncLock {
+        let (local, cloud) = try validatedPaths(pair)
+        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [helper, local, cloud, mergeStatePath(pair), "--acknowledge", name]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        appendLog("确认已保留版本 [\(pair.name)] \(name)")
+        try process.run()
+        let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        appendLog("确认结果 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: appID, code: 12, userInfo: [NSLocalizedDescriptionKey: result.trimmingCharacters(in: .whitespacesAndNewlines)])
         }
         return result
     }
@@ -418,10 +445,11 @@ final class SyncModel: ObservableObject {
             let resultDetail: String?
             do {
                 let output = try runSync(current, pairID: id, direction: direction)
-                let kept = output.split(separator: "\n").filter { $0.contains("KEPT_BOTH\t") }.count
+                let reviews = output.components(separatedBy: "reviews=").dropFirst()
+                    .compactMap { Int($0.prefix(while: \.isNumber)) }.reduce(0, +)
                 resultKey = all ? "doneAll" : "donePair"
-                resultDetail = kept > 0
-                    ? String(format: uiText("keptBothResult", language: current.language), kept)
+                resultDetail = reviews > 0
+                    ? String(format: uiText("reviewsRemain", language: current.language), reviews)
                     : nil
             } catch { resultKey = "error"; resultDetail = uiError(error, language: current.language) }
             DispatchQueue.main.async {
@@ -445,7 +473,33 @@ final class SyncModel: ObservableObject {
             let resultDetail: String?
             do {
                 _ = try resolvePendingConflict(pair, name: name, choice: choice)
-                resultKey = "resolved"
+                resultKey = choice == "both" ? "preservedReview" : "resolved"
+                resultDetail = nil
+            } catch {
+                resultKey = "error"
+                resultDetail = uiError(error, language: language)
+            }
+            DispatchQueue.main.async {
+                self.statusKey = resultKey
+                self.statusDetail = resultDetail
+                self.busy = false
+                self.refreshConflicts()
+            }
+        }
+    }
+
+    func acknowledgeConflict(_ name: String) {
+        guard let pair = selectedPair, !busy else { return }
+        let language = config.language
+        busy = true
+        statusKey = "resolving"
+        statusDetail = nil
+        DispatchQueue.global(qos: .utility).async {
+            let resultKey: String
+            let resultDetail: String?
+            do {
+                _ = try acknowledgePreservedConflict(pair, name: name)
+                resultKey = "reviewAcknowledged"
                 resultDetail = nil
             } catch {
                 resultKey = "error"
@@ -494,6 +548,24 @@ struct ResearchSyncApp: App {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
                 print(try resolvePendingConflict(pair, name: args[resolution + 1], choice: args[choiceIndex + 1]))
+                exit(0)
+            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
+        if let review = args.firstIndex(of: "--acknowledge") {
+            do {
+                guard args.indices.contains(review + 1),
+                      let pairIndex = args.firstIndex(of: "--pair"), args.indices.contains(pairIndex + 1),
+                      let id = UUID(uuidString: args[pairIndex + 1]) else {
+                    throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "确认版本需要 --acknowledge 路径和 --pair UUID。"])
+                }
+                let configPath: String
+                if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
+                else { configPath = defaultConfigPath }
+                let config = try loadConfig(configPath)
+                guard let pair = config.pairs.first(where: { $0.id == id }) else {
+                    throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
+                }
+                print(try acknowledgePreservedConflict(pair, name: args[review + 1]))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }

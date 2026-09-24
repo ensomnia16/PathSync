@@ -7,12 +7,53 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import sys
 import tempfile
 
 from sync_tree import ALWAYS_EXCLUDE_DIRS, LATEX_EXCLUDE_DIRS, excluded
+
+
+SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
+
+
+def is_review(record):
+    return record.get('status') == 'preserved'
+
+
+def clear_pending(conflicts, name):
+    if name in conflicts and not is_review(conflicts[name]):
+        conflicts.pop(name)
+
+
+def preserved_record(original, sidecar, primary):
+    return {**original, 'status': 'preserved', 'sidecar': sidecar,
+            'primary': primary, 'preservedAt': datetime.now(timezone.utc).isoformat()}
+
+
+def migrate_old_sidecars(files, conflicts):
+    for name, sidecar_state in files.items():
+        relative = Path(name)
+        match = SIDECAR_PATTERN.fullmatch(relative.name)
+        if not match:
+            continue
+        stem, secondary, _, suffix = match.groups()
+        original = relative.with_name(stem + (suffix or '')).as_posix()
+        original_state = files.get(original)
+        if not original_state or original in conflicts:
+            continue
+        if (original_state.get('local') != original_state.get('cloud')
+                or sidecar_state.get('local') != sidecar_state.get('cloud')):
+            continue
+        primary = 'local' if secondary == 'cloud' else 'cloud'
+        conflicts[original] = {
+            'local': original_state['local'] if primary == 'local' else sidecar_state['local'],
+            'cloud': sidecar_state['cloud'] if primary == 'local' else original_state['cloud'],
+            'status': 'preserved', 'sidecar': name, 'primary': primary,
+            'reason': 'migrated preserved versions',
+            'preservedAt': datetime.now(timezone.utc).isoformat()}
 
 
 def safe_path(root, name):
@@ -100,13 +141,15 @@ def load_state(path, local, cloud):
             or any(not isinstance(value, dict) for value in files.values())
             or any(not isinstance(value, dict) for value in conflicts.values())):
         raise ValueError('合并状态文件格式无效')
+    if not data.get('reviewsInitialized', False):
+        migrate_old_sidecars(files, conflicts)
     return files, conflicts
 
 
 def save_state(path, local, cloud, files, conflicts):
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {'version': 1, 'local': str(local), 'cloud': str(cloud),
-            'files': files, 'conflicts': conflicts}
+            'files': files, 'conflicts': conflicts, 'reviewsInitialized': True}
     with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=path.parent,
                                      prefix=path.name + '.', delete=False) as target:
         json.dump(data, target, ensure_ascii=False, sort_keys=True)
@@ -182,7 +225,7 @@ def sync_files(args, local, cloud, files, conflicts):
     errors = []
     names = scan(local, args.exclude_latex, errors) | scan(cloud, args.exclude_latex, errors)
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
-              'kept_both': 0, 'skipped': 0, 'conflicts': 0, 'failed': 0}
+              'kept_both': 0, 'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
 
     for name in sorted(names):
         try:
@@ -192,7 +235,9 @@ def sync_files(args, local, cloud, files, conflicts):
             cloud_sig = signature(cloud_file)
             if local_sig is None and cloud_sig is None:
                 continue
-            if name in conflicts and (local_sig is None or cloud_sig is None):
+            pending = name in conflicts and not is_review(conflicts[name])
+            review = name in conflicts and is_review(conflicts[name])
+            if pending and (local_sig is None or cloud_sig is None):
                 print(f'CONFLICT\t{name}\t待处理冲突的一侧文件已缺失')
                 continue
             if local_sig is None or cloud_sig is None:
@@ -205,26 +250,29 @@ def sync_files(args, local, cloud, files, conflicts):
                 if not args.dry_run:
                     copy_atomic(source, destination, local_sig if upload else cloud_sig, None)
                     next_files[name] = {'local': signature(local_file), 'cloud': signature(cloud_file)}
-                    next_conflicts.pop(name, None)
+                    clear_pending(next_conflicts, name)
                 counts['uploaded' if upload else 'downloaded'] += 1
                 continue
 
             previous = files.get(name)
-            if (name not in conflicts and previous
+            if (not pending and previous
                     and local_sig == previous.get('local')
                     and cloud_sig == previous.get('cloud')):
+                if review:
+                    review_hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
+                    if review_hashes[0] != review_hashes[1]:
+                        raise OSError('待合并的主文件两侧又出现不同版本；请先人工检查，未覆盖任何一侧')
                 counts['unchanged'] += 1
                 continue
 
             local_changed = previous is None or local_sig != previous.get('local')
             cloud_changed = previous is None or cloud_sig != previous.get('cloud')
-            pending = name in conflicts
             if pending or (local_changed and cloud_changed) or local_sig == cloud_sig:
                 hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
                 if hashes[0] == hashes[1]:
                     if not args.dry_run:
                         next_files[name] = {'local': local_sig, 'cloud': cloud_sig}
-                        next_conflicts.pop(name, None)
+                        clear_pending(next_conflicts, name)
                     counts['unchanged'] += 1
                     continue
             else:
@@ -238,9 +286,11 @@ def sync_files(args, local, cloud, files, conflicts):
                     if hashes[0] == hashes[1]:
                         if not args.dry_run:
                             next_files[name] = {'local': local_sig, 'cloud': cloud_sig}
-                            next_conflicts.pop(name, None)
+                            clear_pending(next_conflicts, name)
                         counts['unchanged'] += 1
                         continue
+                if review:
+                    raise OSError('待合并的主文件两侧又出现不同版本；请先人工检查，未覆盖任何一侧')
                 if args.conflict_policy == 'keep-both':
                     if not args.dry_run:
                         # Persist the conflict first. A failed backup or cloud write
@@ -256,7 +306,9 @@ def sync_files(args, local, cloud, files, conflicts):
                         next_files[sidecar_name] = {
                             'local': signature(local / sidecar_name),
                             'cloud': signature(cloud / sidecar_name)}
-                        next_conflicts.pop(name, None)
+                        next_conflicts[name] = preserved_record(
+                            next_conflicts[name], sidecar_name,
+                            'cloud' if args.direction == 'download' else 'local')
                         print(f'KEPT_BOTH\t{name}\tcopy={sidecar_name}\tbackup={backup_dir}')
                     else:
                         print(f'WOULD_KEEP_BOTH\t{name}')
@@ -276,7 +328,7 @@ def sync_files(args, local, cloud, files, conflicts):
                             local_sig if upload else cloud_sig,
                             cloud_sig if upload else local_sig)
                 next_files[name] = {'local': signature(local_file), 'cloud': signature(cloud_file)}
-                next_conflicts.pop(name, None)
+                clear_pending(next_conflicts, name)
             counts['uploaded' if upload else 'downloaded'] += 1
         except (OSError, ValueError) as error:
             print(f'FAILED\t{name}\t{error}')
@@ -285,9 +337,20 @@ def sync_files(args, local, cloud, files, conflicts):
     for path, error in errors:
         print(f'FAILED\t{path}\t{error}')
         counts['failed'] += 1
+    for name, record in sorted(next_conflicts.items()):
+        if is_review(record):
+            print(f'NEEDS_REVIEW\t{name}\tcopy={record["sidecar"]}')
+            counts['reviews'] += 1
+            try:
+                if (signature(safe_path(local, record['sidecar'])) is None
+                        or signature(safe_path(cloud, record['sidecar'])) is None):
+                    raise OSError('待合并的冲突副本缺失；请检查本地备份')
+            except (OSError, ValueError) as error:
+                print(f'FAILED\t{record["sidecar"]}\t{error}')
+                counts['failed'] += 1
     if not args.dry_run:
         save_state(args.state, local, cloud, next_files, next_conflicts)
-        counts['conflicts'] = len(next_conflicts)
+        counts['conflicts'] = sum(not is_review(record) for record in next_conflicts.values())
     print(' '.join(f'{key}={value}' for key, value in counts.items()))
     return 2 if counts['conflicts'] or counts['failed'] else 0
 
@@ -297,6 +360,8 @@ def resolve_conflict(args, local, cloud, files, conflicts):
     if name not in conflicts:
         raise ValueError(f'没有待处理冲突：{name}')
     record = conflicts[name]
+    if is_review(record):
+        raise ValueError('两个版本已经保留，仍待人工合并或确认；请使用 --acknowledge')
     local_file = safe_path(local, name)
     cloud_file = safe_path(cloud, name)
     local_sig = signature(local_file)
@@ -325,10 +390,36 @@ def resolve_conflict(args, local, cloud, files, conflicts):
                                     'cloud': signature(cloud / sidecar_name)}
 
     next_files[name] = {'local': signature(local_file), 'cloud': signature(cloud_file)}
+    if sidecar_name:
+        next_conflicts[name] = preserved_record(record, sidecar_name, 'local')
+    else:
+        next_conflicts.pop(name)
+    save_state(args.state, local, cloud, next_files, next_conflicts)
+    print(f'{"PRESERVED" if sidecar_name else "RESOLVED"}\t{name}\t{args.choice}\tbackup={backup_dir}'
+          + (f'\tcopy={sidecar_name}' if sidecar_name else ''))
+    return 0
+
+
+def acknowledge_review(args, local, cloud, files, conflicts):
+    name = args.acknowledge
+    record = conflicts.get(name)
+    if record is None or not is_review(record):
+        raise ValueError(f'没有待确认的已保留版本：{name}')
+    local_file = safe_path(local, name)
+    cloud_file = safe_path(cloud, name)
+    local_sig = signature(local_file)
+    cloud_sig = signature(cloud_file)
+    if local_sig is None or cloud_sig is None:
+        raise OSError('两侧主文件必须存在，请先同步后再确认')
+    hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
+    if hashes[0] != hashes[1]:
+        raise OSError('两侧主文件内容不同，请先同步或人工合并后再确认')
+    next_files = dict(files)
+    next_files[name] = {'local': local_sig, 'cloud': cloud_sig}
+    next_conflicts = dict(conflicts)
     next_conflicts.pop(name)
     save_state(args.state, local, cloud, next_files, next_conflicts)
-    print(f'RESOLVED\t{name}\t{args.choice}\tbackup={backup_dir}'
-          + (f'\tcopy={sidecar_name}' if sidecar_name else ''))
+    print(f'ACKNOWLEDGED\t{name}\tcopy={record["sidecar"]}')
     return 0
 
 
@@ -342,17 +433,22 @@ def main():
     parser.add_argument('--exclude-latex', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--resolve', metavar='RELATIVE_PATH')
+    parser.add_argument('--acknowledge', metavar='RELATIVE_PATH')
     parser.add_argument('--choice', choices=('local', 'cloud', 'both'))
     args = parser.parse_args()
     if args.resolve and (not args.choice or args.dry_run):
         parser.error('--resolve requires --choice and cannot be combined with --dry-run')
     if args.choice and not args.resolve:
         parser.error('--choice requires --resolve')
+    if args.acknowledge and (args.resolve or args.choice or args.dry_run):
+        parser.error('--acknowledge cannot be combined with --resolve, --choice or --dry-run')
     local = args.local.resolve()
     cloud = args.cloud.resolve()
     files, conflicts = load_state(args.state, local, cloud)
     if args.resolve:
         return resolve_conflict(args, local, cloud, files, conflicts)
+    if args.acknowledge:
+        return acknowledge_review(args, local, cloud, files, conflicts)
     return sync_files(args, local, cloud, files, conflicts)
 
 
