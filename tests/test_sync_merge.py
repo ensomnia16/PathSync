@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import re
+from datetime import datetime, timedelta, timezone
 import unittest
 
 
@@ -255,9 +257,10 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         (self.cloud / 'paper.tex').write_text('cloud edited')
         result = self.run_merge('--direction', 'upload')
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 0)
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edited')
-        self.assertIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
+        self.assertIn('skipped=1', result.stdout)
+        self.assertNotIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
 
     def test_directional_upload_of_source_change_succeeds(self):
         (self.local / 'paper.tex').write_text('base')
@@ -316,6 +319,184 @@ class MergeTests(unittest.TestCase):
         self.assertFalse((self.local / 'new.tex').exists())
         self.assertFalse(self.state.exists())
         self.assertIn('downloaded=1', result.stdout)
+
+    def test_anchor_uses_content_and_one_sided_direction_skips(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.cloud / 'paper.tex').write_text('cloud only')
+        upload = self.run_merge('--direction', 'upload')
+        self.assertEqual(upload.returncode, 0, upload.stdout + upload.stderr)
+        self.assertIn('skipped=1', upload.stdout)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'anchor')
+        merged = self.run_merge()
+        self.assertEqual(merged.returncode, 0, merged.stdout + merged.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud only')
+        self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex']['anchorHash'],
+                         hashlib.sha256(b'cloud only').hexdigest())
+
+    def test_two_metadata_changes_with_same_content_do_not_conflict(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('same new content')
+        (self.cloud / 'paper.tex').write_text('same new content')
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('conflicts=0', result.stdout)
+
+    def test_newest_conflict_backs_up_loser_and_restores_from_history_id(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('new local')
+        (self.cloud / 'paper.tex').write_text('new cloud')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.cloud / 'paper.tex', ns=(base, base))
+        os.utime(self.local / 'paper.tex', ns=(base + 1_000_000_000, base + 1_000_000_000))
+        result = self.run_merge('--conflict-policy', 'newest')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'new local')
+        self.assertIn('newest=1', result.stdout)
+        backup_id = re.search(r'BACKUP\tpaper.tex\tside=cloud\tid=([0-9a-f]{32})', result.stdout).group(1)
+        backup_dir = self.root / 'state-backups' / backup_id
+        self.assertEqual((backup_dir / 'content').read_text(), 'new cloud')
+        self.assertEqual(json.loads((backup_dir / 'manifest.json').read_text())['retentionDays'], 15)
+        restored = self.run_merge('--restore', backup_id)
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'new cloud')
+        self.assertIn('reason=restore-overwrite', restored.stdout)
+
+    def test_newest_tied_timestamp_requires_manual_choice(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('new local')
+        (self.cloud / 'paper.tex').write_text('new cloud')
+        timestamp = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(timestamp, timestamp))
+        os.utime(self.cloud / 'paper.tex', ns=(timestamp, timestamp))
+        result = self.run_merge('--conflict-policy', 'newest')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('修改时间相同', result.stdout)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'new cloud')
+
+    def test_newest_does_not_reverse_explicit_upload_direction(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        (self.cloud / 'paper.tex').write_text('newer cloud edit')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(base, base))
+        os.utime(self.cloud / 'paper.tex', ns=(base + 1_000_000_000, base + 1_000_000_000))
+        result = self.run_merge('--direction', 'upload', '--conflict-policy', 'newest')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('方向相反', result.stdout)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'local edit')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'newer cloud edit')
+
+    def test_manual_pending_conflict_can_choose_newer_date(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(base, base))
+        os.utime(self.cloud / 'paper.tex', ns=(base + 1_000_000_000, base + 1_000_000_000))
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge('--resolve', 'paper.tex', '--choice', 'newest')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud')
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+
+    def test_preserved_review_can_choose_newer_original_date(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud newer')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(base, base))
+        os.utime(self.cloud / 'paper.tex', ns=(base + 1_000_000_000, base + 1_000_000_000))
+        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'local')
+        result = self.run_merge('--review-newest', 'paper.tex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud newer')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud newer')
+        self.assertIn('reason=review-newest-overwrite', result.stdout)
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+
+    def test_one_sided_update_has_recoverable_overwrite_backup(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('updated')
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('backups=1', result.stdout)
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'anchor')
+
+    def test_deletion_requires_two_observations_and_can_be_restored(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        first = self.run_merge('--propagate-deletions')
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn('PENDING_DELETE\tpaper.tex', first.stdout)
+        self.assertTrue((self.cloud / 'paper.tex').exists())
+        second = self.run_merge('--propagate-deletions')
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn('DELETED\tpaper.tex\tside=cloud', second.stdout)
+        self.assertFalse((self.cloud / 'paper.tex').exists())
+        backup_id = re.search(r'id=([0-9a-f]{32})', second.stdout).group(1)
+        self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'anchor')
+        restored = self.run_merge('--restore', backup_id)
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'anchor')
+
+    def test_delete_edit_is_conflict_and_manual_choice_can_restore(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        result = self.run_merge('--propagate-deletions', policy='keep-both')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('CONFLICT\tpaper.tex', result.stdout)
+        self.assertFalse((self.local / 'paper.tex').exists())
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edit')
+        resolved = self.run_merge('--resolve', 'paper.tex', '--choice', 'cloud')
+        self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud edit')
+
+    def test_delete_edit_choice_can_delete_after_backup(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        result = self.run_merge('--resolve', 'paper.tex', '--choice', 'local')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.cloud / 'paper.tex').exists())
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'cloud edit')
+
+    def test_transient_missing_file_cancels_delete_candidate(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        self.assertIn('PENDING_DELETE', self.run_merge('--propagate-deletions').stdout)
+        (self.local / 'paper.tex').write_text('anchor')
+        result = self.run_merge('--propagate-deletions')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('missingSide', json.loads(self.state.read_text())['files']['paper.tex'])
+        self.assertTrue((self.cloud / 'paper.tex').exists())
+
+    def test_retention_prunes_expired_backup_on_sync(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('updated')
+        result = self.run_merge()
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        directory = self.root / 'state-backups' / backup_id
+        metadata = json.loads((directory / 'manifest.json').read_text())
+        old = datetime.now(timezone.utc) - timedelta(days=16)
+        metadata['createdAt'] = old.isoformat()
+        metadata['createdAtEpoch'] = old.timestamp()
+        (directory / 'manifest.json').write_text(json.dumps(metadata))
+        self.assertEqual(self.run_merge().returncode, 0)
+        self.assertFalse(directory.exists())
 
 
 if __name__ == '__main__':

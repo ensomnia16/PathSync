@@ -9,13 +9,16 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
 - Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Filter by folder or result; the raw log remains available for troubleshooting.
 - By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
+- Conflicts are measured against the last common content anchor. When both sides changed, you may also choose the version with the later absolute modification time; equal timestamps pause for manual review.
+- Deletion propagation is optional and off by default. A one-sided deletion must persist for two sync runs while the other side remains at the anchor. A concurrent edit and deletion stops as a conflict.
+- Every actual overwrite or propagated deletion has a verified local backup with a Restore button in History. Backups default to 15 days and are cleaned on a later sync; the retention period is configurable.
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
-- Sync never propagates deletions. LaTeX build files, virtual environments, and common caches can be excluded.
+- LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.8.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.9.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

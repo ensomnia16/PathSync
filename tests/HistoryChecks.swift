@@ -9,7 +9,8 @@ struct HistoryChecks {
         uploaded=1 downloaded=0 unchanged=7 kept_both=0 skipped=0 conflicts=1 failed=0
         2026-09-23T10:06:54Z 开始 [科研] 双向合并：/local → /cloud
         2026-09-23T10:06:57Z 结束 [科研]，退出码 0：KEPT_BOTH\tmain.tex\tcopy=main (cloud conflict abc).tex\tbackup=/backup
-        uploaded=1 downloaded=0 unchanged=7 kept_both=1 skipped=0 conflicts=0 failed=0
+        BACKUP\tmain.tex\tside=cloud\tid=0123456789abcdef0123456789abcdef\treason=conflict-overwrite
+        uploaded=1 downloaded=0 unchanged=7 kept_both=1 backups=1 skipped=0 conflicts=0 failed=0
         2026-09-23T10:08:00Z 开始 [科研] 双向合并：/local → /cloud
         2026-09-23T10:08:01Z 结束 [科研]，退出码 0：NEEDS_REVIEW\tmain.tex\tcopy=main (cloud conflict abc).tex
         uploaded=0 downloaded=0 unchanged=8 kept_both=0 skipped=0 conflicts=0 reviews=1 failed=0
@@ -26,8 +27,11 @@ struct HistoryChecks {
         assert(records[2].needsAttention)
         assert(records[2].events.first?.kind == "NEEDS_REVIEW")
         assert(records[3].counts["kept_both"] == 1)
-        assert(records[3].events.count == 1)
+        assert(records[3].events.count == 2)
         assert(records[3].events[0].copyPath == "main (cloud conflict abc).tex")
+        assert(records[3].events[1].backupID == "0123456789abcdef0123456789abcdef")
+        assert(records[3].events[1].side == "cloud")
+        assert(records[3].events[1].reason == "conflict-overwrite")
         assert(records[3].needsAttention)
         assert(records[4].isPreview)
         assert(records[4].needsAttention)

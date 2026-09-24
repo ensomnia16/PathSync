@@ -14,6 +14,21 @@ private func mergeStatePath(_ pair: SyncPair) -> String {
     supportDirectory + "/merge-state/" + pair.id.uuidString.lowercased() + ".json"
 }
 
+func backupAvailable(_ pair: SyncPair, id: String) -> Bool {
+    guard id.range(of: "^[0-9a-f]{32}$", options: .regularExpression) != nil else { return false }
+    let root = URL(fileURLWithPath: mergeStatePath(pair)).deletingPathExtension()
+        .path + "-backups/" + id
+    let manifest = URL(fileURLWithPath: root + "/manifest.json")
+    let content = root + "/content"
+    guard fm.fileExists(atPath: content),
+          let data = try? Data(contentsOf: manifest),
+          let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          record["id"] as? String == id,
+          let created = record["createdAtEpoch"] as? Double,
+          let days = record["retentionDays"] as? Int else { return false }
+    return Date().timeIntervalSince1970 - created < Double(days * 86400)
+}
+
 struct SyncPair: Codable, Identifiable {
     var id: UUID = UUID()
     var name: String = "新路径"
@@ -31,12 +46,14 @@ struct SyncConfig: Codable {
     var dailyMinute = 0
     var excludeLatexIntermediates = true
     var conflictPolicy = "keep-both"
+    var propagateDeletions = false
+    var backupRetentionDays = 15
     var enabled = true
     var language = "zh-Hans"
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
-        case excludeLatexIntermediates, conflictPolicy, enabled, language
+        case excludeLatexIntermediates, conflictPolicy, propagateDeletions, backupRetentionDays, enabled, language
         case source, destination, scheduledDirection
     }
 
@@ -51,6 +68,8 @@ struct SyncConfig: Codable {
         dailyMinute = try data.decodeIfPresent(Int.self, forKey: .dailyMinute) ?? 0
         excludeLatexIntermediates = try data.decodeIfPresent(Bool.self, forKey: .excludeLatexIntermediates) ?? true
         conflictPolicy = try data.decodeIfPresent(String.self, forKey: .conflictPolicy) ?? "keep-both"
+        propagateDeletions = try data.decodeIfPresent(Bool.self, forKey: .propagateDeletions) ?? false
+        backupRetentionDays = try data.decodeIfPresent(Int.self, forKey: .backupRetentionDays) ?? 15
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
@@ -73,6 +92,8 @@ struct SyncConfig: Codable {
         try data.encode(dailyMinute, forKey: .dailyMinute)
         try data.encode(excludeLatexIntermediates, forKey: .excludeLatexIntermediates)
         try data.encode(conflictPolicy, forKey: .conflictPolicy)
+        try data.encode(propagateDeletions, forKey: .propagateDeletions)
+        try data.encode(backupRetentionDays, forKey: .backupRetentionDays)
         try data.encode(enabled, forKey: .enabled)
         try data.encode(language, forKey: .language)
     }
@@ -127,13 +148,15 @@ struct PendingConflict: Identifiable {
     let localBytes: Int64
     let cloudBytes: Int64
     let sidecar: String?
+    let localMissing: Bool
+    let cloudMissing: Bool
     var id: String { name }
     var isReview: Bool { sidecar != nil }
 }
 
 private struct StoredConflict: Decodable {
-    let local: [Int64]
-    let cloud: [Int64]
+    let local: [Int64]?
+    let cloud: [Int64]?
     let status: String?
     let sidecar: String?
 }
@@ -154,9 +177,10 @@ func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
         throw NSError(domain: appID, code: 10, userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」的路径与冲突记录不一致。请检查路径配置。"])
     }
     return (state.conflicts ?? [:]).map { name, record in
-        PendingConflict(name: name, localBytes: record.local.first ?? 0,
-                        cloudBytes: record.cloud.first ?? 0,
-                        sidecar: record.status == "preserved" ? record.sidecar : nil)
+        PendingConflict(name: name, localBytes: record.local?.first ?? 0,
+                        cloudBytes: record.cloud?.first ?? 0,
+                        sidecar: record.status == "preserved" ? record.sidecar : nil,
+                        localMissing: record.local == nil, cloudMissing: record.cloud == nil)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 }
 
@@ -183,14 +207,17 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 }
 
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
-                     conflictPolicy: String, dryRun: Bool) throws -> String {
+                     conflictPolicy: String, propagateDeletions: Bool,
+                     backupRetentionDays: Int, dryRun: Bool) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
     let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
     var arguments = [helper, local, cloud, mergeStatePath(pair), "--direction", direction.rawValue,
-                     "--conflict-policy", conflictPolicy]
+                     "--conflict-policy", conflictPolicy,
+                     "--backup-retention-days", String(backupRetentionDays)]
+    if propagateDeletions { arguments.append("--propagate-deletions") }
     if excludeLatex { arguments.append("--exclude-latex") }
     if dryRun { arguments.append("--dry-run") }
     process.arguments = arguments
@@ -209,7 +236,8 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     return result
 }
 
-func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String) throws -> String {
+func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
+                            retentionDays: Int = 15) throws -> String {
     guard ["local", "cloud", "both"].contains(choice) else {
         throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "无效的冲突处理方式。"])
     }
@@ -218,15 +246,16 @@ func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String) thro
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [helper, local, cloud, mergeStatePath(pair), "--resolve", name, "--choice", choice]
+        process.arguments = [helper, local, cloud, mergeStatePath(pair), "--resolve", name,
+                             "--choice", choice, "--backup-retention-days", String(retentionDays)]
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
-        appendLog("解决冲突 [\(pair.name)] \(name)：\(choice)")
+        appendLog("开始 [\(pair.name)] 手动处理：\(local) → \(cloud)")
         try process.run()
         let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
-        appendLog("冲突处理 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+        appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
         guard process.terminationStatus == 0 else {
             throw NSError(domain: appID, code: 12, userInfo: [NSLocalizedDescriptionKey: "「\(name)」处理失败：\(result.trimmingCharacters(in: .whitespacesAndNewlines))"])
         }
@@ -244,13 +273,59 @@ func acknowledgePreservedConflict(_ pair: SyncPair, name: String) throws -> Stri
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
-        appendLog("确认已保留版本 [\(pair.name)] \(name)")
+        appendLog("开始 [\(pair.name)] 手动处理：\(local) → \(cloud)")
         try process.run()
         let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         process.waitUntilExit()
-        appendLog("确认结果 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+        appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
         guard process.terminationStatus == 0 else {
             throw NSError(domain: appID, code: 12, userInfo: [NSLocalizedDescriptionKey: result.trimmingCharacters(in: .whitespacesAndNewlines)])
+        }
+        return result
+    }
+}
+
+func resolvePreservedNewest(_ pair: SyncPair, name: String, retentionDays: Int) throws -> String {
+    try withSyncLock {
+        let (local, cloud) = try validatedPaths(pair)
+        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [helper, local, cloud, mergeStatePath(pair), "--review-newest", name,
+                             "--backup-retention-days", String(retentionDays)]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        appendLog("开始 [\(pair.name)] 手动处理：\(local) → \(cloud)")
+        try process.run()
+        let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: appID, code: 14, userInfo: [NSLocalizedDescriptionKey: result.trimmingCharacters(in: .whitespacesAndNewlines)])
+        }
+        return result
+    }
+}
+
+func restoreSavedBackup(_ pair: SyncPair, id: String, retentionDays: Int) throws -> String {
+    try withSyncLock {
+        let (local, cloud) = try validatedPaths(pair)
+        let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [helper, local, cloud, mergeStatePath(pair), "--restore", id,
+                             "--backup-retention-days", String(retentionDays)]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        appendLog("开始 [\(pair.name)] 恢复备份：\(local) → \(cloud)")
+        try process.run()
+        let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: appID, code: 13, userInfo: [NSLocalizedDescriptionKey: result.trimmingCharacters(in: .whitespacesAndNewlines)])
         }
         return result
     }
@@ -270,7 +345,10 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
                 let chosen = direction ?? SyncDirection(rawValue: pair.scheduledDirection) ?? .upload
                 let result = try syncOne(pair, direction: chosen,
                                          excludeLatex: config.excludeLatexIntermediates,
-                                         conflictPolicy: config.conflictPolicy, dryRun: dryRun)
+                                         conflictPolicy: config.conflictPolicy,
+                                         propagateDeletions: config.propagateDeletions,
+                                         backupRetentionDays: config.backupRetentionDays,
+                                         dryRun: dryRun)
                 outputs.append("[\(pair.name)] \(result)")
             } catch {
                 errors.append(error.localizedDescription)
@@ -422,9 +500,10 @@ final class SyncModel: ObservableObject {
             config.intervalHours = min(168, max(6, config.intervalHours))
             config.dailyHour = min(23, max(0, config.dailyHour))
             config.dailyMinute = min(59, max(0, config.dailyMinute))
-            if !["keep-both", "ask"].contains(config.conflictPolicy) {
+            if !["keep-both", "ask", "newest"].contains(config.conflictPolicy) {
                 config.conflictPolicy = "keep-both"
             }
+            config.backupRetentionDays = min(365, max(1, config.backupRetentionDays))
             try saveConfig(config)
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
@@ -465,6 +544,7 @@ final class SyncModel: ObservableObject {
     func resolveConflict(_ name: String, choice: String) {
         guard let pair = selectedPair, !busy else { return }
         let language = config.language
+        let retentionDays = config.backupRetentionDays
         busy = true
         statusKey = "resolving"
         statusDetail = nil
@@ -472,7 +552,8 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try resolvePendingConflict(pair, name: name, choice: choice)
+                _ = try resolvePendingConflict(pair, name: name, choice: choice,
+                                               retentionDays: retentionDays)
                 resultKey = choice == "both" ? "preservedReview" : "resolved"
                 resultDetail = nil
             } catch {
@@ -513,6 +594,62 @@ final class SyncModel: ObservableObject {
             }
         }
     }
+
+    func chooseNewestForReview(_ name: String) {
+        guard let pair = selectedPair, !busy else { return }
+        let language = config.language
+        let retentionDays = config.backupRetentionDays
+        busy = true
+        statusKey = "resolving"
+        statusDetail = nil
+        DispatchQueue.global(qos: .utility).async {
+            let resultKey: String
+            let resultDetail: String?
+            do {
+                _ = try resolvePreservedNewest(pair, name: name, retentionDays: retentionDays)
+                resultKey = "newestResolved"
+                resultDetail = nil
+            } catch {
+                resultKey = "error"
+                resultDetail = uiError(error, language: language)
+            }
+            DispatchQueue.main.async {
+                self.statusKey = resultKey
+                self.statusDetail = resultDetail
+                self.busy = false
+                self.refreshConflicts()
+                self.refreshHistory()
+            }
+        }
+    }
+
+    func restoreBackup(pair: SyncPair, id: String) {
+        guard !busy else { return }
+        let language = config.language
+        let retentionDays = config.backupRetentionDays
+        busy = true
+        statusKey = "restoringBackup"
+        statusDetail = nil
+        DispatchQueue.global(qos: .utility).async {
+            let resultKey: String
+            let resultDetail: String?
+            do {
+                _ = try restoreSavedBackup(pair, id: id, retentionDays: retentionDays)
+                resultKey = "backupRestored"
+                resultDetail = nil
+            } catch {
+                resultKey = "error"
+                resultDetail = uiError(error, language: language)
+            }
+            DispatchQueue.main.async {
+                self.statusKey = resultKey
+                self.statusDetail = resultDetail
+                self.busy = false
+                self.refreshHistory()
+                self.refreshConflicts()
+            }
+        }
+    }
 }
 
 @main
@@ -538,7 +675,7 @@ struct ResearchSyncApp: App {
                       let choiceIndex = args.firstIndex(of: "--choice"), args.indices.contains(choiceIndex + 1),
                       let pairIndex = args.firstIndex(of: "--pair"), args.indices.contains(pairIndex + 1),
                       let id = UUID(uuidString: args[pairIndex + 1]) else {
-                    throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "解决冲突需要 --resolve 路径、--choice local|cloud|both 和 --pair UUID。"])
+                    throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "解决冲突需要 --resolve 路径、--choice local|cloud|both|newest 和 --pair UUID。"])
                 }
                 let configPath: String
                 if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
@@ -547,7 +684,9 @@ struct ResearchSyncApp: App {
                 guard let pair = config.pairs.first(where: { $0.id == id }) else {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
-                print(try resolvePendingConflict(pair, name: args[resolution + 1], choice: args[choiceIndex + 1]))
+                print(try resolvePendingConflict(pair, name: args[resolution + 1],
+                                                 choice: args[choiceIndex + 1],
+                                                 retentionDays: config.backupRetentionDays))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
@@ -566,6 +705,44 @@ struct ResearchSyncApp: App {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
                 print(try acknowledgePreservedConflict(pair, name: args[review + 1]))
+                exit(0)
+            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
+        if let selection = args.firstIndex(of: "--review-newest") {
+            do {
+                guard args.indices.contains(selection + 1),
+                      let pairIndex = args.firstIndex(of: "--pair"), args.indices.contains(pairIndex + 1),
+                      let id = UUID(uuidString: args[pairIndex + 1]) else {
+                    throw NSError(domain: appID, code: 14, userInfo: [NSLocalizedDescriptionKey: "按日期处理保留版本需要 --review-newest 路径和 --pair UUID。"])
+                }
+                let configPath: String
+                if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
+                else { configPath = defaultConfigPath }
+                let config = try loadConfig(configPath)
+                guard let pair = config.pairs.first(where: { $0.id == id }) else {
+                    throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
+                }
+                print(try resolvePreservedNewest(pair, name: args[selection + 1],
+                                                 retentionDays: config.backupRetentionDays))
+                exit(0)
+            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
+        if let restoration = args.firstIndex(of: "--restore-backup") {
+            do {
+                guard args.indices.contains(restoration + 1),
+                      let pairIndex = args.firstIndex(of: "--pair"), args.indices.contains(pairIndex + 1),
+                      let id = UUID(uuidString: args[pairIndex + 1]) else {
+                    throw NSError(domain: appID, code: 13, userInfo: [NSLocalizedDescriptionKey: "恢复备份需要 --restore-backup ID 和 --pair UUID。"])
+                }
+                let configPath: String
+                if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
+                else { configPath = defaultConfigPath }
+                let config = try loadConfig(configPath)
+                guard let pair = config.pairs.first(where: { $0.id == id }) else {
+                    throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
+                }
+                print(try restoreSavedBackup(pair, id: args[restoration + 1],
+                                             retentionDays: config.backupRetentionDays))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }

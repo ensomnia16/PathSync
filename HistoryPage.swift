@@ -12,6 +12,7 @@ struct HistoryPage: View {
     let language: String
     let error: String?
     let refresh: () -> Void
+    let restore: (SyncPair, String) -> Void
 
     @StateObject private var filters = HistoryFilters()
 
@@ -39,6 +40,13 @@ struct HistoryPage: View {
         return formatter.string(from: date)
     }
 
+    private func pairForRecord(_ record: SyncHistoryRecord) -> SyncPair? {
+        pairs.first { pair in
+            (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
+                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+        }
+    }
+
     private func directionText(_ direction: String) -> String {
         switch direction {
         case "双向合并": return t("merge")
@@ -51,6 +59,7 @@ struct HistoryPage: View {
     private func resultText(_ record: SyncHistoryRecord) -> String {
         if record.finishedAt == nil { return t("historyInterrupted") }
         if record.hasFailures { return t("historyFailed") }
+        if record.counts["pending_delete", default: 0] > 0 { return t("historyPendingDelete") }
         if record.counts["reviews", default: 0] > 0
             || (!record.isPreview && record.counts["kept_both", default: 0] > 0) {
             return t("historyReview")
@@ -84,13 +93,22 @@ struct HistoryPage: View {
             (record.isPreview ? "historyWouldKeepBoth" : "historyKeptBoth",
              record.counts["kept_both", default: 0]),
             ("historyReviews", record.counts["reviews", default: 0]),
+            ("historyNewest", record.counts["newest", default: 0]),
+            ("historyDeleted", record.counts["deleted", default: 0]),
+            ("historyPendingDelete", record.counts["pending_delete", default: 0]),
+            ("historyBackups", record.counts["backups", default: 0]),
             ("historyConflicts", record.counts["conflicts", default: 0]),
             ("historyFailures", record.counts["failed", default: 0])
         ]
         let parts = values.filter { $0.1 > 0 }.map { "\(t($0.0)) \($0.1)" }
         if !parts.isEmpty { return parts.joined(separator: " · ") }
+        if record.events.contains(where: { $0.kind == "REVIEW_NEWEST" }) { return t("newestResolved") }
+        if record.events.contains(where: { $0.kind == "RESTORED" }) { return t("backupRestored") }
+        if record.events.contains(where: { $0.kind == "ACKNOWLEDGED" }) { return t("reviewAcknowledged") }
+        if record.events.contains(where: { $0.kind == "RESOLVED" }) { return t("resolved") }
         let hasCounts = ["uploaded", "downloaded", "copied", "unchanged", "skipped",
-                         "kept_both", "reviews", "conflicts", "failed"].contains { record.counts[$0] != nil }
+                         "kept_both", "newest", "deleted", "pending_delete", "backups", "reviews",
+                         "conflicts", "failed"].contains { record.counts[$0] != nil }
         return hasCounts ? t("historyNoChanges") : t("historyNoSummary")
     }
 
@@ -99,6 +117,14 @@ struct HistoryPage: View {
         case "KEPT_BOTH": return t("historyKeptBoth")
         case "WOULD_KEEP_BOTH": return t("historyWouldKeepBoth")
         case "NEEDS_REVIEW": return t("historyReview")
+        case "BACKUP": return event.reason == "delete" ? t("historyDeleteBackup") : t("historyBackup")
+        case "DELETED", "WOULD_DELETE": return t("historyDeleted")
+        case "PENDING_DELETE": return t("historyPendingDelete")
+        case "NEWEST", "WOULD_KEEP_NEWEST": return t("historyNewest")
+        case "RESTORED": return t("backupRestored")
+        case "REVIEW_NEWEST": return t("historyNewest")
+        case "ACKNOWLEDGED": return t("reviewAcknowledged")
+        case "RESOLVED": return t("resolved")
         case "CONFLICT": return t("historyConflicts")
         default: return t("historyFailures")
         }
@@ -127,6 +153,21 @@ struct HistoryPage: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
+                            }
+                            if event.kind == "BACKUP", let id = event.backupID,
+                               let pair = pairForRecord(record) {
+                                HStack(spacing: 10) {
+                                    Text(t(event.side == "cloud" ? "backupSideCloud" : "backupSideLocal"))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    if backupAvailable(pair, id: id) {
+                                        Button(t("restoreBackup")) { restore(pair, id) }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                    } else {
+                                        Text(t("backupExpired"))
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                         }
                     }

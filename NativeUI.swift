@@ -117,7 +117,8 @@ struct ContentView: View {
             else if model.page == "history" {
                 HistoryPage(records: model.history, pairs: model.config.pairs,
                             language: model.config.language, error: model.historyError,
-                            refresh: model.refreshHistory)
+                            refresh: model.refreshHistory,
+                            restore: { pair, id in model.restoreBackup(pair: pair, id: id) })
             }
             else if model.page == "about" { aboutForm }
             else if let index = model.selectedIndex { pairForm(index) }
@@ -213,10 +214,17 @@ struct ContentView: View {
                 Picker(t("conflictHandling"), selection: $model.config.conflictPolicy) {
                     Text(t("autoKeepBoth")).tag("keep-both")
                     Text(t("askForConflicts")).tag("ask")
+                    Text(t("keepNewest")).tag("newest")
                 }
                 .pickerStyle(.menu)
+                Toggle(t("propagateDeletions"), isOn: $model.config.propagateDeletions)
+                Stepper(value: $model.config.backupRetentionDays, in: 1...365) {
+                    LabeledContent(t("backupRetention"),
+                                   value: "\(model.config.backupRetentionDays) \(t("days"))")
+                }
             } footer: {
-                Text(t("backgroundHint") + " " + t("filterHint") + " " + t("conflictPolicyHint"))
+                Text(t("backgroundHint") + " " + t("filterHint") + " " + t("conflictPolicyHint")
+                    + " " + t("backupHint"))
             }
         }
         .formStyle(.grouped)
@@ -269,7 +277,8 @@ struct ContentView: View {
                         .buttonStyle(.link)
                 }
             } footer: {
-                Text(t(model.config.conflictPolicy == "keep-both" ? "directionHintAuto" : "directionHintAsk"))
+                Text(t(model.config.conflictPolicy == "keep-both" ? "directionHintAuto" :
+                       (model.config.conflictPolicy == "newest" ? "directionHintNewest" : "directionHintAsk")))
             }
 
             Section(t("runNow")) {
@@ -309,12 +318,16 @@ struct ContentView: View {
                                         ])
                                     }
                                     Spacer()
+                                    Button(t("chooseNewest")) { model.chooseNewestForReview(conflict.name) }
+                                        .disabled(model.busy)
                                     Button(t("confirmReviewed")) { model.acknowledgeConflict(conflict.name) }
                                         .disabled(model.busy)
                                 }
                                 .controlSize(.small)
                             } else {
-                                Text("\(t("local")) \(ByteCountFormatter.string(fromByteCount: conflict.localBytes, countStyle: .file)) · \(t("cloud")) \(ByteCountFormatter.string(fromByteCount: conflict.cloudBytes, countStyle: .file))")
+                                Text(conflict.localMissing || conflict.cloudMissing
+                                     ? t("deleteEditConflict")
+                                     : "\(t("local")) \(ByteCountFormatter.string(fromByteCount: conflict.localBytes, countStyle: .file)) · \(t("cloud")) \(ByteCountFormatter.string(fromByteCount: conflict.cloudBytes, countStyle: .file))")
                                     .font(.caption).foregroundStyle(.secondary)
                                 HStack {
                                     Button(t("viewLocal")) {
@@ -331,9 +344,18 @@ struct ContentView: View {
                                     }
                                     Spacer()
                                     Menu(t("resolve")) {
-                                        Button(t("useLocal")) { model.resolveConflict(conflict.name, choice: "local") }
-                                        Button(t("useCloud")) { model.resolveConflict(conflict.name, choice: "cloud") }
-                                        Button(t("keepBoth")) { model.resolveConflict(conflict.name, choice: "both") }
+                                        Button(conflict.localMissing ? t("keepDeletion") : t("useLocal")) {
+                                            model.resolveConflict(conflict.name, choice: "local")
+                                        }
+                                        Button(conflict.cloudMissing ? t("keepDeletion") : t("useCloud")) {
+                                            model.resolveConflict(conflict.name, choice: "cloud")
+                                        }
+                                        if !conflict.localMissing && !conflict.cloudMissing {
+                                            Button(t("chooseNewest")) {
+                                                model.resolveConflict(conflict.name, choice: "newest")
+                                            }
+                                            Button(t("keepBoth")) { model.resolveConflict(conflict.name, choice: "both") }
+                                        }
                                     }
                                     .disabled(model.busy)
                                 }
