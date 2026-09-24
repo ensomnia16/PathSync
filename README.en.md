@@ -19,13 +19,15 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.11.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.11.1) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
 The interface uses native SwiftUI sidebar, form, and toolbar controls. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
 
 The [synchronization model](docs/synchronization-model.md) records the primary sources, state transitions, and current limits around directory conflicts and OneDrive availability.
+
+For an already preserved conflict, “Use newer current version” compares the current main file and preserved copy. The preserved copy must match across both folders. If the main files differ, the action can first back up and propagate a change made on just one side relative to the anchor. Changes on both sides still pause. Inspect the newer file before using the date-based action.
 
 Starting with 2.11.0, there is no separate deletion-propagation switch. The old `propagateDeletions` configuration field is ignored when loading and removed on the next save. Use `--dry-run` to preview actions on existing folders after upgrading.
 

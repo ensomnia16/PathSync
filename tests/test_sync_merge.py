@@ -419,7 +419,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud')
         self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
 
-    def test_preserved_review_can_choose_newer_original_date(self):
+    def test_preserved_review_can_choose_newer_current_date(self):
         (self.local / 'paper.tex').write_text('local')
         (self.cloud / 'paper.tex').write_text('cloud newer')
         base = 1_800_000_000_000_000_000
@@ -433,6 +433,100 @@ class MergeTests(unittest.TestCase):
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud newer')
         self.assertIn('reason=review-newest-overwrite', result.stdout)
         self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+
+    def test_newer_main_edited_after_preservation_can_finish_review(self):
+        (self.local / 'paper.tex').write_text('local original')
+        (self.cloud / 'paper.tex').write_text('cloud original')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(base, base))
+        os.utime(self.cloud / 'paper.tex', ns=(base - 1_000_000_000,
+                                               base - 1_000_000_000))
+        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        state = json.loads(self.state.read_text())
+        sidecar = state['conflicts']['paper.tex']['sidecar']
+        (self.local / 'paper.tex').write_text('edited after preservation')
+        os.utime(self.local / 'paper.tex', ns=(base + 1_000_000_000,
+                                               base + 1_000_000_000))
+        self.assertEqual(self.run_merge().returncode, 0)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'edited after preservation')
+        self.assertIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
+        result = self.run_merge('--review-newest', 'paper.tex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('side=local', result.stdout)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'edited after preservation')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'edited after preservation')
+        self.assertEqual((self.local / sidecar).read_text(), 'cloud original')
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+
+    def test_newer_preserved_copy_replaces_later_edited_main_with_backups(self):
+        (self.local / 'paper.tex').write_text('main original')
+        (self.cloud / 'paper.tex').write_text('copy original')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(base, base))
+        os.utime(self.cloud / 'paper.tex', ns=(base - 1_000_000_000,
+                                               base - 1_000_000_000))
+        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        sidecar = json.loads(self.state.read_text())['conflicts']['paper.tex']['sidecar']
+        for root in (self.local, self.cloud):
+            (root / 'paper.tex').write_text('main edited later')
+            os.utime(root / 'paper.tex', ns=(base + 1_000_000_000,
+                                             base + 1_000_000_000))
+            (root / sidecar).write_text('copy edited latest')
+            os.utime(root / sidecar, ns=(base + 2_000_000_000,
+                                          base + 2_000_000_000))
+        result = self.run_merge('--review-newest', 'paper.tex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'copy edited latest')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'copy edited latest')
+        self.assertEqual((self.local / sidecar).read_text(), 'copy edited latest')
+        self.assertEqual(result.stdout.count('reason=review-newest-overwrite'), 2)
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+
+    def test_preserved_versions_must_agree_across_roots_before_date_choice(self):
+        (self.local / 'paper.tex').write_text('main')
+        (self.cloud / 'paper.tex').write_text('copy')
+        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        main_before = (self.local / 'paper.tex').read_text()
+        sidecar = json.loads(self.state.read_text())['conflicts']['paper.tex']['sidecar']
+        (self.cloud / sidecar).write_text('different copy')
+        result = self.run_merge('--review-newest', 'paper.tex')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('保留副本两侧已有不同内容', result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), main_before)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), main_before)
+        self.assertIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
+
+    def test_one_sided_main_update_resolves_in_same_action(self):
+        (self.local / 'paper.tex').write_text('main')
+        (self.cloud / 'paper.tex').write_text('copy')
+        base = 1_800_000_000_000_000_000
+        os.utime(self.local / 'paper.tex', ns=(base, base))
+        os.utime(self.cloud / 'paper.tex', ns=(base - 1_000_000_000,
+                                               base - 1_000_000_000))
+        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        (self.local / 'paper.tex').write_text('new local edit')
+        os.utime(self.local / 'paper.tex', ns=(base + 1_000_000_000,
+                                               base + 1_000_000_000))
+        result = self.run_merge('--review-newest', 'paper.tex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'new local edit')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'new local edit')
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'main')
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+
+    def test_two_new_main_versions_remain_pending_after_preservation(self):
+        (self.local / 'paper.tex').write_text('main')
+        (self.cloud / 'paper.tex').write_text('copy')
+        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        (self.local / 'paper.tex').write_text('new local edit')
+        (self.cloud / 'paper.tex').write_text('new cloud edit')
+        result = self.run_merge('--review-newest', 'paper.tex')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('两侧都相对共同版本发生变化', result.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'new local edit')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'new cloud edit')
+        self.assertIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
 
     def test_one_sided_update_has_recoverable_overwrite_backup(self):
         (self.local / 'paper.tex').write_text('anchor')

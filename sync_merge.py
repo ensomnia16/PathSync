@@ -110,7 +110,7 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
     local_hash = digest(local_file)
     cloud_hash = digest(cloud_file)
     if signature(local_file) != local_sig or signature(cloud_file) != cloud_sig:
-        raise OSError('文件在读取过程中发生变化，已跳过本次比较')
+        raise OSError('文件读取期间发生变化；请在编辑或编译结束后重试，本次未覆盖')
     return local_hash, cloud_hash
 
 
@@ -576,7 +576,7 @@ def sync_files(args, local, cloud, files, conflicts):
                 hashes = (digest(local_file) if local_sig is not None else None,
                           digest(cloud_file) if cloud_sig is not None else None)
                 if signature(local_file) != local_sig or signature(cloud_file) != cloud_sig:
-                    raise OSError('文件在读取过程中发生变化，已跳过本次比较')
+                    raise OSError('文件读取期间发生变化；请在编辑或编译结束后重试，本次未覆盖')
             if hashes[0] == hashes[1]:
                 preserving = conflicts.get(name, {})
                 if preserving.get('status') == 'preserving':
@@ -832,31 +832,61 @@ def resolve_review_newest(args, local, cloud, files, conflicts):
         raise ValueError(f'没有待确认的已保留版本：{name}')
     primary = record['primary']
     sidecar = record['sidecar']
-    primary_sig = record[primary]
-    secondary_sig = record['cloud' if primary == 'local' else 'local']
-    if primary_sig[1] == secondary_sig[1]:
-        raise ValueError('两个原始版本的修改时间相同；请人工检查后选择')
     main_local = safe_path(local, name)
     main_cloud = safe_path(cloud, name)
     copy_local = safe_path(local, sidecar)
     copy_cloud = safe_path(cloud, sidecar)
-    if (signature(main_local) != primary_sig or signature(main_cloud) != primary_sig
-            or signature(copy_local) != secondary_sig or signature(copy_cloud) != secondary_sig):
-        raise OSError('保留版本后来发生变化；请人工检查，未自动覆盖')
-    main_hashes = checked_digests(main_local, main_cloud, primary_sig, primary_sig)
-    copy_hashes = checked_digests(copy_local, copy_cloud, secondary_sig, secondary_sig)
-    if main_hashes[0] != main_hashes[1] or copy_hashes[0] != copy_hashes[1]:
-        raise OSError('两侧版本不一致；请人工检查，未自动覆盖')
-    winner = primary if primary_sig[1] > secondary_sig[1] else (
+    main_sigs = (signature(main_local), signature(main_cloud))
+    copy_sigs = (signature(copy_local), signature(copy_cloud))
+    if any(item is None for item in (*main_sigs, *copy_sigs)):
+        raise OSError('主文件或保留副本缺失；请人工检查，未自动覆盖')
+    main_hashes = checked_digests(main_local, main_cloud, *main_sigs)
+    copy_hashes = checked_digests(copy_local, copy_cloud, *copy_sigs)
+    if copy_hashes[0] != copy_hashes[1]:
+        raise OSError('保留副本两侧已有不同内容；请先核对副本，未自动覆盖')
+    if copy_sigs[0][1] != copy_sigs[1][1]:
+        raise OSError('保留副本两侧的修改日期不同；请人工检查，未自动覆盖')
+    main_paths = (main_local, main_cloud)
+    copy_paths = (copy_local, copy_cloud)
+    if main_hashes[0] == main_hashes[1]:
+        if main_sigs[0][1] != main_sigs[1][1]:
+            raise OSError('主文件两侧的修改日期不同；请人工检查，未自动覆盖')
+        main_index = 0 if primary == 'local' else 1
+    else:
+        anchor = files.get(name, {}).get('anchorHash')
+        if not isinstance(anchor, str):
+            raise OSError('主文件两侧不同且缺少共同版本；请人工检查，未自动覆盖')
+        if main_hashes[0] == anchor and main_hashes[1] != anchor:
+            main_index = 1
+        elif main_hashes[1] == anchor and main_hashes[0] != anchor:
+            main_index = 0
+        else:
+            raise OSError('主文件两侧都相对共同版本发生变化；请人工检查，未自动覆盖')
+    if main_sigs[main_index][1] == copy_sigs[0][1]:
+        raise ValueError('当前主文件与保留副本的修改时间相同；请人工检查后选择')
+    main_is_newer = main_sigs[main_index][1] > copy_sigs[0][1]
+    if main_is_newer and main_hashes[0] != main_hashes[1]:
+        stale_index = 1 - main_index
+        copy_protected(args, main_paths[main_index], main_paths[stale_index],
+                       main_sigs[main_index], main_sigs[stale_index], name,
+                       'local' if stale_index == 0 else 'cloud', 'review-newest-overwrite')
+    elif not main_is_newer:
+        for index, side in enumerate(('local', 'cloud')):
+            copy_protected(args, copy_paths[index], main_paths[index],
+                           copy_sigs[index], main_sigs[index], name,
+                           side, 'review-newest-overwrite')
+    chosen_hash = main_hashes[main_index] if main_is_newer else copy_hashes[0]
+    winner = ('local' if main_index == 0 else 'cloud') if main_is_newer else (
         'cloud' if primary == 'local' else 'local')
-    if winner != primary:
-        copy_protected(args, copy_local, main_local, secondary_sig, primary_sig,
-                       name, 'local', 'review-newest-overwrite')
-        copy_protected(args, copy_cloud, main_cloud, secondary_sig, primary_sig,
-                       name, 'cloud', 'review-newest-overwrite')
+    final_main_sigs = (signature(main_local), signature(main_cloud))
+    if (None in final_main_sigs
+            or checked_digests(main_local, main_cloud, *final_main_sigs) != (chosen_hash, chosen_hash)
+            or (signature(copy_local), signature(copy_cloud)) != copy_sigs
+            or checked_digests(copy_local, copy_cloud, *copy_sigs) != copy_hashes):
+        raise OSError('选定版本在处理期间发生变化；请重新检查，冲突记录仍保留')
     next_files = dict(files)
-    next_files[name] = {'local': signature(main_local), 'cloud': signature(main_cloud),
-                        'anchorHash': main_hashes[0] if winner == primary else copy_hashes[0]}
+    next_files[name] = {'local': final_main_sigs[0], 'cloud': final_main_sigs[1],
+                        'anchorHash': chosen_hash}
     next_conflicts = dict(conflicts)
     next_conflicts.pop(name)
     save_state(args.state, local, cloud, next_files, next_conflicts)
