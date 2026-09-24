@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import UserNotifications
 
 private let appID = "com.ensom.ResearchSync"
 private let fm = FileManager.default
@@ -49,10 +50,11 @@ struct SyncConfig: Codable {
     var backupRetentionDays = 15
     var enabled = true
     var language = "zh-Hans"
+    var notificationMode = "off"
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
-        case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language
+        case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
         case source, destination, scheduledDirection
     }
 
@@ -70,6 +72,7 @@ struct SyncConfig: Codable {
         backupRetentionDays = try data.decodeIfPresent(Int.self, forKey: .backupRetentionDays) ?? 15
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
+        notificationMode = try data.decodeIfPresent(String.self, forKey: .notificationMode) ?? "off"
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
             pairs = saved
         } else {
@@ -93,6 +96,7 @@ struct SyncConfig: Codable {
         try data.encode(backupRetentionDays, forKey: .backupRetentionDays)
         try data.encode(enabled, forKey: .enabled)
         try data.encode(language, forKey: .language)
+        try data.encode(notificationMode, forKey: .notificationMode)
     }
 }
 
@@ -412,6 +416,7 @@ final class SyncModel: ObservableObject {
     @Published var conflictsByPair: [UUID: [PendingConflict]] = [:]
     @Published var history: [SyncHistoryRecord] = []
     @Published var historyError: String?
+    private var notificationRequestID = UUID()
 
     init() {
         config = (try? loadConfig()) ?? SyncConfig()
@@ -489,6 +494,24 @@ final class SyncModel: ObservableObject {
         }
     }
 
+    func chooseNotificationMode(_ mode: String) {
+        notificationRequestID = UUID()
+        let requestID = notificationRequestID
+        guard mode != "off" else { config.notificationMode = "off"; return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            DispatchQueue.main.async {
+                guard self.notificationRequestID == requestID else { return }
+                if granted {
+                    self.config.notificationMode = mode
+                } else {
+                    self.config.notificationMode = "off"
+                    self.statusKey = "notificationDenied"
+                    self.statusDetail = error.map { uiError($0, language: self.config.language) }
+                }
+            }
+        }
+    }
+
     func save() {
         do {
             if config.enabled && !config.pairs.contains(where: { $0.enabled }) {
@@ -505,6 +528,9 @@ final class SyncModel: ObservableObject {
                 config.conflictPolicy = "keep-both"
             }
             config.backupRetentionDays = min(365, max(1, config.backupRetentionDays))
+            if !["off", "issues", "all"].contains(config.notificationMode) {
+                config.notificationMode = "off"
+            }
             try saveConfig(config)
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
@@ -525,13 +551,18 @@ final class SyncModel: ObservableObject {
             let resultDetail: String?
             do {
                 let output = try runSync(current, pairID: id, direction: direction)
+                postSyncNotification(config: current, output: output, failed: false)
                 let reviews = output.components(separatedBy: "reviews=").dropFirst()
                     .compactMap { Int($0.prefix(while: \.isNumber)) }.reduce(0, +)
                 resultKey = all ? "doneAll" : "donePair"
                 resultDetail = reviews > 0
                     ? String(format: uiText("reviewsRemain", language: current.language), reviews)
                     : nil
-            } catch { resultKey = "error"; resultDetail = uiError(error, language: current.language) }
+            } catch {
+                postSyncNotification(config: current, output: "", failed: true)
+                resultKey = "error"
+                resultDetail = uiError(error, language: current.language)
+            }
             DispatchQueue.main.async {
                 self.statusKey = resultKey
                 self.statusDetail = resultDetail
@@ -655,6 +686,8 @@ final class SyncModel: ObservableObject {
 
 @main
 struct ResearchSyncApp: App {
+    @StateObject private var model: SyncModel
+
     init() {
         let args = CommandLine.arguments
         if args.contains("--install") {
@@ -758,14 +791,40 @@ struct ResearchSyncApp: App {
                 let id: UUID?
                 if let index = args.firstIndex(of: "--pair"), args.indices.contains(index + 1) { id = UUID(uuidString: args[index + 1]) }
                 else { id = nil }
-                print(try runSync(config, pairID: id, direction: direction, dryRun: args.contains("--dry-run")))
+                let dryRun = args.contains("--dry-run")
+                let output = try runSync(config, pairID: id, direction: direction, dryRun: dryRun)
+                if !dryRun { postSyncNotification(config: config, output: output, failed: false) }
+                print(output)
                 exit(0)
-            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+            } catch {
+                if !args.contains("--dry-run"), let config = try? loadConfig(configPath) {
+                    postSyncNotification(config: config, output: "", failed: true)
+                }
+                fputs(error.localizedDescription + "\n", stderr)
+                exit(1)
+            }
         }
+        self._model = StateObject(wrappedValue: SyncModel())
+        UNUserNotificationCenter.current().delegate = syncNotificationDelegate
     }
 
     var body: some Scene {
-        WindowGroup { ContentView() }
+        Window("路径同步", id: "main") { ContentView(model: model) }
             .windowStyle(.titleBar)
+        MenuBarExtra {
+            MenuBarContent(model: model)
+                .onAppear {
+                    model.refreshConflicts()
+                    model.refreshHistory()
+                }
+                .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+                    model.refreshConflicts()
+                    model.refreshHistory()
+                }
+        } label: {
+            Image(systemName: "arrow.left.arrow.right")
+                .accessibilityLabel(uiText("appName", language: model.config.language))
+        }
+        .menuBarExtraStyle(.menu)
     }
 }

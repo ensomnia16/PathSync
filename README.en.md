@@ -6,6 +6,8 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
+- Use the menu bar to see the pending review count, sync all folders, or reopen the main window or History after closing it.
+- Choose notifications for conflicts or failures, every completed run, or off. Notifications are off by default; enabling them requests macOS permission. Notification text contains no file names or paths.
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
 - Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Filter by folder or result; the raw log remains available for troubleshooting.
 - By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
@@ -19,7 +21,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.11.1) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.12.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

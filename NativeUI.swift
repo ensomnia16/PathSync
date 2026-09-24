@@ -1,8 +1,47 @@
 import AppKit
 import SwiftUI
 
+struct MenuBarContent: View {
+    @ObservedObject var model: SyncModel
+    @Environment(\.openWindow) private var openWindow
+
+    private func t(_ key: String) -> String { uiText(key, language: model.config.language) }
+
+    private func showWindow(_ page: String) {
+        model.page = page
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    var body: some View {
+        if model.busy {
+            Text(t("syncingAll"))
+        } else if model.conflictCount > 0 {
+            Text(String(format: t("menubarPending"), model.conflictCount))
+        } else if !model.config.pairs.contains(where: { $0.enabled }) {
+            Text(t("menubarNoPairs"))
+        } else {
+            Text(t("ready"))
+        }
+
+        Divider()
+        Button {
+            model.syncNow(all: true)
+        } label: {
+            Label(t("syncAllNow"), systemImage: "arrow.triangle.2.circlepath")
+        }
+        .disabled(model.busy || !model.config.pairs.contains(where: { $0.enabled }))
+
+        Button(t("menubarOpen")) { showWindow("schedule") }
+        Button(t("menubarOpenHistory")) { showWindow("history") }
+
+        Divider()
+        Button(t("menubarQuit")) { NSApp.terminate(nil) }
+    }
+}
+
 struct ContentView: View {
-    @StateObject private var model = SyncModel()
+    @ObservedObject var model: SyncModel
 
     private func t(_ key: String) -> String { uiText(key, language: model.config.language) }
 
@@ -210,6 +249,15 @@ struct ContentView: View {
 
             Section {
                 Toggle(t("background"), isOn: $model.config.enabled)
+                Picker(t("notifications"), selection: Binding(
+                    get: { model.config.notificationMode },
+                    set: { model.chooseNotificationMode($0) }
+                )) {
+                    Text(t("notificationsOff")).tag("off")
+                    Text(t("notificationsIssues")).tag("issues")
+                    Text(t("notificationsAll")).tag("all")
+                }
+                .pickerStyle(.menu)
                 Toggle(t("latex"), isOn: $model.config.excludeLatexIntermediates)
                 Picker(t("conflictHandling"), selection: $model.config.conflictPolicy) {
                     Text(t("autoKeepBoth")).tag("keep-both")
@@ -222,7 +270,7 @@ struct ContentView: View {
                                    value: "\(model.config.backupRetentionDays) \(t("days"))")
                 }
             } footer: {
-                Text(t("backgroundHint") + " " + t("filterHint") + " " + t("conflictPolicyHint")
+                Text(t("backgroundHint") + " " + t("notificationHint") + " " + t("filterHint") + " " + t("conflictPolicyHint")
                     + " " + t("backupHint"))
             }
         }
