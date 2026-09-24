@@ -217,7 +217,6 @@ struct ContentView: View {
                     Text(t("keepNewest")).tag("newest")
                 }
                 .pickerStyle(.menu)
-                Toggle(t("propagateDeletions"), isOn: $model.config.propagateDeletions)
                 Stepper(value: $model.config.backupRetentionDays, in: 1...365) {
                     LabeledContent(t("backupRetention"),
                                    value: "\(model.config.backupRetentionDays) \(t("days"))")

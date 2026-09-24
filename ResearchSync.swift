@@ -46,14 +46,13 @@ struct SyncConfig: Codable {
     var dailyMinute = 0
     var excludeLatexIntermediates = true
     var conflictPolicy = "keep-both"
-    var propagateDeletions = false
     var backupRetentionDays = 15
     var enabled = true
     var language = "zh-Hans"
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
-        case excludeLatexIntermediates, conflictPolicy, propagateDeletions, backupRetentionDays, enabled, language
+        case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language
         case source, destination, scheduledDirection
     }
 
@@ -68,7 +67,6 @@ struct SyncConfig: Codable {
         dailyMinute = try data.decodeIfPresent(Int.self, forKey: .dailyMinute) ?? 0
         excludeLatexIntermediates = try data.decodeIfPresent(Bool.self, forKey: .excludeLatexIntermediates) ?? true
         conflictPolicy = try data.decodeIfPresent(String.self, forKey: .conflictPolicy) ?? "keep-both"
-        propagateDeletions = try data.decodeIfPresent(Bool.self, forKey: .propagateDeletions) ?? false
         backupRetentionDays = try data.decodeIfPresent(Int.self, forKey: .backupRetentionDays) ?? 15
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
@@ -92,7 +90,6 @@ struct SyncConfig: Codable {
         try data.encode(dailyMinute, forKey: .dailyMinute)
         try data.encode(excludeLatexIntermediates, forKey: .excludeLatexIntermediates)
         try data.encode(conflictPolicy, forKey: .conflictPolicy)
-        try data.encode(propagateDeletions, forKey: .propagateDeletions)
         try data.encode(backupRetentionDays, forKey: .backupRetentionDays)
         try data.encode(enabled, forKey: .enabled)
         try data.encode(language, forKey: .language)
@@ -214,8 +211,7 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 }
 
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
-                     conflictPolicy: String, propagateDeletions: Bool,
-                     backupRetentionDays: Int, dryRun: Bool) throws -> String {
+                     conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
@@ -224,7 +220,6 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     var arguments = [helper, local, cloud, mergeStatePath(pair), "--direction", direction.rawValue,
                      "--conflict-policy", conflictPolicy,
                      "--backup-retention-days", String(backupRetentionDays)]
-    if propagateDeletions { arguments.append("--propagate-deletions") }
     if excludeLatex { arguments.append("--exclude-latex") }
     if dryRun { arguments.append("--dry-run") }
     process.arguments = arguments
@@ -353,7 +348,6 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
                 let result = try syncOne(pair, direction: chosen,
                                          excludeLatex: config.excludeLatexIntermediates,
                                          conflictPolicy: config.conflictPolicy,
-                                         propagateDeletions: config.propagateDeletions,
                                          backupRetentionDays: config.backupRetentionDays,
                                          dryRun: dryRun)
                 outputs.append("[\(pair.name)] \(result)")

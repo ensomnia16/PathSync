@@ -304,13 +304,14 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(left.read_text(), 'AAAA')
         self.assertEqual(right.read_text(), 'BBBB')
 
-    def test_missing_file_is_restored_without_deleting_other_files(self):
+    def test_one_sided_deletion_and_unrelated_addition_follow_same_anchor(self):
         (self.local / 'source.tex').write_text('keep')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'source.tex').unlink()
         (self.cloud / 'extra.bib').write_text('reference')
         self.assertEqual(self.run_merge().returncode, 0)
-        self.assertEqual((self.local / 'source.tex').read_text(), 'keep')
+        self.assertFalse((self.local / 'source.tex').exists())
+        self.assertFalse((self.cloud / 'source.tex').exists())
         self.assertEqual((self.local / 'extra.bib').read_text(), 'reference')
 
     def test_dry_run_does_not_copy_or_write_state(self):
@@ -447,7 +448,7 @@ class MergeTests(unittest.TestCase):
         (self.local / 'paper.tex').write_text('anchor')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
-        result = self.run_merge('--propagate-deletions')
+        result = self.run_merge()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('DELETED\tpaper.tex\tside=cloud', result.stdout)
         self.assertFalse((self.cloud / 'paper.tex').exists())
@@ -460,15 +461,51 @@ class MergeTests(unittest.TestCase):
         restored = self.run_merge('--restore', backup_id)
         self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'anchor')
-        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 0)
+        self.assertEqual(self.run_merge().returncode, 0)
         self.assertEqual((self.local / 'paper.tex').read_text(), 'anchor')
+
+    def test_cloud_deletion_follows_direction_and_backs_up_local_file(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.cloud / 'paper.tex').unlink()
+        skipped = self.run_merge('--direction', 'upload')
+        self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertTrue((self.local / 'paper.tex').exists())
+        self.assertFalse((self.cloud / 'paper.tex').exists())
+        preview = self.run_merge('--direction', 'download', '--dry-run')
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertIn('WOULD_DELETE\tpaper.tex\tside=local', preview.stdout)
+        self.assertTrue((self.local / 'paper.tex').exists())
+        result = self.run_merge('--direction', 'download')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('DELETED\tpaper.tex\tside=local', result.stdout)
+        self.assertFalse((self.local / 'paper.tex').exists())
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(),
+                         'anchor')
+
+    def test_legacy_missing_side_cache_cannot_skip_anchor_deletion(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        state = json.loads(self.state.read_text())
+        record = state['files']['paper.tex']
+        record['local'] = None
+        record['localCtime'] = None
+        record['missingSide'] = 'local'
+        self.state.write_text(json.dumps(state))
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('DELETED\tpaper.tex\tside=cloud', result.stdout)
+        self.assertFalse((self.cloud / 'paper.tex').exists())
+        self.assertNotIn('missingSide', json.loads(self.state.read_text())['files']['paper.tex'])
 
     def test_delete_edit_is_conflict_and_manual_choice_can_restore(self):
         (self.local / 'paper.tex').write_text('anchor')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
         (self.cloud / 'paper.tex').write_text('cloud edit')
-        result = self.run_merge('--propagate-deletions', policy='keep-both')
+        result = self.run_merge(policy='keep-both')
         self.assertEqual(result.returncode, 2)
         self.assertIn('CONFLICT\tpaper.tex', result.stdout)
         self.assertFalse((self.local / 'paper.tex').exists())
@@ -482,7 +519,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
         (self.cloud / 'paper.tex').write_text('cloud edit')
-        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        self.assertEqual(self.run_merge().returncode, 2)
         result = self.run_merge('--resolve', 'paper.tex', '--choice', 'local')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.cloud / 'paper.tex').exists())
@@ -497,7 +534,7 @@ class MergeTests(unittest.TestCase):
         hidden_cloud = self.root / 'cloud-temporarily-unavailable'
         self.cloud.rename(hidden_cloud)
         try:
-            result = self.run_merge('--propagate-deletions')
+            result = self.run_merge()
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn('目录扫描有错误', result.stdout)
             self.assertEqual((hidden_cloud / 'paper.tex').read_text(), 'anchor')
@@ -513,7 +550,7 @@ class MergeTests(unittest.TestCase):
         (self.local / 'paper.tex').unlink()
         (self.cloud / 'paper.tex').write_text('cloud edit')
         for _ in range(2):
-            result = self.run_merge('--propagate-deletions')
+            result = self.run_merge()
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn('CONFLICT\tpaper.tex', result.stdout)
             state = json.loads(self.state.read_text())
@@ -522,7 +559,7 @@ class MergeTests(unittest.TestCase):
             self.assertFalse((self.local / 'paper.tex').exists())
             self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edit')
 
-    def test_disabling_delete_propagation_does_not_hide_delete_edit_conflict(self):
+    def test_default_policy_does_not_hide_delete_edit_conflict(self):
         (self.local / 'paper.tex').write_text('anchor')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
@@ -538,7 +575,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
         (self.cloud / 'paper.tex').write_text('cloud edit')
-        result = self.run_merge('--propagate-deletions', policy='newest')
+        result = self.run_merge(policy='newest')
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('CONFLICT\tpaper.tex', result.stdout)
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edit')
@@ -548,7 +585,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
         (self.cloud / 'paper.tex').unlink()
-        result = self.run_merge('--propagate-deletions')
+        result = self.run_merge()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex']['anchorHash'], None)
 
@@ -565,7 +602,7 @@ class MergeTests(unittest.TestCase):
         (self.local / 'unrelated.tex').write_text('second')
 
         for _ in range(2):
-            result = self.run_merge('--propagate-deletions', policy='newest')
+            result = self.run_merge(policy='newest')
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             self.assertIn('CONFLICT\tchapter\t目录删除与内部修改', result.stdout)
             self.assertFalse(chapter.exists())
@@ -579,7 +616,7 @@ class MergeTests(unittest.TestCase):
                                  state_before['files'][name]['anchorHash'])
         self.assertEqual((self.cloud / 'unrelated.tex').read_text(), 'second')
         (self.cloud / 'chapter' / 'sibling.tex').write_text('later cloud edit')
-        later = self.run_merge('--propagate-deletions')
+        later = self.run_merge()
         self.assertEqual(later.returncode, 2, later.stdout + later.stderr)
         self.assertFalse(chapter.exists())
         self.assertEqual((self.cloud / 'chapter' / 'sibling.tex').read_text(), 'later cloud edit')
@@ -592,9 +629,9 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         shutil.rmtree(chapter)
         (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
-        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        self.assertEqual(self.run_merge().returncode, 2)
         shutil.copytree(self.cloud / 'chapter', chapter)
-        result = self.run_merge('--propagate-deletions')
+        result = self.run_merge()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('chapter', json.loads(self.state.read_text())['conflicts'])
         self.assertEqual(json.loads(self.state.read_text())['files']['chapter/edited.tex']['anchorHash'],
@@ -608,9 +645,9 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         shutil.rmtree(chapter)
         (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
-        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        self.assertEqual(self.run_merge().returncode, 2)
         (self.cloud / 'chapter' / 'edited.tex').write_text('base')
-        result = self.run_merge('--propagate-deletions')
+        result = self.run_merge()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('chapter', json.loads(self.state.read_text())['conflicts'])
         self.assertFalse((self.cloud / 'chapter' / 'edited.tex').exists())
@@ -623,7 +660,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         shutil.rmtree(chapter)
         (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
-        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        self.assertEqual(self.run_merge().returncode, 2)
         result = self.run_merge('--resolve', 'chapter', '--choice', 'local')
         self.assertEqual(result.returncode, 2)
         self.assertIn('目录级冲突', result.stderr)
@@ -652,7 +689,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         shutil.rmtree(chapter)
         (self.cloud / 'chapter' / 'new-empty-folder').mkdir()
-        result = self.run_merge('--propagate-deletions')
+        result = self.run_merge()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('CONFLICT\tchapter', result.stdout)
         self.assertEqual((self.cloud / 'chapter' / 'old.tex').read_text(), 'anchor')
@@ -669,7 +706,7 @@ class MergeTests(unittest.TestCase):
         self.state.write_text(json.dumps(state))
         shutil.rmtree(chapter)
         (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
-        result = self.run_merge('--propagate-deletions')
+        result = self.run_merge()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('CONFLICT\tchapter', result.stdout)
         self.assertEqual((self.cloud / 'chapter' / 'sibling.tex').read_text(), 'sibling')
@@ -683,7 +720,7 @@ class MergeTests(unittest.TestCase):
         (self.cloud / 'chapter' / 'edited.tex').write_text('cloud edit')
         self.assertEqual(self.run_merge().returncode, 2)
         shutil.rmtree(chapter)
-        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 2)
+        self.assertEqual(self.run_merge().returncode, 2)
         result = self.run_merge('--resolve', 'chapter/edited.tex', '--choice', 'cloud')
         self.assertEqual(result.returncode, 2)
         self.assertIn('上级目录', result.stderr)

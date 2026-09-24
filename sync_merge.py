@@ -439,7 +439,7 @@ def sync_files(args, local, cloud, files, conflicts):
     names = (scan(local, args.exclude_latex, errors)
              | scan(cloud, args.exclude_latex, errors) | set(files) | set(conflicts))
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
-              'kept_both': 0, 'newest': 0, 'deleted': 0, 'pending_delete': 0, 'backups': 0,
+              'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
 
     def aligned(path_name, local_sig, cloud_sig, content_hash):
@@ -558,7 +558,7 @@ def sync_files(args, local, cloud, files, conflicts):
             if review and (local_sig is None or cloud_sig is None):
                 raise OSError('待合并的主文件缺失；请先人工检查，未覆盖任何一侧')
 
-            if (not pending and previous
+            if (not pending and previous and local_sig is not None and cloud_sig is not None
                     and local_sig == previous.get('local')
                     and cloud_sig == previous.get('cloud')
                     and previous.get('localCtime') == change_time(local_file)
@@ -567,9 +567,6 @@ def sync_files(args, local, cloud, files, conflicts):
                     review_hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
                     if review_hashes[0] != review_hashes[1]:
                         raise OSError('待合并的主文件两侧又出现不同版本；请先人工检查，未覆盖任何一侧')
-                if previous.get('missingSide') and not args.dry_run:
-                    next_files[name] = {key: value for key, value in previous.items()
-                                        if key not in ('missingSide', 'missingSeenAt')}
                 counts['unchanged'] += 1
                 continue
 
@@ -698,13 +695,6 @@ def sync_files(args, local, cloud, files, conflicts):
                 counts['skipped'] += 1
                 continue
             source_sig = local_sig if upload else cloud_sig
-            if source_sig is None and not args.propagate_deletions:
-                if args.direction != 'merge':
-                    counts['skipped'] += 1
-                    continue
-                # Deletion propagation is disabled: restore the known version.
-                upload = not upload
-                source_sig = local_sig if upload else cloud_sig
             if not args.dry_run:
                 if source_sig is None:
                     delete_protected(args, cloud if upload else local, name,
@@ -905,7 +895,6 @@ def main():
     parser.add_argument('state', type=Path)
     parser.add_argument('--direction', choices=('merge', 'upload', 'download'), default='merge')
     parser.add_argument('--conflict-policy', choices=('keep-both', 'ask', 'newest'), default='keep-both')
-    parser.add_argument('--propagate-deletions', action='store_true')
     parser.add_argument('--backup-retention-days', type=int, default=15)
     parser.add_argument('--exclude-latex', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
