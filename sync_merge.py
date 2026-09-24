@@ -34,6 +34,12 @@ def preserved_record(original, sidecar, primary):
             'primary': primary, 'preservedAt': datetime.now(timezone.utc).isoformat()}
 
 
+def conflict_sidecar(name, secondary, content_hash):
+    relative = Path(name)
+    return str(relative.with_name(
+        relative.stem + f' ({secondary} conflict {content_hash[:12]})' + relative.suffix))
+
+
 def migrate_old_sidecars(files, conflicts):
     for name, sidecar_state in files.items():
         relative = Path(name)
@@ -79,6 +85,13 @@ def signature(path):
     return [info.st_size, info.st_mtime_ns]
 
 
+def change_time(path):
+    try:
+        return path.lstat().st_ctime_ns
+    except FileNotFoundError:
+        return None
+
+
 def digest(path):
     hasher = hashlib.sha256()
     with path.open('rb') as source:
@@ -115,14 +128,24 @@ def scan(root, exclude_latex, errors):
     return found
 
 
-def copy_atomic(source, destination, source_sig, destination_sig):
+def copy_atomic(source, destination, source_sig, destination_sig,
+                expected_source_hash=None, expected_destination_hash=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + '.researchsync-partial')
     try:
+        source_hash = expected_source_hash or digest(source)
+        destination_hash = (expected_destination_hash if expected_destination_hash is not None
+                            else digest(destination) if destination_sig is not None else None)
+        if (signature(source) != source_sig or signature(destination) != destination_sig
+                or digest(source) != source_hash
+                or (destination_sig is not None and digest(destination) != destination_hash)):
+            raise OSError('文件在复制前发生变化，已跳过本次复制')
         if temporary.exists() or temporary.is_symlink():
             temporary.unlink()
         shutil.copy2(source, temporary)
-        if signature(source) != source_sig or signature(destination) != destination_sig:
+        if (signature(source) != source_sig or signature(destination) != destination_sig
+                or digest(source) != source_hash or digest(temporary) != source_hash
+                or (destination_sig is not None and digest(destination) != destination_hash)):
             raise OSError('文件在复制过程中发生变化，已跳过本次复制')
         os.replace(temporary, destination)
     finally:
@@ -168,12 +191,20 @@ def backup_file(state_path, root, name, side, reason, retention_days):
 
 def copy_protected(args, source, destination, source_sig, destination_sig,
                    name, destination_side, reason='overwrite'):
+    source_hash = digest(source)
+    destination_hash = digest(destination) if destination_sig is not None else None
+    if signature(source) != source_sig or signature(destination) != destination_sig:
+        raise OSError('文件在备份前发生变化，已跳过本次复制')
     if destination_sig is not None:
         backup_id = backup_file(args.state, args.local if destination_side == 'local' else args.cloud,
                                 name, destination_side, reason, args.backup_retention_days)
         if backup_id:
             args.backup_count += 1
-    copy_atomic(source, destination, source_sig, destination_sig)
+            if json.loads((backup_root(args.state) / backup_id / 'manifest.json').read_text(
+                    encoding='utf-8'))['sha256'] != destination_hash:
+                raise OSError('目标文件在备份期间发生变化，已取消覆盖')
+    copy_atomic(source, destination, source_sig, destination_sig,
+                source_hash, destination_hash)
 
 
 def delete_protected(args, root, name, side):
@@ -182,9 +213,12 @@ def delete_protected(args, root, name, side):
     if before is None:
         return
     backup_id = backup_file(args.state, root, name, side, 'delete', args.backup_retention_days)
-    if backup_id:
-        args.backup_count += 1
-    if signature(target) != before:
+    if backup_id is None:
+        raise OSError('删除前文件已改变，已取消删除')
+    args.backup_count += 1
+    backed_up_hash = json.loads((backup_root(args.state) / backup_id / 'manifest.json').read_text(
+        encoding='utf-8'))['sha256']
+    if signature(target) != before or digest(target) != backed_up_hash:
         raise OSError('删除前文件发生变化，已取消删除')
     target.unlink()
     print(f'DELETED\t{name}\tside={side}')
@@ -304,12 +338,10 @@ def preserve_both(args, local, cloud, name, local_sig, cloud_sig, hashes,
     cloud_file = safe_path(cloud, name)
     backup_dir, local_backup, cloud_backup = backups or backup_pair(
         state_path, name, local_file, cloud_file, local_sig, cloud_sig, hashes)
-    relative = Path(name)
     secondary = 'cloud' if primary == 'local' else 'local'
     secondary_hash = hashes[1] if primary == 'local' else hashes[0]
     secondary_backup = cloud_backup if primary == 'local' else local_backup
-    sidecar_name = str(relative.with_name(
-        relative.stem + f' ({secondary} conflict {secondary_hash[:12]})' + relative.suffix))
+    sidecar_name = conflict_sidecar(name, secondary, secondary_hash)
     local_sidecar = safe_path(local, sidecar_name)
     cloud_sidecar = safe_path(cloud, sidecar_name)
     for target in (cloud_sidecar, local_sidecar):
@@ -333,13 +365,16 @@ def sync_files(args, local, cloud, files, conflicts):
     next_files = dict(files)
     next_conflicts = dict(conflicts)
     errors = []
-    names = scan(local, args.exclude_latex, errors) | scan(cloud, args.exclude_latex, errors) | set(files)
+    names = (scan(local, args.exclude_latex, errors)
+             | scan(cloud, args.exclude_latex, errors) | set(files) | set(conflicts))
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'pending_delete': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
 
-    def aligned(local_sig, cloud_sig, content_hash):
-        return {'local': local_sig, 'cloud': cloud_sig, 'anchorHash': content_hash}
+    def aligned(path_name, local_sig, cloud_sig, content_hash):
+        return {'local': local_sig, 'cloud': cloud_sig, 'anchorHash': content_hash,
+                'localCtime': change_time(safe_path(local, path_name)),
+                'cloudCtime': change_time(safe_path(cloud, path_name))}
 
     for name in sorted(names):
         try:
@@ -347,82 +382,32 @@ def sync_files(args, local, cloud, files, conflicts):
             cloud_file = safe_path(cloud, name)
             local_sig = signature(local_file)
             cloud_sig = signature(cloud_file)
-            if local_sig is None and cloud_sig is None:
-                if not args.dry_run:
-                    next_files.pop(name, None)
-                    clear_pending(next_conflicts, name)
+            # A failed directory scan cannot establish absence, even when both
+            # current path lookups happen to report a missing file.
+            if errors and (local_sig is None or cloud_sig is None):
+                print(f'FAILED\t{name}\t目录扫描有错误，无法确认文件确实已删除')
+                counts['failed'] += 1
                 continue
+            previous = files.get(name)
             pending = name in conflicts and not is_review(conflicts[name])
             review = name in conflicts and is_review(conflicts[name])
-            previous = files.get(name)
-            if local_sig is None or cloud_sig is None:
-                if errors:
-                    print(f'FAILED\t{name}\t目录扫描有错误，无法确认文件确实已删除')
-                    counts['failed'] += 1
-                    continue
-                upload = cloud_sig is None
-                existing_file = local_file if upload else cloud_file
-                existing_sig = local_sig if upload else cloud_sig
-                existing_side = 'local' if upload else 'cloud'
-                missing_side = 'cloud' if upload else 'local'
-                existing_hash = digest(existing_file)
-                if signature(existing_file) != existing_sig:
-                    raise OSError('读取期间文件发生变化，已跳过')
-                deletion_direction = args.direction == 'merge' or (
-                    args.direction == 'upload' and missing_side == 'local') or (
-                    args.direction == 'download' and missing_side == 'cloud')
-                if pending:
-                    if not args.dry_run:
-                        hashes = (existing_hash, None) if upload else (None, existing_hash)
-                        next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes,
-                                                                'delete_edit')
-                    print(f'CONFLICT\t{name}\t删除与编辑冲突，等待选择版本')
-                    counts['conflicts'] += 1
-                    continue
-                if (previous is not None and args.propagate_deletions and deletion_direction
-                        and not review):
-                    anchor = previous.get('anchorHash')
-                    existing_unchanged = (existing_hash == anchor if anchor is not None
-                                          else existing_sig == previous.get(existing_side))
-                    if existing_unchanged:
-                        if previous.get('missingSide') != missing_side:
-                            if not args.dry_run:
-                                next_files[name] = {**previous, 'missingSide': missing_side,
-                                                    'missingSeenAt': datetime.now(timezone.utc).isoformat()}
-                            print(f'PENDING_DELETE\t{name}\tmissing={missing_side}')
-                            counts['pending_delete'] += 1
-                            counts['skipped'] += 1
-                        else:
-                            if not args.dry_run:
-                                delete_protected(args, local if upload else cloud, name, existing_side)
-                                next_files.pop(name, None)
-                                next_conflicts.pop(name, None)
-                            else:
-                                print(f'WOULD_DELETE\t{name}\tside={existing_side}')
-                            counts['deleted'] += 1
-                    else:
-                        if not args.dry_run:
-                            hashes = (existing_hash, None) if upload else (None, existing_hash)
-                            next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes,
-                                                                    'delete_edit')
-                        print(f'CONFLICT\t{name}\t一侧删除、另一侧编辑，未删除任何文件')
-                        counts['conflicts'] += 1
-                    continue
-                if args.direction != 'merge' and (args.direction == 'upload') != upload:
-                    counts['skipped'] += 1
-                    continue
+            if local_sig is None and cloud_sig is None:
+                if review or conflicts.get(name, {}).get('status') == 'preserving':
+                    raise OSError('待合并的主文件两侧都已缺失；请先检查冲突副本')
                 if not args.dry_run:
-                    copy_atomic(existing_file, cloud_file if upload else local_file,
-                                existing_sig, None)
-                    next_files[name] = aligned(signature(local_file), signature(cloud_file),
-                                               existing_hash)
+                    if previous is not None:
+                        next_files[name] = aligned(name, None, None, None)
                     clear_pending(next_conflicts, name)
-                counts['uploaded' if upload else 'downloaded'] += 1
                 continue
+
+            if review and (local_sig is None or cloud_sig is None):
+                raise OSError('待合并的主文件缺失；请先人工检查，未覆盖任何一侧')
 
             if (not pending and previous
                     and local_sig == previous.get('local')
-                    and cloud_sig == previous.get('cloud')):
+                    and cloud_sig == previous.get('cloud')
+                    and previous.get('localCtime') == change_time(local_file)
+                    and previous.get('cloudCtime') == change_time(cloud_file)):
                 if review:
                     review_hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
                     if review_hashes[0] != review_hashes[1]:
@@ -433,29 +418,53 @@ def sync_files(args, local, cloud, files, conflicts):
                 counts['unchanged'] += 1
                 continue
 
-            hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
+            if local_sig is not None and cloud_sig is not None:
+                hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
+            else:
+                hashes = (digest(local_file) if local_sig is not None else None,
+                          digest(cloud_file) if cloud_sig is not None else None)
+                if signature(local_file) != local_sig or signature(cloud_file) != cloud_sig:
+                    raise OSError('文件在读取过程中发生变化，已跳过本次比较')
             if hashes[0] == hashes[1]:
+                preserving = conflicts.get(name, {})
+                if preserving.get('status') == 'preserving':
+                    primary = preserving['primary']
+                    sidecar = preserving['sidecar']
+                    expected_main = preserving[primary + 'Hash']
+                    expected_copy = preserving[('cloud' if primary == 'local' else 'local') + 'Hash']
+                    if hashes[0] != expected_main or any(
+                            signature(safe_path(root, sidecar)) is None
+                            or digest(safe_path(root, sidecar)) != expected_copy
+                            for root in (local, cloud)):
+                        raise OSError('中断的冲突保留尚未完成；请重新同步，未清除待处理记录')
+                    if not args.dry_run:
+                        next_files[sidecar] = aligned(sidecar, signature(local / sidecar),
+                                                      signature(cloud / sidecar), expected_copy)
+                        next_conflicts[name] = preserved_record(preserving, sidecar, primary)
                 if not args.dry_run:
-                    next_files[name] = aligned(local_sig, cloud_sig, hashes[0])
+                    next_files[name] = aligned(name, local_sig, cloud_sig, hashes[0])
                     clear_pending(next_conflicts, name)
                 counts['unchanged'] += 1
                 continue
 
             anchor = previous.get('anchorHash') if previous else None
-            if previous and anchor is None:
+            if previous and anchor is None and (
+                    previous.get('local') is not None or previous.get('cloud') is not None):
                 if local_sig == previous.get('local'):
                     anchor = hashes[0]
                 elif cloud_sig == previous.get('cloud'):
                     anchor = hashes[1]
-            local_changed = previous is None or (
-                hashes[0] != anchor if anchor is not None else local_sig != previous.get('local'))
-            cloud_changed = previous is None or (
-                hashes[1] != anchor if anchor is not None else cloud_sig != previous.get('cloud'))
+                else:
+                    # Old state without an anchor cannot identify a winner.
+                    anchor = object()
+            local_changed = hashes[0] != anchor
+            cloud_changed = hashes[1] != anchor
             if review and local_changed and cloud_changed:
                 raise OSError('待合并的主文件两侧又出现不同版本；请先人工检查，未覆盖任何一侧')
 
-            if pending or (local_changed and cloud_changed):
-                if args.conflict_policy == 'newest' and not review:
+            if local_changed and cloud_changed:
+                if (args.conflict_policy == 'newest' and not review
+                        and local_sig is not None and cloud_sig is not None):
                     if local_sig[1] == cloud_sig[1]:
                         if not args.dry_run:
                             next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes,
@@ -478,7 +487,7 @@ def sync_files(args, local, cloud, files, conflicts):
                                        local_sig if upload else cloud_sig,
                                        cloud_sig if upload else local_sig,
                                        name, 'cloud' if upload else 'local', 'newest-overwrite')
-                        next_files[name] = aligned(signature(local_file), signature(cloud_file),
+                        next_files[name] = aligned(name, signature(local_file), signature(cloud_file),
                                                    hashes[0] if upload else hashes[1])
                         clear_pending(next_conflicts, name)
                         print(f'NEWEST\t{name}\tside={"local" if upload else "cloud"}')
@@ -487,31 +496,41 @@ def sync_files(args, local, cloud, files, conflicts):
                     counts['newest'] += 1
                     counts['uploaded' if upload else 'downloaded'] += 1
                     continue
-                if args.conflict_policy == 'keep-both':
+                if (args.conflict_policy == 'keep-both' and local_sig is not None
+                        and cloud_sig is not None):
                     if not args.dry_run:
                         # Persist the conflict first. A failed backup or cloud write
                         # must leave it visible for a later retry.
-                        next_conflicts[name] = conflict_record(
-                            local_sig, cloud_sig, hashes,
-                            'pending' if pending else ('initial' if previous is None else 'both_changed'))
+                        primary = (conflicts[name].get('primary') if pending else None) or (
+                            'cloud' if args.direction == 'download' else 'local')
+                        secondary = 'cloud' if primary == 'local' else 'local'
+                        sidecar_intent = conflict_sidecar(
+                            name, secondary, hashes[1] if primary == 'local' else hashes[0])
+                        next_conflicts[name] = {
+                            **conflict_record(local_sig, cloud_sig, hashes,
+                                              'pending' if pending else (
+                                                  'initial' if previous is None else 'both_changed')),
+                            'status': 'preserving', 'primary': primary,
+                            'sidecar': sidecar_intent}
                         save_state(args.state, local, cloud, next_files, next_conflicts)
                         sidecar_name, backup_dir = preserve_both(
                             args, local, cloud, name, local_sig, cloud_sig, hashes,
-                            primary='cloud' if args.direction == 'download' else 'local')
-                        next_files[name] = aligned(signature(local_file), signature(cloud_file),
-                                                   hashes[1] if args.direction == 'download' else hashes[0])
-                        next_files[sidecar_name] = aligned(signature(local / sidecar_name),
+                            primary=primary)
+                        next_files[name] = aligned(name, signature(local_file), signature(cloud_file),
+                                                   hashes[0] if primary == 'local' else hashes[1])
+                        next_files[sidecar_name] = aligned(sidecar_name, signature(local / sidecar_name),
                                                            signature(cloud / sidecar_name),
-                                                           hashes[0] if args.direction == 'download' else hashes[1])
+                                                           hashes[1] if primary == 'local' else hashes[0])
                         next_conflicts[name] = preserved_record(
-                            next_conflicts[name], sidecar_name,
-                            'cloud' if args.direction == 'download' else 'local')
+                            next_conflicts[name], sidecar_name, primary)
                         print(f'KEPT_BOTH\t{name}\tcopy={sidecar_name}\tbackup={backup_dir}')
                     else:
                         print(f'WOULD_KEEP_BOTH\t{name}')
                     counts['kept_both'] += 1
                 else:
-                    reason = 'pending' if pending else ('initial' if previous is None else 'both_changed')
+                    reason = ('delete_edit' if local_sig is None or cloud_sig is None else
+                              'pending' if pending else
+                              'initial' if previous is None else 'both_changed')
                     if not args.dry_run:
                         next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes, reason)
                     print(f'CONFLICT\t{name}\t两侧内容不同，等待选择版本')
@@ -523,16 +542,31 @@ def sync_files(args, local, cloud, files, conflicts):
                     not upload and args.direction == 'upload'):
                 counts['skipped'] += 1
                 continue
+            source_sig = local_sig if upload else cloud_sig
+            if source_sig is None and not args.propagate_deletions:
+                if args.direction != 'merge':
+                    counts['skipped'] += 1
+                    continue
+                # Deletion propagation is disabled: restore the known version.
+                upload = not upload
+                source_sig = local_sig if upload else cloud_sig
             if not args.dry_run:
-                copy_protected(args, local_file if upload else cloud_file,
-                               cloud_file if upload else local_file,
-                               local_sig if upload else cloud_sig,
-                               cloud_sig if upload else local_sig,
-                               name, 'cloud' if upload else 'local')
-                next_files[name] = aligned(signature(local_file), signature(cloud_file),
-                                           hashes[0] if upload else hashes[1])
+                if source_sig is None:
+                    delete_protected(args, cloud if upload else local, name,
+                                     'cloud' if upload else 'local')
+                    next_files[name] = aligned(name, None, None, None)
+                else:
+                    copy_protected(args, local_file if upload else cloud_file,
+                                   cloud_file if upload else local_file,
+                                   source_sig, cloud_sig if upload else local_sig,
+                                   name, 'cloud' if upload else 'local')
+                    next_files[name] = aligned(name, signature(local_file), signature(cloud_file),
+                                               hashes[0] if upload else hashes[1])
                 clear_pending(next_conflicts, name)
-            counts['uploaded' if upload else 'downloaded'] += 1
+            else:
+                if source_sig is None:
+                    print(f'WOULD_DELETE\t{name}\tside={"cloud" if upload else "local"}')
+            counts['deleted' if source_sig is None else 'uploaded' if upload else 'downloaded'] += 1
         except (OSError, ValueError) as error:
             print(f'FAILED\t{name}\t{error}')
             counts['failed'] += 1
@@ -591,7 +625,7 @@ def resolve_conflict(args, local, cloud, files, conflicts):
             if destination_sig is not None:
                 delete_protected(args, cloud if args.choice == 'local' else local,
                                  name, 'cloud' if args.choice == 'local' else 'local')
-            next_files.pop(name, None)
+            next_files[name] = {'local': None, 'cloud': None, 'anchorHash': None}
             action = 'deleted'
         else:
             copy_protected(args, source, destination, source_sig, destination_sig,

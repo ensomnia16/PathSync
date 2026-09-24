@@ -343,6 +343,20 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('conflicts=0', result.stdout)
 
+    def test_same_size_and_mtime_replacement_still_changes_the_anchor(self):
+        local_file = self.local / 'paper.tex'
+        cloud_file = self.cloud / 'paper.tex'
+        local_file.write_text('AAAA')
+        self.assertEqual(self.run_merge().returncode, 0)
+        old_mtime = local_file.stat().st_mtime_ns
+        replacement = self.local / 'new-paper.tex'
+        replacement.write_text('BBBB')
+        os.utime(replacement, ns=(old_mtime, old_mtime))
+        os.replace(replacement, local_file)
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(cloud_file.read_text(), 'BBBB')
+
     def test_newest_conflict_backs_up_loser_and_restores_from_history_id(self):
         (self.local / 'paper.tex').write_text('anchor')
         self.assertEqual(self.run_merge().returncode, 0)
@@ -428,23 +442,25 @@ class MergeTests(unittest.TestCase):
         backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
         self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'anchor')
 
-    def test_deletion_requires_two_observations_and_can_be_restored(self):
+    def test_one_sided_deletion_propagates_with_backup_and_keeps_absent_anchor(self):
         (self.local / 'paper.tex').write_text('anchor')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
-        first = self.run_merge('--propagate-deletions')
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        self.assertIn('PENDING_DELETE\tpaper.tex', first.stdout)
-        self.assertTrue((self.cloud / 'paper.tex').exists())
-        second = self.run_merge('--propagate-deletions')
-        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
-        self.assertIn('DELETED\tpaper.tex\tside=cloud', second.stdout)
+        result = self.run_merge('--propagate-deletions')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('DELETED\tpaper.tex\tside=cloud', result.stdout)
         self.assertFalse((self.cloud / 'paper.tex').exists())
-        backup_id = re.search(r'id=([0-9a-f]{32})', second.stdout).group(1)
+        absent = json.loads(self.state.read_text())['files']['paper.tex']
+        self.assertIsNone(absent['local'])
+        self.assertIsNone(absent['cloud'])
+        self.assertIsNone(absent['anchorHash'])
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
         self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'anchor')
         restored = self.run_merge('--restore', backup_id)
         self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'anchor')
+        self.assertEqual(self.run_merge('--propagate-deletions').returncode, 0)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'anchor')
 
     def test_delete_edit_is_conflict_and_manual_choice_can_restore(self):
         (self.local / 'paper.tex').write_text('anchor')
@@ -469,19 +485,110 @@ class MergeTests(unittest.TestCase):
         result = self.run_merge('--resolve', 'paper.tex', '--choice', 'local')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.cloud / 'paper.tex').exists())
+        self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex']['anchorHash'], None)
         backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
         self.assertEqual((self.root / 'state-backups' / backup_id / 'content').read_text(), 'cloud edit')
 
-    def test_transient_missing_file_cancels_delete_candidate(self):
+    def test_unavailable_root_does_not_turn_missing_path_into_deletion(self):
         (self.local / 'paper.tex').write_text('anchor')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').unlink()
-        self.assertIn('PENDING_DELETE', self.run_merge('--propagate-deletions').stdout)
+        hidden_cloud = self.root / 'cloud-temporarily-unavailable'
+        self.cloud.rename(hidden_cloud)
+        try:
+            result = self.run_merge('--propagate-deletions')
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('目录扫描有错误', result.stdout)
+            self.assertEqual((hidden_cloud / 'paper.tex').read_text(), 'anchor')
+            self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex']['anchorHash'],
+                             hashlib.sha256(b'anchor').hexdigest())
+        finally:
+            hidden_cloud.rename(self.cloud)
+
+    def test_delete_edit_conflict_remains_pending_across_runs(self):
         (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        anchor = json.loads(self.state.read_text())['files']['paper.tex']['anchorHash']
+        (self.local / 'paper.tex').unlink()
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        for _ in range(2):
+            result = self.run_merge('--propagate-deletions')
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('CONFLICT\tpaper.tex', result.stdout)
+            state = json.loads(self.state.read_text())
+            self.assertEqual(state['files']['paper.tex']['anchorHash'], anchor)
+            self.assertIn('paper.tex', state['conflicts'])
+            self.assertFalse((self.local / 'paper.tex').exists())
+            self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edit')
+
+    def test_disabling_delete_propagation_does_not_hide_delete_edit_conflict(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('CONFLICT\tpaper.tex', result.stdout)
+        self.assertFalse((self.local / 'paper.tex').exists())
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edit')
+
+    def test_newest_policy_does_not_date_a_deletion_it_cannot_observe(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        result = self.run_merge('--propagate-deletions', policy='newest')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('CONFLICT\tpaper.tex', result.stdout)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud edit')
+
+    def test_both_sides_deleted_accepts_absent_anchor(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').unlink()
+        (self.cloud / 'paper.tex').unlink()
         result = self.run_merge('--propagate-deletions')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn('missingSide', json.loads(self.state.read_text())['files']['paper.tex'])
-        self.assertTrue((self.cloud / 'paper.tex').exists())
+        self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex']['anchorHash'], None)
+
+    def test_interrupted_keep_both_recovery_preserves_review(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge().returncode, 2)
+        state = json.loads(self.state.read_text())
+        record = state['conflicts']['paper.tex']
+        sidecar = f'paper (cloud conflict {record["cloudHash"][:12]}).tex'
+        record.update({'status': 'preserving', 'primary': 'local', 'sidecar': sidecar})
+        self.state.write_text(json.dumps(state))
+        (self.local / sidecar).write_text('cloud edit')
+        (self.cloud / sidecar).write_text('cloud edit')
+        (self.cloud / 'paper.tex').write_text('local edit')
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state['conflicts']['paper.tex']['status'], 'preserved')
+        self.assertEqual(state['conflicts']['paper.tex']['sidecar'], sidecar)
+        self.assertIn('NEEDS_REVIEW\tpaper.tex', result.stdout)
+
+    def test_interrupted_keep_both_cannot_disappear_without_sidecar(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        self.assertEqual(self.run_merge().returncode, 2)
+        state = json.loads(self.state.read_text())
+        record = state['conflicts']['paper.tex']
+        record.update({'status': 'preserving', 'primary': 'local',
+                       'sidecar': f'paper (cloud conflict {record["cloudHash"][:12]}).tex'})
+        self.state.write_text(json.dumps(state))
+        (self.cloud / 'paper.tex').write_text('local edit')
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('中断的冲突保留尚未完成', result.stdout)
+        self.assertEqual(json.loads(self.state.read_text())['conflicts']['paper.tex']['status'],
+                         'preserving')
 
     def test_retention_prunes_expired_backup_on_sync(self):
         (self.local / 'paper.tex').write_text('anchor')

@@ -10,7 +10,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Filter by folder or result; the raw log remains available for troubleshooting.
 - By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
 - Conflicts are measured against the last common content anchor. When both sides changed, you may also choose the version with the later absolute modification time; equal timestamps pause for manual review.
-- Deletion propagation is optional and off by default. A one-sided deletion must persist for two sync runs while the other side remains at the anchor. A concurrent edit and deletion stops as a conflict.
+- Deletion propagation is optional and off by default. Deletes and edits are compared with the same last common anchor. A one-sided change may propagate; a concurrent edit and delete remains a conflict. The remaining file is backed up before this tool deletes it.
 - Every actual overwrite or propagated deletion has a verified local backup with a Restore button in History. Backups default to 15 days and are cleaned on a later sync; the retention period is configurable.
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
 - LaTeX build files, virtual environments, and common caches can be excluded.
@@ -18,11 +18,13 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.9.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.9.0) for macOS 13 or later. This earlier release does not include the unified deletion-state changes on this branch. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
 The interface uses native SwiftUI sidebar, form, and toolbar controls. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
+
+The [synchronization model](docs/synchronization-model.md) records the primary sources, state transitions, and current limits around directory conflicts and OneDrive availability.
 
 In two-way merge and upload, the local version remains at the original path while a labeled cloud copy appears in both folders. In download, the cloud version remains at the original path and a labeled local copy appears in both folders. Backups are stored under `~/Library/Application Support/ResearchSync/merge-state/`. Keeping both preserves content but does not merge it into the original file. Review the two versions and explicitly acknowledge when finished; the copy and backup remain. Manual conflicts stay pending until resolved; if either original changes after listing, sync again before choosing a version.
 
