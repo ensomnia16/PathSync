@@ -4,7 +4,7 @@
 
 ## 下载
 
-[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.9.0)（macOS 13+）。这是上一发布版，尚未包含本分支的统一删除状态调整。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
+[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.10.0)（macOS 13+）。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
 
 ## 功能
 
