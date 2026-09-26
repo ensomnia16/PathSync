@@ -18,6 +18,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
 - LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
+- Check for updates: at launch and at most once a day the app asks GitHub for the latest release (turn this off in Settings → General), or check manually from About or the menu bar. A new version is shown in Overview, the sidebar, and the menu bar with a download link for your architecture. The app never replaces itself and sends no file names or paths.
 
 ## Download and build
 
@@ -25,7 +26,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
-The interface uses native SwiftUI sidebar, form, and toolbar controls. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
+The interface uses native SwiftUI sidebar, form, and toolbar controls. Overview shows overall status, last and next sync, and a card per folder pair; each folder page edits its paths, direction, and conflicts; Settings groups schedule, conflicts and backups, filtering, notifications, and language. Unsaved changes are shown in the status bar. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
 
 The [synchronization model](docs/synchronization-model.md) records the primary sources, state transitions, and current limits around directory conflicts and OneDrive availability.
 

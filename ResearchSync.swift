@@ -30,7 +30,7 @@ func backupAvailable(_ pair: SyncPair, id: String) -> Bool {
     return Date().timeIntervalSince1970 - created < Double(days * 86400)
 }
 
-struct SyncPair: Codable, Identifiable {
+struct SyncPair: Codable, Identifiable, Equatable {
     var id: UUID = UUID()
     var name: String = "新路径"
     var localPath: String = ""
@@ -39,7 +39,7 @@ struct SyncPair: Codable, Identifiable {
     var enabled: Bool = false
 }
 
-struct SyncConfig: Codable {
+struct SyncConfig: Codable, Equatable {
     var pairs: [SyncPair] = [SyncPair()]
     var intervalHours = 24
     var scheduleMode = "daily"
@@ -51,10 +51,12 @@ struct SyncConfig: Codable {
     var enabled = true
     var language = "zh-Hans"
     var notificationMode = "off"
+    var checkForUpdates = true
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
+        case checkForUpdates
         case source, destination, scheduledDirection
     }
 
@@ -73,6 +75,7 @@ struct SyncConfig: Codable {
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
         notificationMode = try data.decodeIfPresent(String.self, forKey: .notificationMode) ?? "off"
+        checkForUpdates = try data.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
             pairs = saved
         } else {
@@ -97,6 +100,7 @@ struct SyncConfig: Codable {
         try data.encode(enabled, forKey: .enabled)
         try data.encode(language, forKey: .language)
         try data.encode(notificationMode, forKey: .notificationMode)
+        try data.encode(checkForUpdates, forKey: .checkForUpdates)
     }
 }
 
@@ -408,21 +412,74 @@ func installSchedule(_ config: SyncConfig) throws {
 
 final class SyncModel: ObservableObject {
     @Published var config: SyncConfig
+    @Published private(set) var savedConfig: SyncConfig
     @Published var selectedID: UUID?
-    @Published var page = "schedule"
+    @Published var page = "overview"
     @Published var statusKey = "ready"
     @Published var statusDetail: String?
     @Published var busy = false
     @Published var conflictsByPair: [UUID: [PendingConflict]] = [:]
     @Published var history: [SyncHistoryRecord] = []
     @Published var historyError: String?
+    @Published var update: UpdateStatus = .idle
+    @Published var lastUpdateCheck: Date?
+    private var lastUpdateAttempt: Date?
     private var notificationRequestID = UUID()
 
     init() {
-        config = (try? loadConfig()) ?? SyncConfig()
-        selectedID = config.pairs.first?.id
+        let loaded = (try? loadConfig()) ?? SyncConfig()
+        config = loaded
+        savedConfig = loaded
+        selectedID = loaded.pairs.first?.id
         refreshConflicts()
         refreshHistory()
+        DispatchQueue.main.async { self.checkForUpdates(automatic: true) }
+    }
+
+    var hasUnsavedChanges: Bool { config != savedConfig }
+    var hasEnabledPairs: Bool { config.pairs.contains { $0.enabled } }
+    var currentVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }
+
+    var availableRelease: AppRelease? {
+        if case .available(let release) = update { return release }
+        return nil
+    }
+
+    func lastRecord(for pair: SyncPair) -> SyncHistoryRecord? {
+        history.first { record in
+            !record.isPreview && (
+                (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
+                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath))
+        }
+    }
+
+    var lastSyncDate: Date? {
+        history.first { !$0.isPreview }.map { $0.finishedAt ?? $0.startedAt }
+    }
+
+    /// Automatic checks honour the setting and run at most once a day; manual checks always run.
+    func checkForUpdates(automatic: Bool = false) {
+        if update == .checking { return }
+        if automatic {
+            guard config.checkForUpdates else { return }
+            if let last = lastUpdateAttempt, Date().timeIntervalSince(last) < 86_400 { return }
+        }
+        lastUpdateAttempt = Date()
+        let previous = update
+        update = .checking
+        let current = currentVersion
+        fetchLatestRelease { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let release):
+                    self.lastUpdateCheck = Date()
+                    self.update = isNewerVersion(release.version, than: current) ? .available(release) : .upToDate
+                case .failure:
+                    // A silent background failure keeps whatever was known before.
+                    self.update = automatic ? previous : .failed
+                }
+            }
+        }
     }
 
     var selectedIndex: Int? { config.pairs.firstIndex { $0.id == selectedID } }
@@ -475,7 +532,7 @@ final class SyncModel: ObservableObject {
         guard let index = selectedIndex else { return }
         config.pairs.remove(at: index)
         selectedID = config.pairs.first?.id
-        page = selectedID == nil ? "schedule" : "pair"
+        page = selectedID == nil ? "overview" : "pair"
         statusKey = "removedHint"
         statusDetail = nil
         refreshConflicts()
@@ -532,6 +589,7 @@ final class SyncModel: ObservableObject {
                 config.notificationMode = "off"
             }
             try saveConfig(config)
+            savedConfig = config
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
             statusDetail = nil
@@ -811,6 +869,7 @@ struct ResearchSyncApp: App {
     var body: some Scene {
         Window("路径同步", id: "main") { ContentView(model: model) }
             .windowStyle(.titleBar)
+            .defaultSize(width: 980, height: 680)
         MenuBarExtra {
             MenuBarContent(model: model)
                 .onAppear {
@@ -820,6 +879,7 @@ struct ResearchSyncApp: App {
                 .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
                     model.refreshConflicts()
                     model.refreshHistory()
+                    model.checkForUpdates(automatic: true)
                 }
         } label: {
             Image(systemName: "arrow.left.arrow.right")
