@@ -822,7 +822,7 @@ struct ResearchSyncApp: App {
                     model.refreshHistory()
                 }
         } label: {
-            Image(systemName: "arrow.left.arrow.right")
+            Image(nsImage: menuBarIcon())
                 .accessibilityLabel(uiText("appName", language: model.config.language))
         }
         .menuBarExtraStyle(.menu)

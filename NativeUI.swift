@@ -1,6 +1,28 @@
 import AppKit
 import SwiftUI
 
+// Template glyph from the app icon: a pierced diamond.
+func menuBarIcon() -> NSImage {
+    let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
+        NSColor.black.set()
+        let diamond = NSBezierPath()
+        diamond.move(to: NSPoint(x: 8, y: 1.5))
+        diamond.line(to: NSPoint(x: 14.5, y: 8))
+        diamond.line(to: NSPoint(x: 8, y: 14.5))
+        diamond.line(to: NSPoint(x: 1.5, y: 8))
+        diamond.close()
+        diamond.lineJoinStyle = .round
+        diamond.lineWidth = 1
+        diamond.fill()
+        diamond.stroke()
+        NSGraphicsContext.current?.compositingOperation = .destinationOut
+        NSBezierPath(ovalIn: NSRect(x: 5.8, y: 5.8, width: 4.4, height: 4.4)).fill()
+        return true
+    }
+    image.isTemplate = true
+    return image
+}
+
 struct MenuBarContent: View {
     @ObservedObject var model: SyncModel
     @Environment(\.openWindow) private var openWindow
