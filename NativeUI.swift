@@ -204,11 +204,13 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshConflicts()
             model.refreshHistory()
+            model.refreshCloudProfiles()
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
             model.refreshConflicts()
             model.refreshHistory()
             model.checkForUpdates(automatic: true)
+            model.refreshCloudProfiles()
         }
     }
 
@@ -853,6 +855,64 @@ struct ContentView: View {
                 Text(t("general"))
             } footer: {
                 Text(t("autoCheckHint"))
+            }
+
+            Section {
+                Toggle(t("cloudConfigEnable"), isOn: $model.config.cloudConfigEnabled)
+                if model.config.cloudConfigEnabled {
+                    LabeledContent(t("oneDriveRoot")) {
+                        Text(model.config.oneDriveRoot.isEmpty ? "—" : abbreviatedPath(model.config.oneDriveRoot))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                            .help(model.config.oneDriveRoot)
+                        Button(t("chooseOneDriveRoot")) { model.chooseOneDriveRoot() }
+                    }
+                    let count = model.config.pairs.filter {
+                        !$0.cloudPath.isEmpty &&
+                        relativePath($0.cloudPath, within: model.config.oneDriveRoot) == nil
+                    }.count
+                    if count > 0 {
+                        Label(String(format: t("cloudNoRelative"), count), systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    }
+                    HStack {
+                        Text(t("cloudProfiles")).font(.headline)
+                        Spacer()
+                        if model.cloudBusy { ProgressView().controlSize(.small) }
+                        Button(t("cloudRefresh")) { model.refreshCloudProfiles() }
+                            .disabled(model.cloudBusy)
+                    }
+                    if model.cloudProfiles.isEmpty && !model.cloudBusy {
+                        Text(t("cloudNone")).foregroundStyle(.secondary)
+                    }
+                    ForEach(model.cloudProfiles) { profile in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(profile.deviceName)
+                                Text(profile.modifiedAt, style: .date)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("\(profile.pairs.count) \(t("folders"))")
+                                .foregroundStyle(.secondary)
+                            Button(t("cloudImport")) { model.importCloudProfile(profile) }
+                                .disabled(model.hasUnsavedChanges || model.busy)
+                        }
+                    }
+                    if let error = model.cloudError {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    } else if model.lastCloudPublish != nil {
+                        Label(t("cloudPublished"), systemImage: "checkmark.icloud")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text(t("cloudConfig"))
+            } footer: {
+                Text(t("cloudConfigHint") + " " + t("oneDriveRootHint") + " " + t("cloudImportHint"))
             }
         }
         .formStyle(.grouped)

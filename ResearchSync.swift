@@ -52,11 +52,13 @@ struct SyncConfig: Codable, Equatable {
     var language = "zh-Hans"
     var notificationMode = "off"
     var checkForUpdates = true
+    var cloudConfigEnabled = false
+    var oneDriveRoot = ""
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
-        case checkForUpdates
+        case checkForUpdates, cloudConfigEnabled, oneDriveRoot
         case source, destination, scheduledDirection
     }
 
@@ -76,6 +78,8 @@ struct SyncConfig: Codable, Equatable {
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
         notificationMode = try data.decodeIfPresent(String.self, forKey: .notificationMode) ?? "off"
         checkForUpdates = try data.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
+        cloudConfigEnabled = try data.decodeIfPresent(Bool.self, forKey: .cloudConfigEnabled) ?? false
+        oneDriveRoot = try data.decodeIfPresent(String.self, forKey: .oneDriveRoot) ?? ""
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
             pairs = saved
         } else {
@@ -84,6 +88,10 @@ struct SyncConfig: Codable, Equatable {
             let direction = try data.decodeIfPresent(String.self, forKey: .scheduledDirection) ?? "upload"
             pairs = [SyncPair(name: "已导入路径", localPath: local, cloudPath: cloud,
                               scheduledDirection: direction, enabled: !local.isEmpty && !cloud.isEmpty)]
+        }
+        if oneDriveRoot.isEmpty {
+            let roots = Set(pairs.compactMap { inferredOneDriveRoot($0.cloudPath) })
+            if roots.count == 1 { oneDriveRoot = roots.first ?? "" }
         }
     }
 
@@ -101,7 +109,20 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(language, forKey: .language)
         try data.encode(notificationMode, forKey: .notificationMode)
         try data.encode(checkForUpdates, forKey: .checkForUpdates)
+        try data.encode(cloudConfigEnabled, forKey: .cloudConfigEnabled)
+        try data.encode(oneDriveRoot, forKey: .oneDriveRoot)
     }
+}
+
+func inferredOneDriveRoot(_ path: String) -> String? {
+    guard !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path).standardizedFileURL
+    let parts = url.pathComponents
+    guard let index = parts.firstIndex(where: { $0.hasPrefix("OneDrive-") }),
+          index >= 3, parts[index - 2] == "Library", parts[index - 1] == "CloudStorage" else {
+        return nil
+    }
+    return NSString.path(withComponents: Array(parts[...index]))
 }
 
 enum SyncDirection: String {
@@ -424,8 +445,19 @@ final class SyncModel: ObservableObject {
     @Published var confirmingRemoval = false
     @Published var update: UpdateStatus = .idle
     @Published var lastUpdateCheck: Date?
+    @Published var cloudProfiles: [CloudConfiguration] = []
+    @Published var cloudError: String?
+    @Published var cloudBusy = false
+    @Published var lastCloudPublish: Date?
     private var lastUpdateAttempt = UserDefaults.standard.object(forKey: "lastUpdateAttempt") as? Date
     private var notificationRequestID = UUID()
+    private let cloudDeviceID: UUID = {
+        if let value = UserDefaults.standard.string(forKey: "cloudConfigDeviceID"),
+           let id = UUID(uuidString: value) { return id }
+        let id = UUID()
+        UserDefaults.standard.set(id.uuidString, forKey: "cloudConfigDeviceID")
+        return id
+    }()
 
     init() {
         let loaded = (try? loadConfig()) ?? SyncConfig()
@@ -440,6 +472,9 @@ final class SyncModel: ObservableObject {
             lastUpdateCheck = UserDefaults.standard.object(forKey: "lastSuccessfulUpdateCheck") as? Date
         }
         DispatchQueue.main.async { self.checkForUpdates(automatic: true) }
+        if loaded.cloudConfigEnabled {
+            DispatchQueue.main.async { self.refreshCloudProfiles() }
+        }
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
@@ -560,6 +595,75 @@ final class SyncModel: ObservableObject {
         }
     }
 
+    func chooseOneDriveRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: config.oneDriveRoot.isEmpty
+            ? FileManager.default.homeDirectoryForCurrentUser.path + "/Library/CloudStorage"
+            : config.oneDriveRoot)
+        if panel.runModal() == .OK, let root = panel.url?.standardizedFileURL.path {
+            config.oneDriveRoot = root
+        }
+    }
+
+    func refreshCloudProfiles() {
+        guard config.cloudConfigEnabled, !cloudBusy else { return }
+        cloudBusy = true
+        let ownID = cloudDeviceID
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try CloudConfigStore(root: CloudConfigStore.iCloudRoot).readOthers(excluding: ownID) }
+            DispatchQueue.main.async {
+                self.cloudBusy = false
+                switch result {
+                case .success(let profiles):
+                    self.cloudProfiles = profiles
+                    self.cloudError = nil
+                case .failure(let error):
+                    self.cloudError = cloudConfigErrorText(error, language: self.config.language)
+                }
+            }
+        }
+    }
+
+    func importCloudProfile(_ profile: CloudConfiguration) {
+        guard !busy, !hasUnsavedChanges else { return }
+        do {
+            config = try importing(profile, into: config)
+            selectedID = config.pairs.first?.id
+            cloudError = nil
+            statusKey = "cloudImported"
+            statusDetail = nil
+            refreshConflicts()
+        } catch {
+            cloudError = cloudConfigErrorText(error, language: config.language)
+        }
+    }
+
+    private func publishCloudConfig(_ saved: SyncConfig) {
+        let ownID = cloudDeviceID
+        let deviceName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        cloudBusy = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result {
+                try CloudConfigStore(root: CloudConfigStore.iCloudRoot).write(
+                    CloudConfiguration(config: saved, deviceID: ownID, deviceName: deviceName))
+            }
+            DispatchQueue.main.async {
+                self.cloudBusy = false
+                switch result {
+                case .success:
+                    self.lastCloudPublish = Date()
+                    self.cloudError = nil
+                    self.refreshCloudProfiles()
+                case .failure(let error):
+                    self.cloudError = cloudConfigErrorText(error, language: self.config.language)
+                }
+            }
+        }
+    }
+
     func chooseNotificationMode(_ mode: String) {
         notificationRequestID = UUID()
         let requestID = notificationRequestID
@@ -580,6 +684,9 @@ final class SyncModel: ObservableObject {
 
     func save() {
         do {
+            if config.cloudConfigEnabled && !config.pairs.contains(where: { $0.enabled }) {
+                config.enabled = false
+            }
             if config.enabled && !config.pairs.contains(where: { $0.enabled }) {
                 throw NSError(domain: appID, code: 9, userInfo: [NSLocalizedDescriptionKey: "启用后台同步前，请至少启用一组路径。"])
             }
@@ -603,6 +710,7 @@ final class SyncModel: ObservableObject {
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
             statusDetail = nil
             refreshConflicts()
+            if config.cloudConfigEnabled { publishCloudConfig(config) }
         } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
     }
 
@@ -751,6 +859,7 @@ final class SyncModel: ObservableObject {
     }
 }
 
+#if !CLOUD_CONFIG_TESTS
 @main
 struct ResearchSyncApp: App {
     @StateObject private var model: SyncModel
@@ -897,3 +1006,4 @@ struct ResearchSyncApp: App {
         .menuBarExtraStyle(.menu)
     }
 }
+#endif

@@ -4,11 +4,12 @@
 
 ## 下载
 
-[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.12.0)（macOS 13+）。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
+[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.13.0)（macOS 13+）。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
 
 ## 功能
 
 - 添加多组本地目录和目标目录；每组可独立启用、命名和设置定时同步方向。
+- 可选通过同一 Apple ID 的 iCloud Drive 共享配置：保存设置时发布路径组名称、同步方向、计划、冲突和过滤规则；另一台 Mac 在“设置 → iCloud 配置”中选择导入。本机启用状态、本地工作目录、同步记录、备份与文件内容不会作为配置上传。云端目录只共享相对 OneDrive 根目录的路径；每台 Mac 选择自己的 OneDrive 根目录后自动组合云端路径，新路径组的本地工作目录仍需单独选择。
 - 定时双向合并：相对上次共同内容（anchor）只有一侧更新时复制该侧；两侧都更新且内容不同才按冲突策略处理。可选择保留两份、暂停手动处理，或按绝对修改日期采用较新的版本；日期相同则暂停。
 - 自动保留时，先备份两侧原件，再将原路径文件及带版本标记的冲突副本放在两侧；冲突会持续显示为“待人工合并”，直到明确确认处理完成。
 - 应用在重新获得焦点时及打开期间定期刷新后台任务产生的冲突，也可手动刷新。
@@ -66,6 +67,8 @@
 ```
 
 配置和日志保存在 `~/Library/Application Support/ResearchSync/`，定时任务位于 `~/Library/LaunchAgents/com.ensom.ResearchSync.plist`。应用保留内部标识 `ResearchSync`，以便从旧版本迁移配置。
+
+开启 iCloud 配置后，每台 Mac 的配置快照单独写到 iCloud Drive 的 `PathSync/Configuration/<设备 UUID>.json`，避免多台机器同时覆盖同一文件。导入前先保存本机设置；导入后在界面检查路径并再次保存，才会更新本机计划。新导入或重新绑定的路径组默认停用；远端删除某个路径组不会直接删掉本机路径组。仅在开启此选项后访问 iCloud Drive；Apple ID 登录和 iCloud Drive 开关由 macOS 管理。此功能不在定时文件同步任务中读取远端配置，也不自动改变另一台 Mac 的运行路径。
 
 记录页直接整理已有的 `sync.log`，旧同步记录也能查看；只显示当前已配置路径组的记录。普通上传/下载显示数量，冲突与失败会列出文件名。最多加载日志末尾 2 MB，并显示最近 200 条记录。
 

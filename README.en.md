@@ -5,6 +5,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 ## Features
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
+- Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names and directions, schedule, conflict policy, and filters. Another Mac can review and import this configuration from Settings. Local work folders, enabled state, history, backups, and synced file contents are not included. Cloud folder paths are stored relative to a OneDrive root chosen separately on each Mac.
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - Use the menu bar to see the pending review count, sync all folders, or reopen the main window or History after closing it.
 - The app runs from the menu bar without a running Dock icon. Quitting the UI does not disable the installed sync schedule.
@@ -23,11 +24,13 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.12.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.13.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
 The interface uses native SwiftUI sidebar, form, and toolbar controls. Overview shows overall status, the last sync, the schedule interval or next fixed time, and a card per folder pair; each folder page edits its paths, direction, and conflicts; Settings groups schedule, conflicts and backups, filtering, notifications, and language. Unsaved changes are shown in the status bar. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
+
+To share settings, turn on iCloud configuration in Settings, select this Mac's OneDrive root, and save. Each Mac publishes a separate snapshot in iCloud Drive at `PathSync/Configuration/<device UUID>.json`. On another Mac, select its OneDrive root and save before importing a snapshot. Review the derived cloud paths, choose local work folders for new pairs, and save again. New or rebound pairs stay disabled until reviewed. A remote deletion never silently removes a local pair. Scheduled file sync reads only this Mac's saved configuration; it does not import remote changes in the background.
 
 The [synchronization model](docs/synchronization-model.md) records the primary sources, state transitions, and current limits around directory conflicts and OneDrive availability.
 

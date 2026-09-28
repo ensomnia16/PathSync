@@ -209,6 +209,21 @@ private let translations: [String: (zh: String, en: String)] = [
     "updateReleaseNotes": ("更新说明", "Release notes"),
     "updateInstallHint": ("下载后解压，将应用拖入“应用程序”替换旧版本；设置、同步状态和记录都会保留。", "Unzip the download and drag the app into Applications to replace the old one. Settings, sync state, and history are kept."),
     "menubarUpdate": ("新版本 %@ 可用…", "Version %@ available…"),
+    "cloudConfig": ("iCloud 配置", "iCloud configuration"),
+    "cloudConfigEnable": ("通过 iCloud Drive 共享配置", "Share configuration through iCloud Drive"),
+    "cloudConfigHint": ("保存后发布路径组名称、同步方向、计划和规则。不会上传本机工作目录、启用状态、同步记录或文件内容。另一台 Mac 可选择导入。", "Saving publishes folder names, directions, schedule, and rules. Local work folders, enabled state, history, and file contents stay on this Mac. Import on another Mac when ready."),
+    "oneDriveRoot": ("本机 OneDrive 根目录", "OneDrive root on this Mac"),
+    "chooseOneDriveRoot": ("选择…", "Choose…"),
+    "oneDriveRootHint": ("共享相对路径。另一台 Mac 指定自己的 OneDrive 根目录后，自动组合云端路径；本地目录仍需单独选择。", "Relative paths are shared. On another Mac, choose its OneDrive root to derive cloud paths. Choose local work folders separately."),
+    "cloudProfiles": ("其他 Mac 的配置", "Configurations from other Macs"),
+    "cloudRefresh": ("刷新列表", "Refresh list"),
+    "cloudImport": ("导入规则", "Import rules"),
+    "cloudNone": ("还没有其他 Mac 发布的配置。", "No other Mac has published a configuration yet."),
+    "cloudImportHint": ("导入后请检查路径并保存；新增或路径变化的组会关闭定时同步。远端删掉的组不会自动删除本机配置。", "Review paths and save after import. New or rebound folders stay disabled. Remote removals do not delete local folders."),
+    "cloudImported": ("已导入规则；请检查路径并保存。", "Rules imported. Review paths and save."),
+    "cloudNoRelative": ("%d 组云端目录不在所选 OneDrive 根目录内，无法跨 Mac 自动定位。", "%d cloud folders are outside the selected OneDrive root and cannot be located automatically on another Mac."),
+    "cloudPublished": ("本机配置已发布", "Configuration published"),
+    "cloudLocalOnly": ("尚未发布", "Not published yet"),
 ]
 
 func usesEnglish(_ language: String) -> Bool {
