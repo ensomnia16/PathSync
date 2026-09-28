@@ -123,7 +123,9 @@ func fetchLatestRelease(completion: @escaping (Result<AppRelease, Error>) -> Voi
 }
 
 private func fetchPublicRelease(completion: @escaping (Result<AppRelease, Error>) -> Void) {
-    var request = URLRequest(url: latestReleasePage, cachePolicy: .reloadIgnoringLocalCacheData,
+    var components = URLComponents(url: latestReleasePage, resolvingAgainstBaseURL: false)!
+    components.queryItems = [URLQueryItem(name: "check", value: String(Int(Date().timeIntervalSince1970)))]
+    var request = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData,
                              timeoutInterval: 20)
     request.setValue("PathSync", forHTTPHeaderField: "User-Agent")
     URLSession.shared.dataTask(with: request) { _, response, error in
