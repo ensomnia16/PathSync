@@ -3,7 +3,7 @@ import Foundation
 import FoundationNetworking
 #endif
 
-struct AppRelease: Equatable {
+struct AppRelease: Codable, Equatable {
     let version: String
     let pageURL: URL
     let downloadURL: URL?

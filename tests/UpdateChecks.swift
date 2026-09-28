@@ -26,6 +26,8 @@ struct UpdateChecks {
         assert(release.version == "2.13.0")
         assert(release.downloadURL?.lastPathComponent == "PathSync-v2.13.0-macOS-arm64.zip")
         assert(release.notes == ["加入检查更新", "重新设计界面"])
+        let restored = try JSONDecoder().decode(AppRelease.self, from: JSONEncoder().encode(release))
+        assert(restored == release)
         let otherArchitecture = try parseLatestRelease(Data(payload.utf8), architecture: "riscv64")
         assert(otherArchitecture.downloadURL == nil)
 
