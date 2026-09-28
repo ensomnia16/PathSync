@@ -203,6 +203,7 @@ private let translations: [String: (zh: String, en: String)] = [
     "updateFailed": ("无法检查更新，请检查网络后重试。", "Couldn’t check for updates. Check your connection and try again."),
     "updateAvailable": ("新版本 %@ 可用", "Version %@ is available"),
     "updateLastChecked": ("上次检查：", "Last checked:"),
+    "justNow": ("刚刚", "just now"),
     "updateDownload": ("下载", "Download"),
     "updateDetails": ("详情", "Details"),
     "updateReleaseNotes": ("更新说明", "Release notes"),

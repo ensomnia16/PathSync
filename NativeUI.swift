@@ -882,7 +882,11 @@ struct ContentView: View {
     }
 
     private var lastCheckedText: String {
-        "\(t("updateLastChecked")) \(model.lastUpdateCheck.map { relativeText($0) } ?? t("never"))"
+        guard let checked = model.lastUpdateCheck else {
+            return "\(t("updateLastChecked")) \(t("never"))"
+        }
+        let when = abs(Date().timeIntervalSince(checked)) < 60 ? t("justNow") : relativeText(checked)
+        return "\(t("updateLastChecked")) \(when)"
     }
 
     private var aboutForm: some View {
