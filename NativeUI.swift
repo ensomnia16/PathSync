@@ -976,11 +976,14 @@ struct ContentView: View {
                     }
                     Spacer()
                     if let release = model.availableRelease {
-                        Button(t("updateReleaseNotes")) { NSWorkspace.shared.open(release.pageURL) }
-                        Button(t("updateDownload")) {
-                            NSWorkspace.shared.open(release.downloadURL ?? release.pageURL)
+                        if let downloadURL = release.downloadURL {
+                            Button(t("updateReleaseNotes")) { NSWorkspace.shared.open(release.pageURL) }
+                            Button(t("updateDownload")) { NSWorkspace.shared.open(downloadURL) }
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            Button(t("updateReleaseNotes")) { NSWorkspace.shared.open(release.pageURL) }
+                                .buttonStyle(.borderedProminent)
                         }
-                        .buttonStyle(.borderedProminent)
                     } else {
                         Button(t("checkForUpdatesButton")) { model.checkForUpdates() }
                             .disabled(model.update == .checking)

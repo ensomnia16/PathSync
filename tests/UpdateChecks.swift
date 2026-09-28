@@ -37,6 +37,14 @@ struct UpdateChecks {
 
         let prerelease = payload.replacingOccurrences(of: "\"prerelease\":false", with: "\"prerelease\":true")
         assert((try? parseLatestRelease(Data(prerelease.utf8), architecture: "arm64")) == nil)
+        let publicRelease = try parsePublicReleaseURL(
+            URL(string: "https://github.com/ensomnia16/PathSync/releases/tag/v2.13.0")!)
+        assert(publicRelease.version == "2.13.0")
+        assert(publicRelease.downloadURL == nil)
+        assert((try? parsePublicReleaseURL(
+            URL(string: "https://github.com.evil.test/ensomnia16/PathSync/releases/tag/v2.13.0")!)) == nil)
+        assert((try? parsePublicReleaseURL(
+            URL(string: "https://github.com/ensomnia16/PathSync/releases/latest")!)) == nil)
         print("update checks passed")
     }
 }

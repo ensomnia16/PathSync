@@ -16,6 +16,7 @@ enum UpdateStatus: Equatable {
 }
 
 private let latestReleaseAPI = URL(string: "https://api.github.com/repos/ensomnia16/PathSync/releases/latest")!
+private let latestReleasePage = URL(string: "https://github.com/ensomnia16/PathSync/releases/latest")!
 
 func versionComponents(_ text: String) -> [Int] {
     var value = text.trimmingCharacters(in: .whitespaces)
@@ -80,6 +81,22 @@ func parseLatestRelease(_ data: Data, architecture: String) throws -> AppRelease
                       downloadURL: asset?.browser_download_url, notes: Array(notes.prefix(8)))
 }
 
+// GitHub's anonymous API limit is shared by an entire network. The public latest
+// page redirects to a versioned release and is usable without an API token.
+func parsePublicReleaseURL(_ url: URL) throws -> AppRelease {
+    let components = url.pathComponents
+    guard url.scheme == "https", url.host?.lowercased() == "github.com",
+          components.count == 6, components[0] == "/",
+          components[1] == "ensomnia16", components[2] == "PathSync",
+          components[3] == "releases", components[4] == "tag",
+          !versionComponents(components[5]).isEmpty else {
+        throw NSError(domain: "com.ensom.ResearchSync.update", code: 3)
+    }
+    var version = components[5]
+    if version.hasPrefix("v") || version.hasPrefix("V") { version.removeFirst() }
+    return AppRelease(version: version, pageURL: url, downloadURL: nil, notes: [])
+}
+
 func currentArchitecture() -> String {
     #if arch(arm64)
     return "arm64"
@@ -94,12 +111,28 @@ func fetchLatestRelease(completion: @escaping (Result<AppRelease, Error>) -> Voi
     request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
     request.setValue("PathSync", forHTTPHeaderField: "User-Agent")
     URLSession.shared.dataTask(with: request) { data, response, error in
-        if let error { completion(.failure(error)); return }
+        if error != nil { fetchPublicRelease(completion: completion); return }
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200, let data else {
+            fetchPublicRelease(completion: completion)
+            return
+        }
+        do { completion(.success(try parseLatestRelease(data, architecture: currentArchitecture()))) }
+        catch { fetchPublicRelease(completion: completion) }
+    }.resume()
+}
+
+private func fetchPublicRelease(completion: @escaping (Result<AppRelease, Error>) -> Void) {
+    var request = URLRequest(url: latestReleasePage, cachePolicy: .reloadIgnoringLocalCacheData,
+                             timeoutInterval: 20)
+    request.setValue("PathSync", forHTTPHeaderField: "User-Agent")
+    URLSession.shared.dataTask(with: request) { _, response, error in
+        if let error { completion(.failure(error)); return }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard status == 200, let finalURL = response?.url else {
             completion(.failure(NSError(domain: "com.ensom.ResearchSync.update", code: status)))
             return
         }
-        completion(Result { try parseLatestRelease(data, architecture: currentArchitecture()) })
+        completion(Result { try parsePublicReleaseURL(finalURL) })
     }.resume()
 }
