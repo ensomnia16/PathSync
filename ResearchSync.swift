@@ -539,7 +539,7 @@ final class SyncModel: ObservableObject {
         refreshHistory()
         if let cached = UserDefaults.standard.data(forKey: "cachedLatestRelease"),
            let release = try? JSONDecoder().decode(AppRelease.self, from: cached) {
-            update = isNewerVersion(release.version, than: currentVersion) ? .available(release) : .upToDate
+            update = updateStatus(for: release, currentVersion: currentVersion)
             lastUpdateCheck = UserDefaults.standard.object(forKey: "lastSuccessfulUpdateCheck") as? Date
         }
         DispatchQueue.main.async { self.checkForUpdates(automatic: true) }
@@ -588,7 +588,7 @@ final class SyncModel: ObservableObject {
                     self.lastUpdateCheck = Date()
                     UserDefaults.standard.set(try? JSONEncoder().encode(release), forKey: "cachedLatestRelease")
                     UserDefaults.standard.set(self.lastUpdateCheck, forKey: "lastSuccessfulUpdateCheck")
-                    self.update = isNewerVersion(release.version, than: current) ? .available(release) : .upToDate
+                    self.update = updateStatus(for: release, currentVersion: current)
                 case .failure:
                     // A silent background failure keeps whatever was known before.
                     self.update = automatic ? previous : .failed

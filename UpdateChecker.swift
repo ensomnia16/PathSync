@@ -11,8 +11,16 @@ struct AppRelease: Codable, Equatable {
 }
 
 enum UpdateStatus: Equatable {
-    case idle, checking, upToDate, failed
+    case idle, checking, failed
+    case upToDate(AppRelease)
+    case aheadOfRelease(AppRelease)
     case available(AppRelease)
+}
+
+func updateStatus(for release: AppRelease, currentVersion: String) -> UpdateStatus {
+    if isNewerVersion(release.version, than: currentVersion) { return .available(release) }
+    if isNewerVersion(currentVersion, than: release.version) { return .aheadOfRelease(release) }
+    return .upToDate(release)
 }
 
 private let latestReleaseAPI = URL(string: "https://api.github.com/repos/ensomnia16/PathSync/releases/latest")!
@@ -97,6 +105,13 @@ func parsePublicReleaseURL(_ url: URL) throws -> AppRelease {
     return AppRelease(version: version, pageURL: url, downloadURL: nil, notes: [])
 }
 
+func expectedArchiveURL(for release: AppRelease, architecture: String) -> URL? {
+    guard !versionComponents(release.version).isEmpty,
+          ["arm64", "x86_64"].contains(architecture) else { return nil }
+    let tag = "v" + release.version
+    return URL(string: "https://github.com/ensomnia16/PathSync/releases/download/\(tag)/PathSync-\(tag)-macOS-\(architecture).zip")
+}
+
 func currentArchitecture() -> String {
     #if arch(arm64)
     return "arm64"
@@ -135,6 +150,22 @@ private func fetchPublicRelease(completion: @escaping (Result<AppRelease, Error>
             completion(.failure(NSError(domain: "com.ensom.ResearchSync.update", code: status)))
             return
         }
-        completion(Result { try parsePublicReleaseURL(finalURL) })
+        do {
+            let release = try parsePublicReleaseURL(finalURL)
+            guard let archive = expectedArchiveURL(for: release, architecture: currentArchitecture()) else {
+                completion(.success(release))
+                return
+            }
+            var probe = URLRequest(url: archive, cachePolicy: .reloadIgnoringLocalCacheData,
+                                   timeoutInterval: 10)
+            probe.httpMethod = "HEAD"
+            probe.setValue("PathSync", forHTTPHeaderField: "User-Agent")
+            URLSession.shared.dataTask(with: probe) { _, response, _ in
+                let available = (response as? HTTPURLResponse)?.statusCode == 200
+                completion(.success(AppRelease(version: release.version, pageURL: release.pageURL,
+                                               downloadURL: available ? archive : nil,
+                                               notes: release.notes)))
+            }.resume()
+        } catch { completion(.failure(error)) }
     }.resume()
 }

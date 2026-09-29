@@ -24,6 +24,9 @@ struct UpdateChecks {
         """
         let release = try parseLatestRelease(Data(payload.utf8), architecture: "arm64")
         assert(release.version == "2.13.0")
+        assert(updateStatus(for: release, currentVersion: "2.12.0") == .available(release))
+        assert(updateStatus(for: release, currentVersion: "2.13.0") == .upToDate(release))
+        assert(updateStatus(for: release, currentVersion: "2.14.0") == .aheadOfRelease(release))
         assert(release.downloadURL?.lastPathComponent == "PathSync-v2.13.0-macOS-arm64.zip")
         assert(release.notes == ["加入检查更新", "重新设计界面"])
         let restored = try JSONDecoder().decode(AppRelease.self, from: JSONEncoder().encode(release))
@@ -41,6 +44,9 @@ struct UpdateChecks {
             URL(string: "https://github.com/ensomnia16/PathSync/releases/tag/v2.13.0")!)
         assert(publicRelease.version == "2.13.0")
         assert(publicRelease.downloadURL == nil)
+        assert(expectedArchiveURL(for: publicRelease, architecture: "arm64")?.lastPathComponent ==
+               "PathSync-v2.13.0-macOS-arm64.zip")
+        assert(expectedArchiveURL(for: publicRelease, architecture: "riscv64") == nil)
         assert((try? parsePublicReleaseURL(
             URL(string: "https://github.com.evil.test/ensomnia16/PathSync/releases/tag/v2.13.0")!)) == nil)
         assert((try? parsePublicReleaseURL(

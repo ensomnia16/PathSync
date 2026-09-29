@@ -5,13 +5,13 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 ## Features
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
-- Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names and directions, schedule, conflict policy, and filters. Another Mac can review and import this configuration from Settings. Local work folders, enabled state, history, backups, and synced file contents are not included. Cloud folder paths are stored relative to a OneDrive root chosen separately on each Mac.
+- Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names, rules, and paths relative to each Mac's chosen local working and OneDrive roots. Review the derived paths and rule changes before importing. Absolute paths, enabled state, history, backups, and synced file contents are not included. Local edits to shared rules are flagged before replacement; saved configurations can be rolled back from local snapshots.
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - Use the menu bar to see the pending review count, sync all folders, or reopen the main window or History after closing it.
 - The app runs from the menu bar without a running Dock icon. Quitting the UI does not disable the installed sync schedule.
 - Choose notifications for conflicts or failures, every completed run, or off. Notifications are off by default; enabling them requests macOS permission. Notification text contains no file names or paths.
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
-- Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Filter by folder or result; the raw log remains available for troubleshooting.
+- Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Open or reveal affected files in Finder. For LaTeX text, compare current versions with an offline diff and line/section summary, or explicitly ask the installed Codex CLI to summarize the selected diff. Filter by folder or result; the raw log remains available for troubleshooting.
 - By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
 - Conflicts are measured against the last common content anchor. When both sides changed, you may also choose the version with the later absolute modification time; equal timestamps pause for manual review.
 - Deletes and edits are compared with the same last common anchor. A one-sided change propagates in the chosen direction; a concurrent edit and delete remains a conflict. The remaining file is backed up before this tool deletes it.
@@ -20,11 +20,11 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
 - LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
-- Check for updates: at launch and at most once a day the app asks GitHub for the latest release (turn this off in Settings → General), or check manually from About or the menu bar. A new version is shown in Overview, the sidebar, and the menu bar with a download link for your architecture. The app never replaces itself and sends no file names or paths.
+- Check for updates: at launch and at most once a day the app asks GitHub for the latest packaged release (turn this off in Settings → General), or check manually from About or the menu bar. Unreleased source commits on main are not app updates. A new release is shown in Overview, the sidebar, and the menu bar with a download link for your architecture. The app never replaces itself and sends no file names or paths.
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.13.2) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.14.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

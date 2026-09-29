@@ -1075,7 +1075,9 @@ struct ContentView: View {
         switch model.update {
         case .idle: return t("updateNotChecked")
         case .checking: return t("updateChecking")
-        case .upToDate: return t("updateUpToDate")
+        case .upToDate(let release): return String(format: t("updateUpToDate"), release.version)
+        case .aheadOfRelease(let release): return String(format: t("updateAheadOfRelease"),
+                                                          model.currentVersion, release.version)
         case .failed: return t("updateFailed")
         case .available(let release): return String(format: t("updateAvailable"), release.version)
         }
@@ -1086,6 +1088,7 @@ struct ContentView: View {
         switch model.update {
         case .checking: ProgressView().controlSize(.small)
         case .upToDate: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .aheadOfRelease: Image(systemName: "checkmark.circle.fill").foregroundStyle(.blue)
         case .failed: Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
         case .available: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
         case .idle: Image(systemName: "questionmark.circle").foregroundStyle(.secondary)
@@ -1152,6 +1155,9 @@ struct ContentView: View {
                     }
                     Text(t("updateInstallHint")).font(.caption).foregroundStyle(.secondary)
                 }
+                Text(t("updateScopeHint"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle(t("autoCheckUpdates"), isOn: $model.config.checkForUpdates)
             } header: {
                 Text(t("updates"))
