@@ -109,6 +109,46 @@ class MergeTests(unittest.TestCase):
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'local v2 with new length')
         self.assertIn('uploaded=1 downloaded=1', second.stdout)
 
+    def test_pair_filters_preserve_existing_copies_and_anchors(self):
+        for name in ('AGENTS.md', 'CLAUDE.md', '.mcp.json', '.codex/config.toml',
+                     '.agents/skills/test/SKILL.md', '.claude/settings.json',
+                     '.claude/settings.local.json', 'tmp/build.txt'):
+            path = self.local / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+        first = self.run_merge('--include-temp')
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertTrue((self.cloud / 'AGENTS.md').exists())
+        self.assertTrue((self.cloud / 'tmp/build.txt').exists())
+        self.assertFalse((self.cloud / '.claude/settings.local.json').exists())
+        filtered = self.run_merge('--skip-codex', '--skip-claude')
+        self.assertEqual(filtered.returncode, 0, filtered.stdout + filtered.stderr)
+        self.assertTrue((self.cloud / 'AGENTS.md').exists())
+        self.assertTrue((self.cloud / 'CLAUDE.md').exists())
+        self.assertTrue((self.cloud / 'tmp/build.txt').exists())
+        (self.local / 'AGENTS.md').write_text('new instruction')
+        still_filtered = self.run_merge('--skip-codex', '--skip-claude')
+        self.assertEqual(still_filtered.returncode, 0, still_filtered.stdout + still_filtered.stderr)
+        self.assertEqual((self.cloud / 'AGENTS.md').read_text(), 'AGENTS.md')
+        resumed = self.run_merge('--include-temp')
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertEqual((self.cloud / 'AGENTS.md').read_text(), 'new instruction')
+
+    def test_temp_and_agent_filters_on_initial_sync(self):
+        for name in ('AGENTS.md', 'CLAUDE.md', '.codex/config.toml',
+                     '.claude/settings.json', '.claude/settings.local.json',
+                     'tmp/cache.bin', '.tmp/scratch', 'paper.tmp', 'paper.tex'):
+            path = self.local / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+        result = self.run_merge('--skip-codex', '--skip-claude')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.cloud / 'paper.tex').exists())
+        for name in ('AGENTS.md', 'CLAUDE.md', '.codex/config.toml',
+                     '.claude/settings.json', '.claude/settings.local.json',
+                     'tmp/cache.bin', '.tmp/scratch', 'paper.tmp'):
+            self.assertFalse((self.cloud / name).exists(), name)
+
     def test_conflict_preserves_both_and_reports_it(self):
         (self.local / 'paper.tex').write_text('base')
         self.assertEqual(self.run_merge().returncode, 0)

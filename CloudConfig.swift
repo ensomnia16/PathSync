@@ -7,10 +7,11 @@ struct CloudImportAnchor: Codable, Equatable {
     let localDigest: String?
 }
 
-func localSharedDigest(_ config: SyncConfig, pairIDs: Set<UUID>) -> String {
+func localSharedDigest(_ config: SyncConfig, pairIDs: Set<UUID>, includeFilters: Bool = true) -> String {
     var shared = config
     shared.pairs = config.pairs.filter { pairIDs.contains($0.id) }
-    return CloudConfiguration(config: shared, deviceID: UUID(), deviceName: "local").sharedDigest
+    return CloudConfiguration(config: shared, deviceID: UUID(), deviceName: "local")
+        .digest(includeFilters: includeFilters)
 }
 
 // Each Mac writes a separate iCloud Drive document; paths and active state stay local.
@@ -20,6 +21,9 @@ struct CloudConfigPair: Codable, Equatable {
     let scheduledDirection: String
     let oneDriveRelativePath: String?
     let localRelativePath: String?
+    var syncCodexFiles: Bool? = nil
+    var syncClaudeFiles: Bool? = nil
+    var syncTemporaryFiles: Bool? = nil
     var isUnusedDefaultPlaceholder: Bool {
         name == "新路径" && scheduledDirection == "merge" &&
             oneDriveRelativePath == nil && localRelativePath == nil
@@ -44,10 +48,24 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
     var id: UUID { deviceID }
     var effectivePairs: [CloudConfigPair] { pairs.filter { !$0.isUnusedDefaultPlaceholder } }
 
-    var sharedDigest: String {
-        let entries = effectivePairs.sorted { $0.id.uuidString < $1.id.uuidString }.map {
-            [$0.id.uuidString, $0.name, $0.scheduledDirection,
-             $0.oneDriveRelativePath ?? "", $0.localRelativePath ?? ""]
+    var includesPairFilters: Bool {
+        effectivePairs.contains {
+            $0.syncCodexFiles != nil || $0.syncClaudeFiles != nil || $0.syncTemporaryFiles != nil
+        }
+    }
+
+    var sharedDigest: String { digest(includeFilters: includesPairFilters) }
+
+    func digest(includeFilters: Bool) -> String {
+        let entries = effectivePairs.sorted { $0.id.uuidString < $1.id.uuidString }.map { pair in
+            var values = [pair.id.uuidString, pair.name, pair.scheduledDirection,
+                          pair.oneDriveRelativePath ?? "", pair.localRelativePath ?? ""]
+            if includeFilters {
+                values += [String(pair.syncCodexFiles ?? true),
+                           String(pair.syncClaudeFiles ?? true),
+                           String(pair.syncTemporaryFiles ?? true)]
+            }
+            return values
         }
         let value: [String: Any] = [
             "pairs": entries, "scheduleMode": scheduleMode, "intervalHours": intervalHours,
@@ -69,7 +87,10 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
             CloudConfigPair(id: pair.id, name: pair.name,
                             scheduledDirection: pair.scheduledDirection,
                             oneDriveRelativePath: relativePath(pair.cloudPath, within: config.oneDriveRoot),
-                            localRelativePath: relativePath(pair.localPath, within: config.localRoot))
+                            localRelativePath: relativePath(pair.localPath, within: config.localRoot),
+                            syncCodexFiles: pair.syncCodexFiles,
+                            syncClaudeFiles: pair.syncClaudeFiles,
+                            syncTemporaryFiles: pair.syncTemporaryFiles)
         }
         scheduleMode = config.scheduleMode
         intervalHours = config.intervalHours
@@ -146,6 +167,9 @@ func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -
             old[shared.id]?.scheduledDirection != shared.scheduledDirection { pair.enabled = false }
         pair.name = shared.name
         pair.scheduledDirection = shared.scheduledDirection
+        if let value = shared.syncCodexFiles { pair.syncCodexFiles = value }
+        if let value = shared.syncClaudeFiles { pair.syncClaudeFiles = value }
+        if let value = shared.syncTemporaryFiles { pair.syncTemporaryFiles = value }
         if let relative = shared.oneDriveRelativePath,
            let cloud = path(in: current.oneDriveRoot, relative: relative) {
             if !pair.cloudPath.isEmpty && pair.cloudPath != cloud { pair.enabled = false }
@@ -171,7 +195,8 @@ func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -
     if !result.pairs.contains(where: \.enabled) { result.enabled = false }
     result.cloudImportAnchors[profile.deviceID.uuidString.lowercased()] =
         CloudImportAnchor(revisionID: profile.revisionID, sharedDigest: profile.sharedDigest,
-            localDigest: localSharedDigest(result, pairIDs: Set(profile.effectivePairs.map(\.id))))
+            localDigest: localSharedDigest(result, pairIDs: Set(profile.effectivePairs.map(\.id)),
+                                           includeFilters: profile.includesPairFilters))
     return result
 }
 
@@ -201,7 +226,8 @@ struct CloudImportPreview: Identifiable {
             !$0.isUnusedDefaultPlaceholder && !remoteIDs.contains($0.id)
         }
         let anchor = current.cloudImportAnchors[profile.deviceID.uuidString.lowercased()]
-        let currentDigest = localSharedDigest(current, pairIDs: Set(profile.effectivePairs.map(\.id)))
+        let currentDigest = localSharedDigest(current, pairIDs: Set(profile.effectivePairs.map(\.id)),
+                                               includeFilters: profile.includesPairFilters)
         localEditsConflict = anchor?.localDigest != nil && anchor?.localDigest != currentDigest
         bothChanged = localEditsConflict && anchor?.sharedDigest != profile.sharedDigest
         var changes: [String] = []

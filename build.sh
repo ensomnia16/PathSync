@@ -27,7 +27,9 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/ResearchSync.icns"
 
 architecture="$(uname -m)"
 swiftc -target "$architecture-apple-macosx13.0" -parse-as-library -O \
-    -o "$app/Contents/MacOS/ResearchSync" "$source_dir/ResearchSync.swift" "$source_dir/SyncHistory.swift" "$source_dir/HistoryPage.swift" "$source_dir/SyncUI.swift" "$source_dir/NativeUI.swift" "$source_dir/SyncNotifications.swift" "$source_dir/UpdateChecker.swift" "$source_dir/CloudConfig.swift" "$source_dir/LatexDiff.swift" "$source_dir/CodexSummary.swift"
+    -o "$app/Contents/MacOS/ResearchSync" "$source_dir/ResearchSync.swift" "$source_dir/SyncHistory.swift" "$source_dir/HistoryPage.swift" "$source_dir/SyncUI.swift" "$source_dir/NativeUI.swift" "$source_dir/SyncNotifications.swift" "$source_dir/UpdateChecker.swift" "$source_dir/UpdateInstaller.swift" "$source_dir/CloudConfig.swift" "$source_dir/LatexDiff.swift" "$source_dir/CodexSummary.swift"
+swiftc -target "$architecture-apple-macosx13.0" -O \
+    -o "$app/Contents/Resources/UpdateApply" "$source_dir/UpdateApply.swift"
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 print "$app"

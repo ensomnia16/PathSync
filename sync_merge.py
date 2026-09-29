@@ -14,7 +14,7 @@ import sys
 import tempfile
 import uuid
 
-from sync_tree import ALWAYS_EXCLUDE_DIRS, LATEX_EXCLUDE_DIRS, excluded
+from sync_tree import excluded_relative
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
@@ -114,7 +114,12 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
     return local_hash, cloud_hash
 
 
-def scan(root, exclude_latex, errors):
+def excluded_path(name, args, directory=False):
+    return excluded_relative(name, args.exclude_latex, args.skip_codex,
+                             args.skip_claude, args.include_temp, directory=directory)
+
+
+def scan(root, args, errors):
     found = set()
 
     def walk_error(error):
@@ -122,13 +127,13 @@ def scan(root, exclude_latex, errors):
 
     for current, dirs, files in os.walk(root, onerror=walk_error):
         dirs[:] = [name for name in dirs
-                   if name not in ALWAYS_EXCLUDE_DIRS
-                   and not (exclude_latex and any(name.startswith(prefix) for prefix in LATEX_EXCLUDE_DIRS))
+                   if not excluded_path((Path(current) / name).relative_to(root).as_posix(),
+                                        args, directory=True)
                    and not (Path(current) / name).is_symlink()]
         for name in files:
-            if excluded(name, exclude_latex):
-                continue
             path = Path(current) / name
+            if excluded_path(path.relative_to(root).as_posix(), args):
+                continue
             if not path.is_symlink():
                 found.add(path.relative_to(root).as_posix())
     return found
@@ -143,7 +148,7 @@ def within_directory(name, directory):
     return name.startswith(directory + '/')
 
 
-def directory_snapshot(root, name, exclude_latex):
+def directory_snapshot(root, name, args):
     """Read the tracked subtree, including empty directories, or confirm absence."""
     path = safe_path(root, name)
     try:
@@ -162,9 +167,8 @@ def directory_snapshot(root, name, exclude_latex):
         kept_dirs = []
         for child in dirs:
             child_path = Path(current) / child
-            if child in ALWAYS_EXCLUDE_DIRS or (
-                    exclude_latex and any(child.startswith(prefix)
-                                          for prefix in LATEX_EXCLUDE_DIRS)):
+            if excluded_path(child_path.relative_to(root).as_posix(), args,
+                             directory=True):
                 continue
             if child_path.is_symlink():
                 continue
@@ -172,9 +176,9 @@ def directory_snapshot(root, name, exclude_latex):
             found_dirs.add(child_path.relative_to(root).as_posix())
         dirs[:] = kept_dirs
         for child in files:
-            if excluded(child, exclude_latex):
-                continue
             child_path = Path(current) / child
+            if excluded_path(child_path.relative_to(root).as_posix(), args):
+                continue
             if child_path.is_symlink():
                 continue
             before = signature(child_path)
@@ -436,8 +440,12 @@ def sync_files(args, local, cloud, files, conflicts):
     next_files = dict(files)
     next_conflicts = dict(conflicts)
     errors = []
-    names = (scan(local, args.exclude_latex, errors)
-             | scan(cloud, args.exclude_latex, errors) | set(files) | set(conflicts))
+    active_files = {name: record for name, record in files.items()
+                    if not excluded_path(name, args)}
+    active_conflicts = {name: record for name, record in conflicts.items()
+                        if not excluded_path(name, args, directory=record.get('kind') == 'tree')}
+    names = (scan(local, args, errors) | scan(cloud, args, errors)
+             | set(active_files) | set(active_conflicts))
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
@@ -447,7 +455,7 @@ def sync_files(args, local, cloud, files, conflicts):
                 'localCtime': change_time(safe_path(local, path_name)),
                 'cloudCtime': change_time(safe_path(cloud, path_name))}
 
-    tree_record_names = {name for name, record in conflicts.items()
+    tree_record_names = {name for name, record in active_conflicts.items()
                          if record.get('kind') == 'tree'}
     blocked_directories = set()
 
@@ -460,11 +468,11 @@ def sync_files(args, local, cloud, files, conflicts):
     for directory in sorted(tree_record_names, key=lambda item: (item.count('/'), item)):
         if blocked(directory):
             continue
-        record = conflicts[directory]
+        record = active_conflicts[directory]
         try:
-            left = directory_snapshot(local, directory, args.exclude_latex)
-            right = directory_snapshot(cloud, directory, args.exclude_latex)
-            anchor_tree = anchor_directory_snapshot(directory, files)
+            left = directory_snapshot(local, directory, args)
+            right = directory_snapshot(cloud, directory, args)
+            anchor_tree = anchor_directory_snapshot(directory, active_files)
             reverted_edit = ((left is None and right == anchor_tree
                               and record.get('deletedSide') == 'local') or
                              (right is None and left == anchor_tree
@@ -481,7 +489,7 @@ def sync_files(args, local, cloud, files, conflicts):
             print(f'FAILED\t{directory}\t无法核验目录冲突：{error}')
             counts['failed'] += 1
 
-    anchored_directories = {directory for name, record in files.items()
+    anchored_directories = {directory for name, record in active_files.items()
                             if (record.get('anchorHash') is not None
                                 or record.get('local') is not None
                                 or record.get('cloud') is not None)
@@ -508,8 +516,8 @@ def sync_files(args, local, cloud, files, conflicts):
                 continue
             deleted_side = 'cloud' if left_exists else 'local'
             surviving_root = local if left_exists else cloud
-            surviving = directory_snapshot(surviving_root, directory, args.exclude_latex)
-            if surviving == anchor_directory_snapshot(directory, files):
+            surviving = directory_snapshot(surviving_root, directory, args)
+            if surviving == anchor_directory_snapshot(directory, active_files):
                 continue
             blocked_directories.add(directory)
             tree_record_names.add(directory)
@@ -720,6 +728,8 @@ def sync_files(args, local, cloud, files, conflicts):
         print(f'FAILED\t{path}\t{error}')
         counts['failed'] += 1
     for name, record in sorted(next_conflicts.items()):
+        if excluded_path(name, args, directory=record.get('kind') == 'tree'):
+            continue
         if is_review(record):
             print(f'NEEDS_REVIEW\t{name}\tcopy={record["sidecar"]}')
             counts['reviews'] += 1
@@ -732,7 +742,9 @@ def sync_files(args, local, cloud, files, conflicts):
                 counts['failed'] += 1
     if not args.dry_run:
         save_state(args.state, local, cloud, next_files, next_conflicts)
-        counts['conflicts'] = sum(not is_review(record) for record in next_conflicts.values())
+        counts['conflicts'] = sum(not is_review(record) for name, record in next_conflicts.items()
+                                  if not excluded_path(name, args,
+                                                       directory=record.get('kind') == 'tree'))
         prune_backups(args.state, args.backup_retention_days)
     counts['backups'] = args.backup_count
     print(' '.join(f'{key}={value}' for key, value in counts.items()))
@@ -927,6 +939,9 @@ def main():
     parser.add_argument('--conflict-policy', choices=('keep-both', 'ask', 'newest'), default='keep-both')
     parser.add_argument('--backup-retention-days', type=int, default=15)
     parser.add_argument('--exclude-latex', action='store_true')
+    parser.add_argument('--skip-codex', action='store_true')
+    parser.add_argument('--skip-claude', action='store_true')
+    parser.add_argument('--include-temp', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--resolve', metavar='RELATIVE_PATH')
     parser.add_argument('--acknowledge', metavar='RELATIVE_PATH')

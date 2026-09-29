@@ -60,6 +60,9 @@ private struct CloudImportPreviewSheet: View {
                             }
                             Text("\(t("local")): \(pair.localPath.isEmpty ? t("cloudUnset") : pair.localPath)")
                             Text("\(t("cloud")): \(pair.cloudPath.isEmpty ? t("cloudUnset") : pair.cloudPath)")
+                            Text("Codex \(t(pair.syncCodexFiles ? "enabled" : "disabled")) · " +
+                                 "Claude Code \(t(pair.syncClaudeFiles ? "enabled" : "disabled")) · " +
+                                 "tmp \(t(pair.syncTemporaryFiles ? "enabled" : "disabled"))")
                             if !pair.enabled { Text(t("cloudPairDisabled")).foregroundStyle(.orange) }
                         }
                         .font(.caption)
@@ -531,12 +534,19 @@ struct ContentView: View {
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(String(format: t("updateAvailable"), release.version)).font(.headline)
-                    Text(t("updateInstallHint")).font(.caption).foregroundStyle(.secondary)
+                    Text(t(release.signatureURL == nil ? "updateManualHint" : "updateInstallHint"))
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 12)
                 Button(t("updateDetails")) { model.page = "about" }
-                Button(t("updateDownload")) { NSWorkspace.shared.open(release.downloadURL ?? release.pageURL) }
-                    .buttonStyle(.borderedProminent)
+                if release.signatureURL != nil {
+                    Button(t("updateInstall")) { model.installAvailableUpdate() }
+                        .disabled(model.busy || model.hasUnsavedChanges || model.updateInstallBusy)
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button(t("updateDownload")) { NSWorkspace.shared.open(release.downloadURL ?? release.pageURL) }
+                        .buttonStyle(.borderedProminent)
+                }
             }
         }
     }
@@ -697,6 +707,16 @@ struct ContentView: View {
             } footer: {
                 Text(t(model.config.conflictPolicy == "keep-both" ? "directionHintAuto" :
                        (model.config.conflictPolicy == "newest" ? "directionHintNewest" : "directionHintAsk")))
+            }
+
+            Section {
+                Toggle(t("syncCodexFiles"), isOn: $model.config.pairs[index].syncCodexFiles)
+                Toggle(t("syncClaudeFiles"), isOn: $model.config.pairs[index].syncClaudeFiles)
+                Toggle(t("syncTemporaryFiles"), isOn: $model.config.pairs[index].syncTemporaryFiles)
+            } header: {
+                Text(t("pairFilters"))
+            } footer: {
+                Text(t("pairFiltersHint"))
             }
 
             conflictsSection(index)
@@ -952,6 +972,18 @@ struct ContentView: View {
                     Text(t("english")).tag("en")
                 }
                 .pickerStyle(.menu)
+                Toggle(t("launchAtLogin"), isOn: Binding(
+                    get: { model.launchAtLoginStatus == .enabled || model.launchAtLoginStatus == .requiresApproval },
+                    set: { model.setLaunchAtLogin($0) }
+                ))
+                if model.launchAtLoginStatus == .requiresApproval {
+                    Label(t("launchAtLoginApproval"), systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.orange)
+                }
+                if let error = model.launchAtLoginError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
                 Toggle(t("autoCheckUpdates"), isOn: $model.config.checkForUpdates)
             } header: {
                 Text(t("general"))
@@ -963,6 +995,7 @@ struct ContentView: View {
             configRollbackSection
         }
         .formStyle(.grouped)
+        .onAppear { model.refreshLaunchAtLogin() }
     }
 
 
@@ -1138,8 +1171,14 @@ struct ContentView: View {
                     if let release = model.availableRelease {
                         if let downloadURL = release.downloadURL {
                             Button(t("updateReleaseNotes")) { NSWorkspace.shared.open(release.pageURL) }
-                            Button(t("updateDownload")) { NSWorkspace.shared.open(downloadURL) }
-                                .buttonStyle(.borderedProminent)
+                            if release.signatureURL != nil {
+                                Button(t("updateInstall")) { model.installAvailableUpdate() }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(model.busy || model.hasUnsavedChanges || model.updateInstallBusy)
+                            } else {
+                                Button(t("updateDownload")) { NSWorkspace.shared.open(downloadURL) }
+                                    .buttonStyle(.borderedProminent)
+                            }
                         } else {
                             Button(t("updateReleaseNotes")) { NSWorkspace.shared.open(release.pageURL) }
                                 .buttonStyle(.borderedProminent)
@@ -1159,12 +1198,27 @@ struct ContentView: View {
                             }
                         }
                     }
-                    Text(t("updateInstallHint")).font(.caption).foregroundStyle(.secondary)
+                    switch model.updateInstallPhase {
+                    case .downloading: Label(t("updateDownloading"), systemImage: "arrow.down.circle")
+                    case .verifying: Label(t("updateVerifying"), systemImage: "checkmark.shield")
+                    case .replacing: Label(t("updateReplacing"), systemImage: "arrow.triangle.2.circlepath")
+                    case .failed(let message): Label(message, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    case .idle: EmptyView()
+                    }
+                    Text(t(release.signatureURL == nil ? "updateManualHint" : "updateInstallHint"))
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Text(t("updateScopeHint"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle(t("autoCheckUpdates"), isOn: $model.config.checkForUpdates)
+                Toggle(t("autoInstallUpdates"), isOn: Binding(
+                    get: { model.config.autoInstallUpdates },
+                    set: { enabled in
+                        model.config.autoInstallUpdates = enabled
+                        if enabled { model.config.checkForUpdates = true }
+                    }))
             } header: {
                 Text(t("updates"))
             } footer: {

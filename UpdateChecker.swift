@@ -7,7 +7,17 @@ struct AppRelease: Codable, Equatable {
     let version: String
     let pageURL: URL
     let downloadURL: URL?
+    let signatureURL: URL?
     let notes: [String]
+
+    init(version: String, pageURL: URL, downloadURL: URL?, signatureURL: URL? = nil,
+         notes: [String]) {
+        self.version = version
+        self.pageURL = pageURL
+        self.downloadURL = downloadURL
+        self.signatureURL = signatureURL
+        self.notes = notes
+    }
 }
 
 enum UpdateStatus: Equatable {
@@ -74,19 +84,23 @@ func parseLatestRelease(_ data: Data, architecture: String) throws -> AppRelease
           !versionComponents(payload.tag_name).isEmpty else {
         throw NSError(domain: "com.ensom.ResearchSync.update", code: 2)
     }
-    let archives = payload.assets.filter {
-        $0.name.lowercased().hasSuffix(".zip") && $0.name.lowercased().contains("macos")
-            && isGitHubURL($0.browser_download_url)
+    var version = payload.tag_name
+    if version.hasPrefix("v") || version.hasPrefix("V") { version.removeFirst() }
+    let archiveName = "PathSync-v\(version)-macOS-\(architecture).zip"
+    let asset = payload.assets.first {
+        $0.name == archiveName && isGitHubURL($0.browser_download_url)
     }
-    let asset = archives.first { $0.name.lowercased().contains(architecture.lowercased()) }
+    let signature = payload.assets.first {
+        $0.name == archiveName + ".sig" && isGitHubURL($0.browser_download_url)
+    }
     let notes = (payload.body ?? "").components(separatedBy: .newlines)
         .map { $0.trimmingCharacters(in: .whitespaces) }
         .filter { $0.hasPrefix("- ") }
         .map { String($0.dropFirst(2)) }
-    var version = payload.tag_name
-    if version.hasPrefix("v") || version.hasPrefix("V") { version.removeFirst() }
     return AppRelease(version: version, pageURL: payload.html_url,
-                      downloadURL: asset?.browser_download_url, notes: Array(notes.prefix(8)))
+                      downloadURL: asset?.browser_download_url,
+                      signatureURL: signature?.browser_download_url,
+                      notes: Array(notes.prefix(8)))
 }
 
 // GitHub's anonymous API limit is shared by an entire network. The public latest
@@ -110,6 +124,11 @@ func expectedArchiveURL(for release: AppRelease, architecture: String) -> URL? {
           ["arm64", "x86_64"].contains(architecture) else { return nil }
     let tag = "v" + release.version
     return URL(string: "https://github.com/ensomnia16/PathSync/releases/download/\(tag)/PathSync-\(tag)-macOS-\(architecture).zip")
+}
+
+func expectedSignatureURL(for release: AppRelease, architecture: String) -> URL? {
+    guard let archive = expectedArchiveURL(for: release, architecture: architecture) else { return nil }
+    return URL(string: archive.absoluteString + ".sig")
 }
 
 func currentArchitecture() -> String {
@@ -156,16 +175,30 @@ private func fetchPublicRelease(completion: @escaping (Result<AppRelease, Error>
                 completion(.success(release))
                 return
             }
-            var probe = URLRequest(url: archive, cachePolicy: .reloadIgnoringLocalCacheData,
-                                   timeoutInterval: 10)
-            probe.httpMethod = "HEAD"
-            probe.setValue("PathSync", forHTTPHeaderField: "User-Agent")
-            URLSession.shared.dataTask(with: probe) { _, response, _ in
-                let available = (response as? HTTPURLResponse)?.statusCode == 200
-                completion(.success(AppRelease(version: release.version, pageURL: release.pageURL,
-                                               downloadURL: available ? archive : nil,
-                                               notes: release.notes)))
-            }.resume()
+            func probe(_ url: URL, completion: @escaping (Bool) -> Void) {
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                                         timeoutInterval: 10)
+                request.httpMethod = "HEAD"
+                request.setValue("PathSync", forHTTPHeaderField: "User-Agent")
+                URLSession.shared.dataTask(with: request) { _, response, _ in
+                    completion((response as? HTTPURLResponse)?.statusCode == 200)
+                }.resume()
+            }
+            probe(archive) { available in
+                guard available, let signature = expectedSignatureURL(for: release,
+                                                                        architecture: currentArchitecture()) else {
+                    completion(.success(AppRelease(version: release.version, pageURL: release.pageURL,
+                                                   downloadURL: available ? archive : nil,
+                                                   notes: release.notes)))
+                    return
+                }
+                probe(signature) { signed in
+                    completion(.success(AppRelease(version: release.version, pageURL: release.pageURL,
+                                                   downloadURL: archive,
+                                                   signatureURL: signed ? signature : nil,
+                                                   notes: release.notes)))
+                }
+            }
         } catch { completion(.failure(error)) }
     }.resume()
 }

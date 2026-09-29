@@ -26,6 +26,9 @@ struct CloudConfigChecks {
         let profile = CloudConfiguration(config: source, deviceID: alice, deviceName: "Alice Mac")
         try profile.validate()
         assert(profile.pairs[0].oneDriveRelativePath == "文档/科研")
+        assert(profile.pairs[0].syncCodexFiles == true)
+        assert(profile.pairs[0].syncClaudeFiles == true)
+        assert(profile.pairs[0].syncTemporaryFiles == false)
         assert(profile.pairs[0].localRelativePath == "科研")
         assert(profile.pairs[1].oneDriveRelativePath == nil)
         assert(profile.pairs[2].oneDriveRelativePath == "文档/论文")
@@ -52,6 +55,7 @@ struct CloudConfigChecks {
                                  scheduledDirection: "download", enabled: true)]
         let imported = try importing(profile, into: target)
         assert(imported.pairs[0].name == "科研")
+        assert(!imported.pairs[0].syncTemporaryFiles)
         assert(imported.pairs[0].localPath == target.pairs[0].localPath)
         assert(imported.pairs[0].cloudPath == otherRoot + "/文档/科研")
         assert(!imported.pairs[0].enabled) // Direction changed; review before re-enabling.
@@ -110,11 +114,23 @@ struct CloudConfigChecks {
         var oldShape = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
         oldShape.removeValue(forKey: "importedRevisions")
         var oldPairs = oldShape["pairs"] as! [[String: Any]]
-        for index in oldPairs.indices { oldPairs[index].removeValue(forKey: "localRelativePath") }
+        for index in oldPairs.indices {
+            oldPairs[index].removeValue(forKey: "localRelativePath")
+            oldPairs[index].removeValue(forKey: "syncCodexFiles")
+            oldPairs[index].removeValue(forKey: "syncClaudeFiles")
+            oldPairs[index].removeValue(forKey: "syncTemporaryFiles")
+        }
         oldShape["pairs"] = oldPairs
         let oldProfile = try JSONDecoder().decode(CloudConfiguration.self,
             from: JSONSerialization.data(withJSONObject: oldShape))
         try oldProfile.validate()
+        assert(!oldProfile.includesPairFilters)
+        assert(oldProfile.sharedDigest == oldProfile.digest(includeFilters: false))
+        let legacyPair = try JSONDecoder().decode(SyncPair.self,
+            from: Data("""
+            {"id":"\(UUID().uuidString)","name":"legacy","localPath":"/tmp/a","cloudPath":"/tmp/b","scheduledDirection":"merge","enabled":false}
+            """.utf8))
+        assert(legacyPair.syncCodexFiles && legacyPair.syncClaudeFiles && legacyPair.syncTemporaryFiles)
         var legacyWithPlaceholder = oldShape
         var legacyPairs = legacyWithPlaceholder["pairs"] as! [[String: Any]]
         legacyPairs.append(["id": UUID().uuidString, "name": "新路径", "scheduledDirection": "merge"])

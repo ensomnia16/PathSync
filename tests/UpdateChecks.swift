@@ -20,7 +20,8 @@ struct UpdateChecks {
          "body":"## 路径同步 2.13.0\\n\\n- 加入检查更新\\n- 重新设计界面\\n\\nSHA-256: abc",
          "assets":[
            {"name":"PathSync-v2.13.0-macOS-x86_64.zip","browser_download_url":"https://github.com/ensomnia16/PathSync/releases/download/v2.13.0/PathSync-v2.13.0-macOS-x86_64.zip"},
-           {"name":"PathSync-v2.13.0-macOS-arm64.zip","browser_download_url":"https://github.com/ensomnia16/PathSync/releases/download/v2.13.0/PathSync-v2.13.0-macOS-arm64.zip"}]}
+           {"name":"PathSync-v2.13.0-macOS-arm64.zip","browser_download_url":"https://github.com/ensomnia16/PathSync/releases/download/v2.13.0/PathSync-v2.13.0-macOS-arm64.zip"},
+           {"name":"PathSync-v2.13.0-macOS-arm64.zip.sig","browser_download_url":"https://github.com/ensomnia16/PathSync/releases/download/v2.13.0/PathSync-v2.13.0-macOS-arm64.zip.sig"}]}
         """
         let release = try parseLatestRelease(Data(payload.utf8), architecture: "arm64")
         assert(release.version == "2.13.0")
@@ -28,6 +29,7 @@ struct UpdateChecks {
         assert(updateStatus(for: release, currentVersion: "2.13.0") == .upToDate(release))
         assert(updateStatus(for: release, currentVersion: "2.14.0") == .aheadOfRelease(release))
         assert(release.downloadURL?.lastPathComponent == "PathSync-v2.13.0-macOS-arm64.zip")
+        assert(release.signatureURL?.lastPathComponent == "PathSync-v2.13.0-macOS-arm64.zip.sig")
         assert(release.notes == ["加入检查更新", "重新设计界面"])
         let restored = try JSONDecoder().decode(AppRelease.self, from: JSONEncoder().encode(release))
         assert(restored == release)
@@ -47,6 +49,8 @@ struct UpdateChecks {
         assert(expectedArchiveURL(for: publicRelease, architecture: "arm64")?.lastPathComponent ==
                "PathSync-v2.13.0-macOS-arm64.zip")
         assert(expectedArchiveURL(for: publicRelease, architecture: "riscv64") == nil)
+        assert(expectedSignatureURL(for: publicRelease, architecture: "arm64")?.lastPathComponent ==
+               "PathSync-v2.13.0-macOS-arm64.zip.sig")
         assert((try? parsePublicReleaseURL(
             URL(string: "https://github.com.evil.test/ensomnia16/PathSync/releases/tag/v2.13.0")!)) == nil)
         assert((try? parsePublicReleaseURL(

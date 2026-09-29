@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import ServiceManagement
 import UserNotifications
 
 private let appID = "com.ensom.ResearchSync"
@@ -37,6 +38,42 @@ struct SyncPair: Codable, Identifiable, Equatable {
     var cloudPath: String = ""
     var scheduledDirection: String = "merge"
     var enabled: Bool = false
+    var syncCodexFiles = true
+    var syncClaudeFiles = true
+    var syncTemporaryFiles = false
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, localPath, cloudPath, scheduledDirection, enabled
+        case syncCodexFiles, syncClaudeFiles, syncTemporaryFiles
+    }
+
+    init(id: UUID = UUID(), name: String = "新路径", localPath: String = "", cloudPath: String = "",
+         scheduledDirection: String = "merge", enabled: Bool = false,
+         syncCodexFiles: Bool = true, syncClaudeFiles: Bool = true, syncTemporaryFiles: Bool = false) {
+        self.id = id
+        self.name = name
+        self.localPath = localPath
+        self.cloudPath = cloudPath
+        self.scheduledDirection = scheduledDirection
+        self.enabled = enabled
+        self.syncCodexFiles = syncCodexFiles
+        self.syncClaudeFiles = syncClaudeFiles
+        self.syncTemporaryFiles = syncTemporaryFiles
+    }
+
+    init(from decoder: Decoder) throws {
+        let data = try decoder.container(keyedBy: CodingKeys.self)
+        id = try data.decode(UUID.self, forKey: .id)
+        name = try data.decode(String.self, forKey: .name)
+        localPath = try data.decode(String.self, forKey: .localPath)
+        cloudPath = try data.decode(String.self, forKey: .cloudPath)
+        scheduledDirection = try data.decode(String.self, forKey: .scheduledDirection)
+        enabled = try data.decode(Bool.self, forKey: .enabled)
+        syncCodexFiles = try data.decodeIfPresent(Bool.self, forKey: .syncCodexFiles) ?? true
+        syncClaudeFiles = try data.decodeIfPresent(Bool.self, forKey: .syncClaudeFiles) ?? true
+        // Older versions included tmp directories. Preserve that choice on upgrade.
+        syncTemporaryFiles = try data.decodeIfPresent(Bool.self, forKey: .syncTemporaryFiles) ?? true
+    }
 
     var isUnusedDefaultPlaceholder: Bool {
         name == "新路径" && localPath.isEmpty && cloudPath.isEmpty &&
@@ -57,6 +94,7 @@ struct SyncConfig: Codable, Equatable {
     var language = "zh-Hans"
     var notificationMode = "off"
     var checkForUpdates = true
+    var autoInstallUpdates = false
     var cloudConfigEnabled = false
     var oneDriveRoot = ""
     var localRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
@@ -65,7 +103,7 @@ struct SyncConfig: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
-        case checkForUpdates, cloudConfigEnabled, oneDriveRoot, localRoot, cloudImportAnchors
+        case checkForUpdates, autoInstallUpdates, cloudConfigEnabled, oneDriveRoot, localRoot, cloudImportAnchors
         case source, destination, scheduledDirection
     }
 
@@ -85,6 +123,7 @@ struct SyncConfig: Codable, Equatable {
         language = try data.decodeIfPresent(String.self, forKey: .language) ?? "zh-Hans"
         notificationMode = try data.decodeIfPresent(String.self, forKey: .notificationMode) ?? "off"
         checkForUpdates = try data.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
+        autoInstallUpdates = try data.decodeIfPresent(Bool.self, forKey: .autoInstallUpdates) ?? false
         cloudConfigEnabled = try data.decodeIfPresent(Bool.self, forKey: .cloudConfigEnabled) ?? false
         oneDriveRoot = try data.decodeIfPresent(String.self, forKey: .oneDriveRoot) ?? ""
         localRoot = try data.decodeIfPresent(String.self, forKey: .localRoot)
@@ -119,6 +158,7 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(language, forKey: .language)
         try data.encode(notificationMode, forKey: .notificationMode)
         try data.encode(checkForUpdates, forKey: .checkForUpdates)
+        try data.encode(autoInstallUpdates, forKey: .autoInstallUpdates)
         try data.encode(cloudConfigEnabled, forKey: .cloudConfigEnabled)
         try data.encode(oneDriveRoot, forKey: .oneDriveRoot)
         try data.encode(localRoot, forKey: .localRoot)
@@ -316,6 +356,9 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      "--conflict-policy", conflictPolicy,
                      "--backup-retention-days", String(backupRetentionDays)]
     if excludeLatex { arguments.append("--exclude-latex") }
+    if !pair.syncCodexFiles { arguments.append("--skip-codex") }
+    if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
+    if pair.syncTemporaryFiles { arguments.append("--include-temp") }
     if dryRun { arguments.append("--dry-run") }
     process.arguments = arguments
     let output = Pipe()
@@ -511,6 +554,9 @@ final class SyncModel: ObservableObject {
     @Published var historyError: String?
     @Published var confirmingRemoval = false
     @Published var update: UpdateStatus = .idle
+    @Published var updateInstallPhase: UpdateInstallPhase = .idle
+    @Published var launchAtLoginStatus: SMAppService.Status = SMAppService.mainApp.status
+    @Published var launchAtLoginError: String?
     @Published var lastUpdateCheck: Date?
     @Published var cloudProfiles: [CloudConfiguration] = []
     @Published var cloudError: String?
@@ -542,6 +588,10 @@ final class SyncModel: ObservableObject {
             update = updateStatus(for: release, currentVersion: currentVersion)
             lastUpdateCheck = UserDefaults.standard.object(forKey: "lastSuccessfulUpdateCheck") as? Date
         }
+        let updateErrorFile = URL(fileURLWithPath: supportDirectory + "/last-update-error.txt")
+        if let message = try? String(contentsOf: updateErrorFile, encoding: .utf8) {
+            updateInstallPhase = .failed(message)
+        }
         DispatchQueue.main.async { self.checkForUpdates(automatic: true) }
         if loaded.cloudConfigEnabled {
             DispatchQueue.main.async { self.refreshCloudProfiles() }
@@ -549,12 +599,37 @@ final class SyncModel: ObservableObject {
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
+    func refreshLaunchAtLogin() {
+        launchAtLoginStatus = SMAppService.mainApp.status
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginError = error.localizedDescription
+        }
+        refreshLaunchAtLogin()
+    }
+
     var hasEnabledPairs: Bool { config.pairs.contains { $0.enabled } }
     var currentVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0" }
 
     var availableRelease: AppRelease? {
         if case .available(let release) = update { return release }
         return nil
+    }
+
+    var updateInstallBusy: Bool {
+        switch updateInstallPhase {
+        case .downloading, .verifying, .replacing: return true
+        case .idle, .failed: return false
+        }
     }
 
     func lastRecord(for pair: SyncPair) -> SyncHistoryRecord? {
@@ -574,10 +649,13 @@ final class SyncModel: ObservableObject {
         if update == .checking { return }
         if automatic {
             guard config.checkForUpdates else { return }
-            if let last = lastUpdateAttempt, Date().timeIntervalSince(last) < 86_400 { return }
+            let checkedVersion = UserDefaults.standard.string(forKey: "lastUpdateAttemptAppVersion")
+            if checkedVersion == currentVersion, let last = lastUpdateAttempt,
+               Date().timeIntervalSince(last) < 86_400 { return }
         }
         lastUpdateAttempt = Date()
         UserDefaults.standard.set(lastUpdateAttempt, forKey: "lastUpdateAttempt")
+        UserDefaults.standard.set(currentVersion, forKey: "lastUpdateAttemptAppVersion")
         let previous = update
         update = .checking
         let current = currentVersion
@@ -589,9 +667,42 @@ final class SyncModel: ObservableObject {
                     UserDefaults.standard.set(try? JSONEncoder().encode(release), forKey: "cachedLatestRelease")
                     UserDefaults.standard.set(self.lastUpdateCheck, forKey: "lastSuccessfulUpdateCheck")
                     self.update = updateStatus(for: release, currentVersion: current)
+                    if self.config.autoInstallUpdates { self.installAvailableUpdate() }
                 case .failure:
                     // A silent background failure keeps whatever was known before.
                     self.update = automatic ? previous : .failed
+                }
+            }
+        }
+    }
+
+    func installAvailableUpdate() {
+        guard let release = availableRelease, release.signatureURL != nil,
+              !busy, !hasUnsavedChanges else { return }
+        if case .downloading = updateInstallPhase { return }
+        if case .verifying = updateInstallPhase { return }
+        if case .replacing = updateInstallPhase { return }
+        updateInstallPhase = .downloading
+        prepareUpdate(release, installedBundle: Bundle.main.bundleURL,
+                      status: { phase in DispatchQueue.main.async { self.updateInstallPhase = phase } }) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .failure(let error):
+                    self.updateInstallPhase = .failed(error.localizedDescription)
+                case .success(let prepared):
+                    do {
+                        let process = Process()
+                        process.executableURL = prepared.helper
+                        process.arguments = [Bundle.main.bundleURL.path, prepared.staged.path,
+                                             String(getpid())]
+                        process.standardOutput = FileHandle.nullDevice
+                        process.standardError = FileHandle.nullDevice
+                        try process.run()
+                        self.updateInstallPhase = .replacing
+                        NSApp.terminate(nil)
+                    } catch {
+                        self.updateInstallPhase = .failed(error.localizedDescription)
+                    }
                 }
             }
         }
@@ -833,6 +944,7 @@ final class SyncModel: ObservableObject {
             statusDetail = nil
             refreshConflicts()
             if config.cloudConfigEnabled { publishCloudConfig(config) }
+            if config.autoInstallUpdates { installAvailableUpdate() }
         } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
     }
 
@@ -866,6 +978,7 @@ final class SyncModel: ObservableObject {
                 self.busy = false
                 self.refreshConflicts()
                 self.refreshHistory()
+                if self.config.autoInstallUpdates { self.installAvailableUpdate() }
             }
         }
     }

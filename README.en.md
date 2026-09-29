@@ -5,10 +5,12 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 ## Features
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
+- Each pair can independently include Codex project files (`AGENTS.md`, `.codex/`, `.agents/`), Claude Code project files (`CLAUDE.md`, `.claude/`, `.mcp.json`), and temporary files such as `tmp`, `.tmp`, and `.log`. Machine-local `.claude/settings.local.json` and `.DS_Store` are always skipped. New pairs skip temporary files by default; existing pairs keep their prior behavior. Changing a filter does not delete an existing copy.
 - Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names, rules, and paths relative to each Mac's chosen local working and OneDrive roots. The local working root defaults to `~/Documents`; import derives local paths and creates missing empty folders after preview. For older profiles without local relative paths, it derives them from the OneDrive relative paths. Absolute paths, enabled state, history, backups, and synced file contents are not included. New pairs remain disabled until reviewed. Local edits to shared rules are flagged before replacement; saved configurations can be rolled back from local snapshots.
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - Use the menu bar to see the pending review count, sync all folders, or reopen the main window or History after closing it.
 - The app runs from the menu bar without a running Dock icon. Quitting the UI does not disable the installed sync schedule.
+- Enable Launch at login in Settings → General to register a macOS login item. This is separate from the scheduled sync task.
 - Choose notifications for conflicts or failures, every completed run, or off. Notifications are off by default; enabling them requests macOS permission. Notification text contains no file names or paths.
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
 - Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Open or reveal affected files in Finder. For LaTeX text, compare current versions with an offline diff and line/section summary, or explicitly ask the installed Codex CLI to summarize the selected diff. Filter by folder or result; the raw log remains available for troubleshooting.
@@ -20,11 +22,11 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
 - LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
-- Check for updates: at launch and at most once a day the app asks GitHub for the latest packaged release (turn this off in Settings → General), or check manually from About or the menu bar. Unreleased source commits on main are not app updates. A new release is shown in Overview, the sidebar, and the menu bar with a download link for your architecture. The app never replaces itself and sends no file names or paths.
+- Updates: the app checks GitHub for packaged releases at launch and at most once a day, or on request. A release with a signed archive can be installed and relaunched in the app; automatic installation is optional in About. The archive is verified with a pinned Ed25519 public key before replacement. Version 2.14.1 needs a one-time manual upgrade to gain in-app installation. Unreleased main commits are not app updates, and checks send no file names or paths.
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.14.1) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.0) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
