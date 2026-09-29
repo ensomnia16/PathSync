@@ -192,6 +192,15 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(set(failures), {names[-1]})
         self.assertFalse((self.cloud / names[-1]).exists())
 
+    def test_large_cloud_placeholder_gets_longer_bounded_read(self):
+        path = self.cloud / 'video.mp4'
+        with path.open('wb') as output:
+            output.truncate(200_000_000)
+        with mock.patch.object(sync_merge.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            self.assertIsNone(sync_merge.CloudPrefetch.hydrate(path))
+            self.assertEqual(run.call_args.kwargs['timeout'], 300)
+
     def test_large_import_copies_before_all_prefetch_results_are_consumed(self):
         for index in range(100):
             (self.cloud / f'file-{index:03}.txt').write_text(str(index))
@@ -201,6 +210,16 @@ class MergeTests(unittest.TestCase):
         last_prefetch = result.stdout.index('PROGRESS\tPREFETCH\t100\t100')
         self.assertLess(first_copy, last_prefetch)
         self.assertEqual(len(list(self.local.iterdir())), 100)
+
+    def test_large_new_file_does_not_hold_up_small_imports(self):
+        with (self.cloud / 'a-large.bin').open('wb') as output:
+            output.truncate(5_000_000)
+        for index in range(99):
+            (self.cloud / f'z-small-{index:03}.txt').write_text(str(index))
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertLess(result.stdout.index('PROGRESS\tFILE\tz-small-000.txt'),
+                        result.stdout.index('PROGRESS\tFILE\ta-large.bin'))
 
     def test_conflict_preserves_both_and_reports_it(self):
         (self.local / 'paper.tex').write_text('base')

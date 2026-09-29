@@ -87,6 +87,7 @@ private let translations: [String: (zh: String, en: String)] = [
     "processProgress": ("%@：正在核对文件 %@/%@", "%@: comparing files %@/%@"),
     "prefetchProgress": ("%@：正在读取云端文件 %@/%@", "%@: reading cloud files %@/%@"),
     "fileProgress": ("%@：正在核验 %@", "%@: checking %@"),
+    "waitingForCloud": ("%@：等待 OneDrive 读取 %@（已等 %@ 秒）", "%@: waiting for OneDrive to read %@ (%@ seconds)"),
     "doneAll": ("所有已启用路径同步完成。", "All enabled folders are synced."),
     "donePair": ("所选路径同步完成。", "Selected folder is synced."),
     "keptBothResult": ("同步完成，已保留 %d 组冲突的两个版本。", "Sync complete. Both versions were kept for %d conflict(s)."),

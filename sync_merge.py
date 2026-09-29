@@ -2,7 +2,7 @@
 """Anchor-based folder sync with recoverable overwrites and optional deletions."""
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeout, wait
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -15,6 +15,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 import uuid
 
 from sync_tree import excluded_relative
@@ -191,7 +192,7 @@ class CloudPrefetch:
 
     def __init__(self, root, names):
         self.names = names if len(names) >= 100 else []
-        self.executor = ThreadPoolExecutor(max_workers=8) if self.names else None
+        self.executor = ThreadPoolExecutor(max_workers=4) if self.names else None
         self.futures = {}
         self.completed = 0
         if self.executor:
@@ -205,14 +206,17 @@ class CloudPrefetch:
                   'with open(sys.argv[1], "rb") as source:\n'
                   '    while source.read(1024 * 1024): pass\n')
         try:
+            # The provider may need to download the complete placeholder. Give
+            # large media more time without allowing one file to wait forever.
+            timeout = min(300, 120 + path.stat().st_size // 1_000_000)
             result = subprocess.run([sys.executable, '-c', script, str(path)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    timeout=60, check=False)
+                                    timeout=timeout, check=False)
             if result.returncode != 0:
                 return result.stderr.decode('utf-8', 'replace').strip()[-300:] or '无法读取云端文件'
             return None
         except subprocess.TimeoutExpired:
-            return '云端文件读取超过 60 秒'
+            return f'云端文件读取超过 {timeout} 秒'
         except OSError as error:
             return str(error)
 
@@ -220,7 +224,13 @@ class CloudPrefetch:
         future = self.futures.get(name)
         if future is None:
             return None
-        error = future.result()
+        started = time.monotonic()
+        while True:
+            try:
+                error = future.result(timeout=20)
+                break
+            except FutureTimeout:
+                print(f'PROGRESS\tWAIT\t{name}\t{int(time.monotonic() - started)}', flush=True)
         self.completed += 1
         if self.completed % 8 == 0 or self.completed == len(self.names):
             print(f'PROGRESS\tPREFETCH\t{self.completed}\t{len(self.names)}', flush=True)
@@ -627,11 +637,24 @@ def sync_files(args, local, cloud, files, conflicts):
             print(f'FAILED\t{directory}\t无法核验目录状态：{error}')
             counts['failed'] += 1
 
-    prefetch = CloudPrefetch(cloud, sorted(name for name in cloud_names - local_names
-                                          if name not in tree_record_names and not blocked(name)))
+    # New cloud-only files are independent of the existing anchor. Import the
+    # small ones first so a slow video cannot hold up thousands of documents.
+    new_cloud_only = {name for name in cloud_names - local_names
+                      if name not in active_files and name not in active_conflicts
+                      and name not in tree_record_names and not blocked(name)}
+
+    def import_priority(name):
+        try:
+            return signature(cloud / name)[0], name
+        except (OSError, TypeError):
+            return float('inf'), name
+
+    import_names = sorted(new_cloud_only, key=import_priority)
+    prefetch = CloudPrefetch(cloud, import_names)
+    ordered_names = sorted(names - new_cloud_only) + import_names
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
-    for processed, name in enumerate(sorted(names), 1):
+    for processed, name in enumerate(ordered_names, 1):
         if processed % 128 == 0:
             print(f'PROGRESS\tPROCESS\t{processed}\t{total_names}', flush=True)
         if name in tree_record_names:

@@ -20,14 +20,14 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - If one side deletes a previously synced folder while the other changes files inside it, the whole subtree pauses. Make the two folders agree manually and refresh conflicts; unrelated files continue syncing.
 - Every actual overwrite or propagated deletion has a verified local backup with a Restore button in History. Backups default to 15 days and are cleaned on a later sync; the retention period is configurable.
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
-- OneDrive scans now show folder and file progress. Large first-time cloud imports hydrate files with bounded parallelism and copy them to the local folder as hydration continues. A file read that exceeds 60 seconds is recorded as a failure while other files continue; a pair with no progress for three minutes is stopped. File Provider ctime changes and subsecond mtime rounding no longer trigger a full reread of unchanged files; explicit changes still cause both sides to be hashed before a write.
+- OneDrive scans now show folder and file progress. Large first-time cloud imports hydrate at most four files at once and copy smaller new files first. Each cloud read has a size-based 120–300 second limit with visible wait updates; a failed file is recorded while other files continue. A pair with no progress for three minutes is stopped. File Provider ctime changes and subsecond mtime rounding no longer trigger a full reread of unchanged files; explicit changes still cause both sides to be hashed before a write.
 - LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
 - Updates: the app checks GitHub for packaged releases at launch and at most once a day, or on request. A release with a signed archive can be installed and relaunched in the app; automatic installation is optional in About. The archive is verified with a pinned Ed25519 public key before replacement. Version 2.14.1 needs a one-time manual upgrade to gain in-app installation. Unreleased main commits are not app updates, and checks send no file names or paths.
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.2) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.3) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

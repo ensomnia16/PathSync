@@ -410,6 +410,9 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
             } else if fields.count >= 3, fields[1] == "FILE" {
                 progress(String(format: uiText("fileProgress", language: language),
                                 pair.name, fields.dropFirst(2).joined(separator: "\t")))
+            } else if fields.count >= 4, fields[1] == "WAIT" {
+                progress(String(format: uiText("waitingForCloud", language: language),
+                                pair.name, String(fields[2]), String(fields[3])))
             }
         }
     }
