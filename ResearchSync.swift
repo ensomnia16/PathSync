@@ -31,6 +31,17 @@ func backupAvailable(_ pair: SyncPair, id: String) -> Bool {
     return Date().timeIntervalSince1970 - created < Double(days * 86400)
 }
 
+func backupContentURL(_ pair: SyncPair, id: String, name: String) -> URL? {
+    guard backupAvailable(pair, id: id) else { return nil }
+    let root = URL(fileURLWithPath: mergeStatePath(pair)).deletingPathExtension()
+        .path + "-backups/" + id
+    let manifest = URL(fileURLWithPath: root + "/manifest.json")
+    guard let data = try? Data(contentsOf: manifest),
+          let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          record["name"] as? String == name else { return nil }
+    return URL(fileURLWithPath: root + "/content")
+}
+
 struct SyncPair: Codable, Identifiable, Equatable {
     var id: UUID = UUID()
     var name: String = "新路径"

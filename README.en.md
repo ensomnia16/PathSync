@@ -13,7 +13,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - Enable Launch at login in Settings → General to register a macOS login item. This is separate from the scheduled sync task.
 - Choose notifications for conflicts or failures, every completed run, or off. Notifications are off by default; enabling them requests macOS permission. Notification text contains no file names or paths.
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
-- Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Open or reveal affected files in Finder. For LaTeX text, compare current versions with an offline diff and line/section summary, or explicitly ask the installed Codex CLI to summarize the selected diff. Filter by folder or result; the raw log remains available for troubleshooting.
+- Read past runs in the History page, with time, folder, direction, counts, and expandable conflict or failure details. Open or reveal affected files and pre-overwrite backups in Finder. For LaTeX text, compare a saved pre-overwrite version with its current file, or compare current sides and conflict copies, using an offline diff and line/section summary. You can explicitly ask the installed Codex CLI to summarize the selected diff. Filter by folder or result; the raw log remains available for troubleshooting.
 - By default, divergent files keep both versions automatically. Both originals are backed up locally before either synced folder changes. A preserved copy remains flagged for review on every subsequent run until you explicitly acknowledge it. You can choose to pause for a manual decision instead.
 - Conflicts are measured against the last common content anchor. When both sides changed, you may also choose the version with the later absolute modification time; equal timestamps pause for manual review.
 - Deletes and edits are compared with the same last common anchor. A one-sided change propagates in the chosen direction; a concurrent edit and delete remains a conflict. The remaining file is backed up before this tool deletes it.
@@ -27,7 +27,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.3) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.4) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

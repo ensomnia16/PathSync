@@ -130,6 +130,21 @@ struct HistoryPage: View {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    private func openBackup(_ url: URL, originalName: String) {
+        // Backup payloads are stored as extensionless `content`. A temporary
+        // link preserves the original extension for the user's usual editor.
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pathsync-backup-view-" + UUID().uuidString)
+        let link = folder.appendingPathComponent(URL(fileURLWithPath: originalName).lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+            NSWorkspace.shared.open(link)
+        } catch {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     private func historyFile(_ pair: SyncPair, _ name: String, cloud: Bool) -> URL? {
         safeHistoryFile(root: cloud ? pair.cloudPath : pair.localPath, relative: name)
     }
@@ -140,17 +155,30 @@ struct HistoryPage: View {
         return url
     }
 
+    private func eventBackup(_ pair: SyncPair, _ event: SyncHistoryEvent) -> URL? {
+        guard event.kind == "BACKUP", let id = event.backupID else { return nil }
+        return backupContentURL(pair, id: id, name: event.path)
+    }
+
     private func showLatexDiff(pair: SyncPair, event: SyncHistoryEvent) {
-        guard !filters.diffLoading,
-              let left = existingHistoryFile(pair, event.path, cloud: false),
-              let right = event.copyPath.flatMap({ existingHistoryFile(pair, $0, cloud: false) })
-                ?? existingHistoryFile(pair, event.path, cloud: true) else { return }
+        guard !filters.diffLoading else { return }
+        let backup = eventBackup(pair, event)
+        let left = backup ?? existingHistoryFile(pair, event.path, cloud: false)
+        let right = backup == nil
+            ? event.copyPath.flatMap({ existingHistoryFile(pair, $0, cloud: false) })
+                ?? existingHistoryFile(pair, event.path, cloud: true)
+            : existingHistoryFile(pair, event.path, cloud: event.side == "cloud")
+        guard let left, let right else { return }
         filters.diffLoading = true
         let language = language
-        let rightTitle = event.copyPath ?? (usesEnglish(language) ? "Cloud current" : "云端当前文件")
+        let leftTitle = backup == nil ? (usesEnglish(language) ? "Local current" : "本地当前文件")
+            : uiText("historyBackupVersion", language: language)
+        let rightTitle = backup != nil
+            ? uiText(event.side == "cloud" ? "historyCurrentCloud" : "historyCurrentLocal", language: language)
+            : event.copyPath ?? (usesEnglish(language) ? "Cloud current" : "云端当前文件")
         DispatchQueue.global(qos: .userInitiated).async {
             let result = makeLatexDiff(left: left, right: right,
-                leftTitle: usesEnglish(language) ? "Local current" : "本地当前文件",
+                leftTitle: leftTitle,
                 rightTitle: rightTitle, language: language)
             DispatchQueue.main.async {
                 filters.diffLoading = false
@@ -165,7 +193,8 @@ struct HistoryPage: View {
         let cloud = existingHistoryFile(pair, event.path, cloud: true)
         let copy = event.copyPath.flatMap { existingHistoryFile(pair, $0, cloud: false)
             ?? existingHistoryFile(pair, $0, cloud: true) }
-        if local != nil || cloud != nil || copy != nil {
+        let backup = eventBackup(pair, event)
+        if local != nil || cloud != nil || copy != nil || backup != nil {
             HStack(spacing: 8) {
                 Menu(t("historyFileActions")) {
                     if let local {
@@ -180,9 +209,14 @@ struct HistoryPage: View {
                         Button(t("historyOpenCopy")) { NSWorkspace.shared.open(copy) }
                         Button(t("historyRevealCopy")) { reveal(copy) }
                     }
+                    if let backup {
+                        Button(t("historyOpenBackup")) { openBackup(backup, originalName: event.path) }
+                        Button(t("historyRevealBackup")) { reveal(backup) }
+                    }
                 }
                 if ["tex", "bib", "sty", "cls"].contains(URL(fileURLWithPath: event.path).pathExtension.lowercased()),
-                   local != nil, copy != nil || cloud != nil {
+                   backup != nil ? (event.side == "cloud" ? cloud != nil : local != nil)
+                    : (local != nil && (copy != nil || cloud != nil)) {
                     Button(t("historyDiff")) { showLatexDiff(pair: pair, event: event) }
                         .disabled(filters.diffLoading)
                 }
