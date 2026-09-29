@@ -5,7 +5,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 ## Features
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
-- Each pair can independently include Codex project files (`AGENTS.md`, `.codex/`, `.agents/`), Claude Code project files (`CLAUDE.md`, `.claude/`, `.mcp.json`), and temporary files such as `tmp`, `.tmp`, and `.log`. Machine-local `.claude/settings.local.json` and `.DS_Store` are always skipped. New pairs skip temporary files by default; existing pairs keep their prior behavior. Changing a filter does not delete an existing copy.
+- Each pair can independently include Codex project files (`AGENTS.md`, `.codex/`, `.agents/`), Claude Code project files (`CLAUDE.md`, `.claude/`, `.mcp.json`), and temporary files such as `tmp`, `.tmp`, `.log`, and generated working directories. Machine-local `.claude/settings.local.json` and `.DS_Store` are always skipped. Pairs without a saved filter setting skip temporary files by default; existing copies and anchors remain and are never treated as deletions.
 - Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names, rules, and paths relative to each Mac's chosen local working and OneDrive roots. The local working root defaults to `~/Documents`; import derives local paths and creates missing empty folders after preview. For older profiles without local relative paths, it derives them from the OneDrive relative paths. Absolute paths, enabled state, history, backups, and synced file contents are not included. New pairs remain disabled until reviewed. Local edits to shared rules are flagged before replacement; saved configurations can be rolled back from local snapshots.
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - Use the menu bar to see the pending review count, sync all folders, or reopen the main window or History after closing it.
@@ -20,13 +20,14 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - If one side deletes a previously synced folder while the other changes files inside it, the whole subtree pauses. Make the two folders agree manually and refresh conflicts; unrelated files continue syncing.
 - Every actual overwrite or propagated deletion has a verified local backup with a Restore button in History. Backups default to 15 days and are cleaned on a later sync; the retention period is configurable.
 - The app refreshes pending conflicts when brought forward and while open; you can refresh them manually as well.
+- OneDrive scans now show folder and file progress. Large first-time cloud imports hydrate files with bounded parallelism. A file read that exceeds 60 seconds is recorded as a failure while other files continue; a pair with no progress for three minutes is stopped. File Provider ctime changes and subsecond mtime rounding no longer trigger a full reread of unchanged files; explicit changes still cause both sides to be hashed before a write.
 - LaTeX build files, virtual environments, and common caches can be excluded.
 - Switch the interface between Simplified Chinese, English, and the system language.
 - Updates: the app checks GitHub for packaged releases at launch and at most once a day, or on request. A release with a signed archive can be installed and relaunched in the app; automatic installation is optional in About. The archive is verified with a pinned Ed25519 public key before replacement. Version 2.14.1 needs a one-time manual upgrade to gain in-app installation. Unreleased main commits are not app updates, and checks send no file names or paths.
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.15.1) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

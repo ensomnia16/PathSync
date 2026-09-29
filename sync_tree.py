@@ -10,8 +10,9 @@ import shutil
 import sys
 
 ALWAYS_EXCLUDE_DIRS = {'.venv', '__pycache__', 'pycache', 'node_modules', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
-ALWAYS_EXCLUDE_FILES = {'*.researchsync-partial', '*.pyc', '.DS_Store'}
+ALWAYS_EXCLUDE_FILES = {'*.researchsync-partial', '*.pyc', '.DS_Store', '~$*'}
 TEMP_DIRS = {'tmp', 'temp', '.tmp', '.temp'}
+TEMP_DIR_PATTERNS = {'.pptx-*', '.codex-wa-*', '.claude-*'}
 CODEX_DIRS = {'.codex', '.agents'}
 CLAUDE_DIRS = {'.claude'}
 CODEX_FILES = {'AGENTS.md'}
@@ -42,7 +43,9 @@ def excluded_relative(name, latex, skip_codex=False, skip_claude=False,
     if latex and any(any(part.startswith(prefix) for prefix in LATEX_EXCLUDE_DIRS)
                      for part in folders):
         return True
-    if not include_temp and any(part in TEMP_DIRS for part in folders):
+    if not include_temp and any(part in TEMP_DIRS or any(
+            fnmatch.fnmatch(part, pattern) for pattern in TEMP_DIR_PATTERNS)
+            for part in folders):
         return True
     if skip_codex and (any(part in CODEX_DIRS for part in folders)
                        or (not directory and parts[-1] in CODEX_FILES)):

@@ -490,6 +490,7 @@ struct ContentView: View {
     }
 
     private var overviewSubtitle: String {
+        if model.busy, let detail = model.statusDetail { return detail }
         let last = model.lastSyncDate.map { relativeText($0) } ?? t("never")
         return "\(t("lastSync")) \(last) · \(nextRunText)"
     }

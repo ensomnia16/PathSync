@@ -71,8 +71,9 @@ struct SyncPair: Codable, Identifiable, Equatable {
         enabled = try data.decode(Bool.self, forKey: .enabled)
         syncCodexFiles = try data.decodeIfPresent(Bool.self, forKey: .syncCodexFiles) ?? true
         syncClaudeFiles = try data.decodeIfPresent(Bool.self, forKey: .syncClaudeFiles) ?? true
-        // Older versions included tmp directories. Preserve that choice on upgrade.
-        syncTemporaryFiles = try data.decodeIfPresent(Bool.self, forKey: .syncTemporaryFiles) ?? true
+        // Existing copies are retained in the anchor; an omitted preference skips
+        // build scratch directories without interpreting them as deletions.
+        syncTemporaryFiles = try data.decodeIfPresent(Bool.self, forKey: .syncTemporaryFiles) ?? false
     }
 
     var isUnusedDefaultPlaceholder: Bool {
@@ -346,7 +347,8 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 }
 
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
-                     conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool) throws -> String {
+                     conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
+                     language: String, progress: ((String) -> Void)?) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
@@ -366,9 +368,64 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     process.standardError = output
     appendLog("\(dryRun ? "预览" : "开始") [\(pair.name)] \(direction.label)：\(source) → \(destination)")
     try process.run()
-    let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    let activityLock = NSLock()
+    var lastActivity = Date()
+    var inactivityTimedOut = false
+    let watchdog = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+    watchdog.schedule(deadline: .now() + 30, repeating: 30)
+    watchdog.setEventHandler {
+        activityLock.lock()
+        let stalled = Date().timeIntervalSince(lastActivity) >= 180
+        if stalled { inactivityTimedOut = true }
+        activityLock.unlock()
+        if stalled && process.isRunning { process.terminate() }
+    }
+    watchdog.resume()
+    defer { watchdog.cancel() }
+    var collected = Data()
+    var lineBuffer = Data()
+    while true {
+        let chunk = output.fileHandleForReading.availableData
+        if chunk.isEmpty { break }
+        activityLock.lock()
+        lastActivity = Date()
+        activityLock.unlock()
+        collected.append(chunk)
+        lineBuffer.append(chunk)
+        while let newline = lineBuffer.firstIndex(of: 10) {
+            let line = String(decoding: lineBuffer[..<newline], as: UTF8.self)
+            lineBuffer.removeSubrange(...newline)
+            let fields = line.split(separator: "\t")
+            guard fields.first == "PROGRESS", let progress else { continue }
+            if fields.count == 5, fields[1] == "SCAN" || fields[1] == "SCAN_DONE" {
+                let side = uiText(fields[2] == "cloud" ? "cloud" : "local", language: language)
+                progress(String(format: uiText("scanProgress", language: language),
+                                pair.name, side, String(fields[3]), String(fields[4])))
+            } else if fields.count == 4, fields[1] == "PROCESS" {
+                progress(String(format: uiText("processProgress", language: language),
+                                pair.name, String(fields[2]), String(fields[3])))
+            } else if fields.count == 4, fields[1] == "PREFETCH" {
+                progress(String(format: uiText("prefetchProgress", language: language),
+                                pair.name, String(fields[2]), String(fields[3])))
+            } else if fields.count >= 3, fields[1] == "FILE" {
+                progress(String(format: uiText("fileProgress", language: language),
+                                pair.name, fields.dropFirst(2).joined(separator: "\t")))
+            }
+        }
+    }
+    let result = String(decoding: collected, as: UTF8.self)
+        .components(separatedBy: "\n")
+        .filter { !$0.hasPrefix("PROGRESS\t") }
+        .joined(separator: "\n")
     process.waitUntilExit()
     appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+    activityLock.lock()
+    let stalled = inactivityTimedOut
+    activityLock.unlock()
+    if stalled {
+        throw NSError(domain: appID, code: 15, userInfo: [NSLocalizedDescriptionKey:
+            "「\(pair.name)」连续 3 分钟未收到 OneDrive 文件系统响应，已停止本次运行；其他路径继续同步。"])
+    }
     guard process.terminationStatus == 0 else {
         let summary = result.split(separator: "\n").last.map(String.init) ?? "退出码 \(process.terminationStatus)"
         throw NSError(domain: appID, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」未完全成功：\(summary)。详情见同步记录。"])
@@ -472,7 +529,8 @@ func restoreSavedBackup(_ pair: SyncPair, id: String, retentionDays: Int) throws
 }
 
 @discardableResult
-func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection? = nil, dryRun: Bool = false) throws -> String {
+func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection? = nil,
+             dryRun: Bool = false, progress: ((String) -> Void)? = nil) throws -> String {
     let selected = config.pairs.filter { pairID == nil ? $0.enabled : $0.id == pairID }
     guard !selected.isEmpty else {
         throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "没有可同步的路径。"])
@@ -488,7 +546,7 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
                                          excludeLatex: config.excludeLatexIntermediates,
                                          conflictPolicy: config.conflictPolicy,
                                          backupRetentionDays: config.backupRetentionDays,
-                                         dryRun: dryRun)
+                                         dryRun: dryRun, language: config.language, progress: progress)
                 outputs.append("[\(pair.name)] \(result)")
             } catch {
                 errors.append(error.localizedDescription)
@@ -959,7 +1017,9 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                let output = try runSync(current, pairID: id, direction: direction)
+                let output = try runSync(current, pairID: id, direction: direction) { message in
+                    DispatchQueue.main.async { self.statusDetail = message }
+                }
                 postSyncNotification(config: current, output: output, failed: false)
                 let reviews = output.components(separatedBy: "reviews=").dropFirst()
                     .compactMap { Int($0.prefix(while: \.isNumber)) }.reduce(0, +)
@@ -1203,7 +1263,10 @@ struct ResearchSyncApp: App {
                 if let index = args.firstIndex(of: "--pair"), args.indices.contains(index + 1) { id = UUID(uuidString: args[index + 1]) }
                 else { id = nil }
                 let dryRun = args.contains("--dry-run")
-                let output = try runSync(config, pairID: id, direction: direction, dryRun: dryRun)
+                let output = try runSync(config, pairID: id, direction: direction,
+                                         dryRun: dryRun) { message in
+                    fputs(message + "\n", stderr)
+                }
                 if !dryRun { postSyncNotification(config: config, output: output, failed: false) }
                 print(output)
                 exit(0)

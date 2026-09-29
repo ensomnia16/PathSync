@@ -130,7 +130,7 @@ struct CloudConfigChecks {
             from: Data("""
             {"id":"\(UUID().uuidString)","name":"legacy","localPath":"/tmp/a","cloudPath":"/tmp/b","scheduledDirection":"merge","enabled":false}
             """.utf8))
-        assert(legacyPair.syncCodexFiles && legacyPair.syncClaudeFiles && legacyPair.syncTemporaryFiles)
+        assert(legacyPair.syncCodexFiles && legacyPair.syncClaudeFiles && !legacyPair.syncTemporaryFiles)
         var legacyWithPlaceholder = oldShape
         var legacyPairs = legacyWithPlaceholder["pairs"] as! [[String: Any]]
         legacyPairs.append(["id": UUID().uuidString, "name": "新路径", "scheduledDirection": "merge"])

@@ -2,10 +2,13 @@
 """Anchor-based folder sync with recoverable overwrites and optional deletions."""
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import signal
+import subprocess
 from pathlib import Path
 import re
 import shutil
@@ -18,6 +21,7 @@ from sync_tree import excluded_relative
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
+FILE_READ_TIMEOUT_SECONDS = 60
 
 
 def is_review(record):
@@ -98,11 +102,31 @@ def change_time(path):
         return None
 
 
+def unchanged_metadata(current, previous, cloud=False):
+    if current is None or previous is None or current[0] != previous[0]:
+        return False
+    # OneDrive's File Provider may restore a file with its mtime rounded down
+    # to whole seconds and a fresh ctime, without changing its content.
+    tolerance = 1_000_000_000 if cloud else 0
+    return abs(current[1] - previous[1]) < tolerance if cloud else current[1] == previous[1]
+
+
 def digest(path):
     hasher = hashlib.sha256()
-    with path.open('rb') as source:
-        while chunk := source.read(1024 * 1024):
-            hasher.update(chunk)
+    previous_alarm = signal.getsignal(signal.SIGALRM)
+
+    def deadline(_signal, _frame):
+        raise TimeoutError(f'读取文件超过 {FILE_READ_TIMEOUT_SECONDS} 秒：{path}')
+
+    signal.signal(signal.SIGALRM, deadline)
+    signal.setitimer(signal.ITIMER_REAL, FILE_READ_TIMEOUT_SECONDS)
+    try:
+        with path.open('rb') as source:
+            while chunk := source.read(1024 * 1024):
+                hasher.update(chunk)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_alarm)
     return hasher.hexdigest()
 
 
@@ -121,22 +145,81 @@ def excluded_path(name, args, directory=False):
 
 def scan(root, args, errors):
     found = set()
+    scanned = 0
+    side = 'local' if root == args.local else 'cloud'
+    print(f'PROGRESS\tSCAN\t{side}\t0\t0', flush=True)
 
-    def walk_error(error):
-        errors.append((str(error.filename), str(error)))
+    def entries(current):
+        directories, files = [], []
+        with os.scandir(current) as iterator:
+            for entry in iterator:
+                relative = (current / entry.name).relative_to(root).as_posix()
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if not excluded_path(relative, args, directory=True):
+                        directories.append(current / entry.name)
+                elif not excluded_path(relative, args):
+                    files.append(relative)
+        return directories, files
 
-    for current, dirs, files in os.walk(root, onerror=walk_error):
-        dirs[:] = [name for name in dirs
-                   if not excluded_path((Path(current) / name).relative_to(root).as_posix(),
-                                        args, directory=True)
-                   and not (Path(current) / name).is_symlink()]
-        for name in files:
-            path = Path(current) / name
-            if excluded_path(path.relative_to(root).as_posix(), args):
-                continue
-            if not path.is_symlink():
-                found.add(path.relative_to(root).as_posix())
+    # File Provider directory reads release the GIL while waiting for OneDrive.
+    # A few independent reads avoid making every directory wait behind one slow read.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        pending = {executor.submit(entries, root): root}
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                current = pending.pop(future)
+                scanned += 1
+                try:
+                    directories, files = future.result()
+                except OSError as error:
+                    errors.append((str(current), str(error)))
+                    continue
+                found.update(files)
+                for directory in directories:
+                    pending[executor.submit(entries, directory)] = directory
+            if scanned % 8 == 0:
+                print(f'PROGRESS\tSCAN\t{side}\t{scanned}\t{len(found)}', flush=True)
+    print(f'PROGRESS\tSCAN_DONE\t{side}\t{scanned}\t{len(found)}', flush=True)
     return found
+
+
+def prefetch_cloud_only(root, names):
+    """Hydrate independent OneDrive placeholders concurrently before the safe merge."""
+    if len(names) < 100:
+        return {}
+    failures = {}
+    script = ('import sys\n'
+              'with open(sys.argv[1], "rb") as source:\n'
+              '    while source.read(1024 * 1024): pass\n')
+
+    def hydrate(name):
+        path = root / name
+        try:
+            result = subprocess.run([sys.executable, '-c', script, str(path)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    timeout=60, check=False)
+            if result.returncode != 0:
+                return name, result.stderr.decode('utf-8', 'replace').strip()[-300:] or '无法读取云端文件'
+            return name, None
+        except subprocess.TimeoutExpired:
+            return name, '云端文件读取超过 60 秒'
+        except OSError as error:
+            return name, str(error)
+
+    total = len(names)
+    print(f'PROGRESS\tPREFETCH\t0\t{total}', flush=True)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        pending = [executor.submit(hydrate, name) for name in names]
+        for completed, future in enumerate(as_completed(pending), 1):
+            name, error = future.result()
+            if error:
+                failures[name] = error
+            if completed % 8 == 0 or completed == total:
+                print(f'PROGRESS\tPREFETCH\t{completed}\t{total}', flush=True)
+    return failures
 
 
 def ancestor_directories(name):
@@ -444,8 +527,10 @@ def sync_files(args, local, cloud, files, conflicts):
                     if not excluded_path(name, args)}
     active_conflicts = {name: record for name, record in conflicts.items()
                         if not excluded_path(name, args, directory=record.get('kind') == 'tree')}
-    names = (scan(local, args, errors) | scan(cloud, args, errors)
-             | set(active_files) | set(active_conflicts))
+    local_names = scan(local, args, errors)
+    cloud_names = scan(cloud, args, errors)
+    names = local_names | cloud_names | set(active_files) | set(active_conflicts)
+    prefetch_failures = prefetch_cloud_only(cloud, sorted(cloud_names - local_names))
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
@@ -534,15 +619,28 @@ def sync_files(args, local, cloud, files, conflicts):
             print(f'FAILED\t{directory}\t无法核验目录状态：{error}')
             counts['failed'] += 1
 
-    for name in sorted(names):
+    total_names = len(names)
+    print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
+    for processed, name in enumerate(sorted(names), 1):
+        if processed % 128 == 0:
+            print(f'PROGRESS\tPROCESS\t{processed}\t{total_names}', flush=True)
         if name in tree_record_names:
             continue
         if blocked(name):
             counts['skipped'] += 1
             continue
+        if name in prefetch_failures:
+            print(f'FAILED\t{name}\t{prefetch_failures[name]}')
+            counts['failed'] += 1
+            continue
         try:
-            local_file = safe_path(local, name)
-            cloud_file = safe_path(cloud, name)
+            relative = Path(name)
+            if relative.is_absolute() or not relative.parts or '..' in relative.parts:
+                raise ValueError(f'不安全的相对路径：{name}')
+            # The common case only reads metadata. Validate every ancestor with
+            # safe_path before any content read or write, not for a fast skip.
+            local_file = local / relative
+            cloud_file = cloud / relative
             local_sig = signature(local_file)
             cloud_sig = signature(cloud_file)
             # A failed directory scan cannot establish absence, even when both
@@ -567,16 +665,21 @@ def sync_files(args, local, cloud, files, conflicts):
                 raise OSError('待合并的主文件缺失；请先人工检查，未覆盖任何一侧')
 
             if (not pending and previous and local_sig is not None and cloud_sig is not None
-                    and local_sig == previous.get('local')
-                    and cloud_sig == previous.get('cloud')
-                    and previous.get('localCtime') == change_time(local_file)
-                    and previous.get('cloudCtime') == change_time(cloud_file)):
+                    and unchanged_metadata(local_sig, previous.get('local'))
+                    and unchanged_metadata(cloud_sig, previous.get('cloud'), cloud=True)
+                    and previous.get('localCtime') == change_time(local_file)):
                 if review:
+                    local_file = safe_path(local, name)
+                    cloud_file = safe_path(cloud, name)
                     review_hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)
                     if review_hashes[0] != review_hashes[1]:
                         raise OSError('待合并的主文件两侧又出现不同版本；请先人工检查，未覆盖任何一侧')
                 counts['unchanged'] += 1
                 continue
+
+            print(f'PROGRESS\tFILE\t{name}', flush=True)
+            local_file = safe_path(local, name)
+            cloud_file = safe_path(cloud, name)
 
             if local_sig is not None and cloud_sig is not None:
                 hashes = checked_digests(local_file, cloud_file, local_sig, cloud_sig)

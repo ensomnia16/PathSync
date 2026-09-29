@@ -9,9 +9,12 @@ import re
 import shutil
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest import mock
 
 
 HELPER = Path(__file__).resolve().parents[1] / 'sync_merge.py'
+sys.path.insert(0, str(HELPER.parent))
+import sync_merge
 
 
 class MergeTests(unittest.TestCase):
@@ -137,7 +140,8 @@ class MergeTests(unittest.TestCase):
     def test_temp_and_agent_filters_on_initial_sync(self):
         for name in ('AGENTS.md', 'CLAUDE.md', '.codex/config.toml',
                      '.claude/settings.json', '.claude/settings.local.json',
-                     'tmp/cache.bin', '.tmp/scratch', 'paper.tmp', 'paper.tex'):
+                     'tmp/cache.bin', '.tmp/scratch', '.pptx-polish-a/asset.ppt',
+                     'paper.tmp', 'paper.tex'):
             path = self.local / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(name)
@@ -146,8 +150,44 @@ class MergeTests(unittest.TestCase):
         self.assertTrue((self.cloud / 'paper.tex').exists())
         for name in ('AGENTS.md', 'CLAUDE.md', '.codex/config.toml',
                      '.claude/settings.json', '.claude/settings.local.json',
-                     'tmp/cache.bin', '.tmp/scratch', 'paper.tmp'):
+                     'tmp/cache.bin', '.tmp/scratch', '.pptx-polish-a/asset.ppt', 'paper.tmp'):
             self.assertFalse((self.cloud / name).exists(), name)
+
+    def test_file_provider_metadata_drift_and_concurrent_edit(self):
+        local_file = self.local / 'main.tex'
+        cloud_file = self.cloud / 'main.tex'
+        local_file.write_text('base')
+        cloud_file.write_text('base')
+        stamp = 1_790_000_000_750_000_000
+        os.utime(local_file, ns=(stamp, stamp))
+        os.utime(cloud_file, ns=(stamp, stamp))
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        rounded = stamp // 1_000_000_000 * 1_000_000_000
+        os.utime(cloud_file, ns=(rounded, rounded))
+        unchanged = self.run_merge(policy='keep-both')
+        self.assertEqual(unchanged.returncode, 0, unchanged.stdout + unchanged.stderr)
+        self.assertIn('unchanged=1', unchanged.stdout)
+        local_file.write_text('left')
+        cloud_file.write_text('rght')
+        os.utime(cloud_file, ns=(rounded, rounded))
+        conflicting = self.run_merge('--dry-run', policy='keep-both')
+        self.assertEqual(conflicting.returncode, 0, conflicting.stdout + conflicting.stderr)
+        self.assertIn('WOULD_KEEP_BOTH\tmain.tex', conflicting.stdout)
+
+    def test_unresponsive_file_read_has_deadline(self):
+        pipe = self.root / 'unresponsive'
+        os.mkfifo(pipe)
+        with mock.patch.object(sync_merge, 'FILE_READ_TIMEOUT_SECONDS', 0.1):
+            with self.assertRaises(TimeoutError):
+                sync_merge.digest(pipe)
+
+    def test_parallel_prefetch_reports_missing_file_without_writing(self):
+        names = [f'file-{index}.txt' for index in range(100)]
+        for name in names[:-1]:
+            (self.cloud / name).write_text(name)
+        failures = sync_merge.prefetch_cloud_only(self.cloud, names)
+        self.assertEqual(set(failures), {names[-1]})
+        self.assertFalse((self.cloud / names[-1]).exists())
 
     def test_conflict_preserves_both_and_reports_it(self):
         (self.local / 'paper.tex').write_text('base')
