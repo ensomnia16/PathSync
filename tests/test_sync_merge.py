@@ -185,9 +185,22 @@ class MergeTests(unittest.TestCase):
         names = [f'file-{index}.txt' for index in range(100)]
         for name in names[:-1]:
             (self.cloud / name).write_text(name)
-        failures = sync_merge.prefetch_cloud_only(self.cloud, names)
+        prefetch = sync_merge.CloudPrefetch(self.cloud, names)
+        failures = {name: error for name in names
+                    if (error := prefetch.check(name)) is not None}
+        prefetch.close()
         self.assertEqual(set(failures), {names[-1]})
         self.assertFalse((self.cloud / names[-1]).exists())
+
+    def test_large_import_copies_before_all_prefetch_results_are_consumed(self):
+        for index in range(100):
+            (self.cloud / f'file-{index:03}.txt').write_text(str(index))
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        first_copy = result.stdout.index('PROGRESS\tFILE\tfile-000.txt')
+        last_prefetch = result.stdout.index('PROGRESS\tPREFETCH\t100\t100')
+        self.assertLess(first_copy, last_prefetch)
+        self.assertEqual(len(list(self.local.iterdir())), 100)
 
     def test_conflict_preserves_both_and_reports_it(self):
         (self.local / 'paper.tex').write_text('base')

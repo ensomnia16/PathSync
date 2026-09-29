@@ -2,7 +2,7 @@
 """Anchor-based folder sync with recoverable overwrites and optional deletions."""
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -186,40 +186,49 @@ def scan(root, args, errors):
     return found
 
 
-def prefetch_cloud_only(root, names):
-    """Hydrate independent OneDrive placeholders concurrently before the safe merge."""
-    if len(names) < 100:
-        return {}
-    failures = {}
-    script = ('import sys\n'
-              'with open(sys.argv[1], "rb") as source:\n'
-              '    while source.read(1024 * 1024): pass\n')
+class CloudPrefetch:
+    """Hydrate cloud-only files ahead of the merge without delaying its first copy."""
 
-    def hydrate(name):
-        path = root / name
+    def __init__(self, root, names):
+        self.names = names if len(names) >= 100 else []
+        self.executor = ThreadPoolExecutor(max_workers=8) if self.names else None
+        self.futures = {}
+        self.completed = 0
+        if self.executor:
+            print(f'PROGRESS\tPREFETCH\t0\t{len(self.names)}', flush=True)
+            self.futures = {name: self.executor.submit(self.hydrate, root / name)
+                            for name in self.names}
+
+    @staticmethod
+    def hydrate(path):
+        script = ('import sys\n'
+                  'with open(sys.argv[1], "rb") as source:\n'
+                  '    while source.read(1024 * 1024): pass\n')
         try:
             result = subprocess.run([sys.executable, '-c', script, str(path)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     timeout=60, check=False)
             if result.returncode != 0:
-                return name, result.stderr.decode('utf-8', 'replace').strip()[-300:] or '无法读取云端文件'
-            return name, None
+                return result.stderr.decode('utf-8', 'replace').strip()[-300:] or '无法读取云端文件'
+            return None
         except subprocess.TimeoutExpired:
-            return name, '云端文件读取超过 60 秒'
+            return '云端文件读取超过 60 秒'
         except OSError as error:
-            return name, str(error)
+            return str(error)
 
-    total = len(names)
-    print(f'PROGRESS\tPREFETCH\t0\t{total}', flush=True)
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        pending = [executor.submit(hydrate, name) for name in names]
-        for completed, future in enumerate(as_completed(pending), 1):
-            name, error = future.result()
-            if error:
-                failures[name] = error
-            if completed % 8 == 0 or completed == total:
-                print(f'PROGRESS\tPREFETCH\t{completed}\t{total}', flush=True)
-    return failures
+    def check(self, name):
+        future = self.futures.get(name)
+        if future is None:
+            return None
+        error = future.result()
+        self.completed += 1
+        if self.completed % 8 == 0 or self.completed == len(self.names):
+            print(f'PROGRESS\tPREFETCH\t{self.completed}\t{len(self.names)}', flush=True)
+        return error
+
+    def close(self):
+        if self.executor:
+            self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def ancestor_directories(name):
@@ -530,7 +539,6 @@ def sync_files(args, local, cloud, files, conflicts):
     local_names = scan(local, args, errors)
     cloud_names = scan(cloud, args, errors)
     names = local_names | cloud_names | set(active_files) | set(active_conflicts)
-    prefetch_failures = prefetch_cloud_only(cloud, sorted(cloud_names - local_names))
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
@@ -619,6 +627,8 @@ def sync_files(args, local, cloud, files, conflicts):
             print(f'FAILED\t{directory}\t无法核验目录状态：{error}')
             counts['failed'] += 1
 
+    prefetch = CloudPrefetch(cloud, sorted(name for name in cloud_names - local_names
+                                          if name not in tree_record_names and not blocked(name)))
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
     for processed, name in enumerate(sorted(names), 1):
@@ -629,8 +639,9 @@ def sync_files(args, local, cloud, files, conflicts):
         if blocked(name):
             counts['skipped'] += 1
             continue
-        if name in prefetch_failures:
-            print(f'FAILED\t{name}\t{prefetch_failures[name]}')
+        prefetch_error = prefetch.check(name)
+        if prefetch_error:
+            print(f'FAILED\t{name}\t{prefetch_error}')
             counts['failed'] += 1
             continue
         try:
@@ -827,6 +838,7 @@ def sync_files(args, local, cloud, files, conflicts):
             print(f'FAILED\t{name}\t{error}')
             counts['failed'] += 1
 
+    prefetch.close()
     for path, error in errors:
         print(f'FAILED\t{path}\t{error}')
         counts['failed'] += 1
