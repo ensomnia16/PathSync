@@ -4,6 +4,84 @@ import SwiftUI
 private final class HistoryFilters: ObservableObject {
     @Published var pair = "all"
     @Published var result = "all"
+    @Published var latexDiff: LatexDiffResult?
+    @Published var diffLoading = false
+}
+
+private final class LatexSummaryState: ObservableObject {
+    @Published var loading = false
+    @Published var summary: String?
+    @Published var error: String?
+}
+
+private struct LatexDiffSheet: View {
+    let result: LatexDiffResult
+    let language: String
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var ai = LatexSummaryState()
+    private func t(_ key: String) -> String { uiText(key, language: language) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(t("historyDiffTitle")).font(.title2.bold())
+                Spacer()
+                Button(t("historyClose")) { dismiss() }
+            }
+            if let error = result.error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            } else {
+                Text(result.leftTitle + " ↔ " + result.rightTitle).font(.subheadline).foregroundStyle(.secondary)
+                Text(result.summary).font(.callout)
+                Text(t("historyDiffCurrentHint")).font(.caption).foregroundStyle(.secondary)
+                if result.unifiedDiff.components(separatedBy: "\n").count > 4000 {
+                    Text(t("historyDiffTruncated")).font(.caption).foregroundStyle(.orange)
+                }
+                HStack {
+                    Button(t("historyCodexSummary")) {
+                        ai.loading = true
+                        ai.error = nil
+                        let language = language
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let outcome = Result { try summarizeLatexDiffWithCodex(result, language: language) }
+                            DispatchQueue.main.async {
+                                ai.loading = false
+                                switch outcome {
+                                case .success(let value): ai.summary = value
+                                case .failure(let error): ai.error = error.localizedDescription
+                                }
+                            }
+                        }
+                    }
+                    .disabled(ai.loading || codexCLIPath() == nil)
+                    if ai.loading { ProgressView().controlSize(.small) }
+                    Text(t("historyCodexHint")).font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = ai.error { Text(error).font(.caption).foregroundStyle(.orange) }
+                if let summary = ai.summary {
+                    ScrollView { Text(summary).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+                        .frame(maxHeight: 120)
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(result.unifiedDiff.components(separatedBy: "\n").prefix(4000).enumerated()), id: \.offset) { _, line in
+                            Text(line.isEmpty ? " " : line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(line.hasPrefix("+") ? Color.green :
+                                                 line.hasPrefix("-") ? Color.red : Color.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+                .border(Color(nsColor: .separatorColor))
+            }
+        }
+        .padding(20)
+        .frame(width: 850, height: 650)
+    }
 }
 
 struct HistoryPage: View {
@@ -13,6 +91,7 @@ struct HistoryPage: View {
     let error: String?
     let refresh: () -> Void
     let restore: (SyncPair, String) -> Void
+    let canRestore: Bool
 
     @StateObject private var filters = HistoryFilters()
 
@@ -44,6 +123,72 @@ struct HistoryPage: View {
         pairs.first { pair in
             (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
                 || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+        }
+    }
+
+    private func reveal(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func historyFile(_ pair: SyncPair, _ name: String, cloud: Bool) -> URL? {
+        safeHistoryFile(root: cloud ? pair.cloudPath : pair.localPath, relative: name)
+    }
+
+    private func existingHistoryFile(_ pair: SyncPair, _ name: String, cloud: Bool) -> URL? {
+        guard let url = historyFile(pair, name, cloud: cloud),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
+    }
+
+    private func showLatexDiff(pair: SyncPair, event: SyncHistoryEvent) {
+        guard !filters.diffLoading,
+              let left = existingHistoryFile(pair, event.path, cloud: false),
+              let right = event.copyPath.flatMap({ existingHistoryFile(pair, $0, cloud: false) })
+                ?? existingHistoryFile(pair, event.path, cloud: true) else { return }
+        filters.diffLoading = true
+        let language = language
+        let rightTitle = event.copyPath ?? (usesEnglish(language) ? "Cloud current" : "云端当前文件")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = makeLatexDiff(left: left, right: right,
+                leftTitle: usesEnglish(language) ? "Local current" : "本地当前文件",
+                rightTitle: rightTitle, language: language)
+            DispatchQueue.main.async {
+                filters.diffLoading = false
+                filters.latexDiff = result
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fileActions(_ pair: SyncPair, event: SyncHistoryEvent) -> some View {
+        let local = existingHistoryFile(pair, event.path, cloud: false)
+        let cloud = existingHistoryFile(pair, event.path, cloud: true)
+        let copy = event.copyPath.flatMap { existingHistoryFile(pair, $0, cloud: false)
+            ?? existingHistoryFile(pair, $0, cloud: true) }
+        if local != nil || cloud != nil || copy != nil {
+            HStack(spacing: 8) {
+                Menu(t("historyFileActions")) {
+                    if let local {
+                        Button(t("historyOpenLocal")) { NSWorkspace.shared.open(local) }
+                        Button(t("historyRevealLocal")) { reveal(local) }
+                    }
+                    if let cloud {
+                        Button(t("historyOpenCloud")) { NSWorkspace.shared.open(cloud) }
+                        Button(t("historyRevealCloud")) { reveal(cloud) }
+                    }
+                    if let copy {
+                        Button(t("historyOpenCopy")) { NSWorkspace.shared.open(copy) }
+                        Button(t("historyRevealCopy")) { reveal(copy) }
+                    }
+                }
+                if ["tex", "bib", "sty", "cls"].contains(URL(fileURLWithPath: event.path).pathExtension.lowercased()),
+                   local != nil, copy != nil || cloud != nil {
+                    Button(t("historyDiff")) { showLatexDiff(pair: pair, event: event) }
+                        .disabled(filters.diffLoading)
+                }
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
         }
     }
 
@@ -154,6 +299,9 @@ struct HistoryPage: View {
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                             }
+                            if let pair = pairForRecord(record) {
+                                fileActions(pair, event: event)
+                            }
                             if event.kind == "BACKUP", let id = event.backupID,
                                let pair = pairForRecord(record) {
                                 HStack(spacing: 10) {
@@ -163,6 +311,7 @@ struct HistoryPage: View {
                                         Button(t("restoreBackup")) { restore(pair, id) }
                                             .buttonStyle(.bordered)
                                             .controlSize(.small)
+                                            .disabled(!canRestore)
                                     } else {
                                         Text(t("backupExpired"))
                                             .font(.caption).foregroundStyle(.secondary)
@@ -282,6 +431,9 @@ struct HistoryPage: View {
             }
             .padding(.horizontal, 24)
             .frame(height: 44)
+        }
+        .sheet(item: $filters.latexDiff) { result in
+            LatexDiffSheet(result: result, language: language)
         }
     }
 }

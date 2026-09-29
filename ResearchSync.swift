@@ -37,10 +37,15 @@ struct SyncPair: Codable, Identifiable, Equatable {
     var cloudPath: String = ""
     var scheduledDirection: String = "merge"
     var enabled: Bool = false
+
+    var isUnusedDefaultPlaceholder: Bool {
+        name == "新路径" && localPath.isEmpty && cloudPath.isEmpty &&
+            scheduledDirection == "merge" && !enabled
+    }
 }
 
 struct SyncConfig: Codable, Equatable {
-    var pairs: [SyncPair] = [SyncPair()]
+    var pairs: [SyncPair] = []
     var intervalHours = 24
     var scheduleMode = "daily"
     var dailyHour = 23
@@ -54,11 +59,13 @@ struct SyncConfig: Codable, Equatable {
     var checkForUpdates = true
     var cloudConfigEnabled = false
     var oneDriveRoot = ""
+    var localRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
+    var cloudImportAnchors: [String: CloudImportAnchor] = [:]
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
-        case checkForUpdates, cloudConfigEnabled, oneDriveRoot
+        case checkForUpdates, cloudConfigEnabled, oneDriveRoot, localRoot, cloudImportAnchors
         case source, destination, scheduledDirection
     }
 
@@ -80,8 +87,11 @@ struct SyncConfig: Codable, Equatable {
         checkForUpdates = try data.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
         cloudConfigEnabled = try data.decodeIfPresent(Bool.self, forKey: .cloudConfigEnabled) ?? false
         oneDriveRoot = try data.decodeIfPresent(String.self, forKey: .oneDriveRoot) ?? ""
+        localRoot = try data.decodeIfPresent(String.self, forKey: .localRoot)
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
+        cloudImportAnchors = try data.decodeIfPresent([String: CloudImportAnchor].self, forKey: .cloudImportAnchors) ?? [:]
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
-            pairs = saved
+            pairs = saved.filter { !$0.isUnusedDefaultPlaceholder }
         } else {
             let local = try data.decodeIfPresent(String.self, forKey: .source) ?? ""
             let cloud = try data.decodeIfPresent(String.self, forKey: .destination) ?? ""
@@ -111,6 +121,8 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(checkForUpdates, forKey: .checkForUpdates)
         try data.encode(cloudConfigEnabled, forKey: .cloudConfigEnabled)
         try data.encode(oneDriveRoot, forKey: .oneDriveRoot)
+        try data.encode(localRoot, forKey: .localRoot)
+        try data.encode(cloudImportAnchors, forKey: .cloudImportAnchors)
     }
 }
 
@@ -141,11 +153,40 @@ func loadConfig(_ path: String = defaultConfigPath) throws -> SyncConfig {
     return try JSONDecoder().decode(SyncConfig.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
 }
 
-func saveConfig(_ config: SyncConfig) throws {
-    try fm.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
+func saveConfig(_ config: SyncConfig, at path: String = defaultConfigPath) throws {
+    let url = URL(fileURLWithPath: path)
+    try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    try encoder.encode(config).write(to: URL(fileURLWithPath: defaultConfigPath), options: .atomic)
+    let data = try encoder.encode(config)
+    if fm.fileExists(atPath: path) {
+        let previous = try Data(contentsOf: url)
+        if previous == data { return }
+        let backups = url.deletingLastPathComponent().appendingPathComponent("config-backups", isDirectory: true)
+        try fm.createDirectory(at: backups, withIntermediateDirectories: true)
+        let snapshot = backups.appendingPathComponent("\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.lowercased()).json")
+        try previous.write(to: snapshot, options: .atomic)
+        let files = try fm.contentsOfDirectory(at: backups, includingPropertiesForKeys: [.contentModificationDateKey])
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for stale in files.dropFirst(20) { try? fm.removeItem(at: stale) }
+    }
+    try data.write(to: url, options: .atomic)
+}
+
+struct ConfigSnapshot: Identifiable {
+    let url: URL
+    let date: Date
+    var id: String { url.path }
+}
+
+func configSnapshots(at path: String = defaultConfigPath) -> [ConfigSnapshot] {
+    let folder = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("config-backups")
+    let files = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    return files.filter { $0.pathExtension == "json" }.compactMap { url in
+        guard (try? loadConfig(url.path)) != nil else { return nil }
+        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        return ConfigSnapshot(url: url, date: date)
+    }.sorted { $0.date > $1.date }
 }
 
 func validatedPaths(_ pair: SyncPair) throws -> (String, String) {
@@ -167,6 +208,31 @@ func validatedPaths(_ pair: SyncPair) throws -> (String, String) {
         throw NSError(domain: appID, code: 4, userInfo: [NSLocalizedDescriptionKey: "同一组路径不能相同或互相包含。"])
     }
     return (local, cloud)
+}
+
+func validatedPairSet(_ pairs: [SyncPair], including selectedID: UUID? = nil) throws {
+    var roots: [(name: String, path: String)] = []
+    for pair in pairs where pair.enabled || pair.id == selectedID {
+        let local: String
+        let cloud: String
+        if selectedID == nil || pair.id == selectedID {
+            (local, cloud) = try validatedPaths(pair)
+        } else {
+            guard !pair.localPath.isEmpty, !pair.cloudPath.isEmpty else { continue }
+            local = URL(fileURLWithPath: pair.localPath).standardizedFileURL.resolvingSymlinksInPath().path
+            cloud = URL(fileURLWithPath: pair.cloudPath).standardizedFileURL.resolvingSymlinksInPath().path
+        }
+        for candidate in [local, cloud] {
+            if let other = roots.first(where: { existing in
+                candidate == existing.path || candidate.hasPrefix(existing.path + "/") ||
+                    existing.path.hasPrefix(candidate + "/")
+            }) {
+                throw NSError(domain: appID, code: 14, userInfo: [NSLocalizedDescriptionKey:
+                    "「\(pair.name)」与「\(other.name)」的同步目录重叠：\(candidate)。请只保留一组覆盖此目录。"])
+            }
+            roots.append((pair.name, candidate))
+        }
+    }
 }
 
 struct PendingConflict: Identifiable {
@@ -369,6 +435,7 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
         throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "没有可同步的路径。"])
     }
     return try withSyncLock {
+        try validatedPairSet(config.pairs, including: pairID)
         var outputs: [String] = []
         var errors: [String] = []
         for pair in selected {
@@ -449,6 +516,10 @@ final class SyncModel: ObservableObject {
     @Published var cloudError: String?
     @Published var cloudBusy = false
     @Published var lastCloudPublish: Date?
+    @Published var ownCloudProfile: CloudConfiguration?
+    @Published var ownCloudTransferStatus = "unknown"
+    @Published var cloudImportPreview: CloudImportPreview?
+    @Published var configBackups: [ConfigSnapshot] = configSnapshots()
     private var lastUpdateAttempt = UserDefaults.standard.object(forKey: "lastUpdateAttempt") as? Date
     private var notificationRequestID = UUID()
     private let cloudDeviceID: UUID = {
@@ -608,17 +679,35 @@ final class SyncModel: ObservableObject {
         }
     }
 
+    func chooseLocalRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: config.localRoot)
+        if panel.runModal() == .OK, let root = panel.url?.standardizedFileURL.path {
+            config.localRoot = root
+        }
+    }
+
     func refreshCloudProfiles() {
         guard config.cloudConfigEnabled, !cloudBusy else { return }
         cloudBusy = true
         let ownID = cloudDeviceID
         DispatchQueue.global(qos: .utility).async {
-            let result = Result { try CloudConfigStore(root: CloudConfigStore.iCloudRoot).readOthers(excluding: ownID) }
+            let result = Result { () throws -> ([CloudConfiguration], CloudConfiguration?, String) in
+                let store = CloudConfigStore(root: CloudConfigStore.iCloudRoot)
+                let all = try store.readOthers(excluding: UUID())
+                return (all.filter { $0.deviceID != ownID }, all.first { $0.deviceID == ownID },
+                        store.transferStatus(for: ownID))
+            }
             DispatchQueue.main.async {
                 self.cloudBusy = false
                 switch result {
-                case .success(let profiles):
+                case .success(let (profiles, own, status)):
                     self.cloudProfiles = profiles
+                    self.ownCloudProfile = own
+                    self.ownCloudTransferStatus = status
                     self.cloudError = nil
                 case .failure(let error):
                     self.cloudError = cloudConfigErrorText(error, language: self.config.language)
@@ -630,31 +719,55 @@ final class SyncModel: ObservableObject {
     func importCloudProfile(_ profile: CloudConfiguration) {
         guard !busy, !hasUnsavedChanges else { return }
         do {
-            config = try importing(profile, into: config)
-            selectedID = config.pairs.first?.id
+            cloudImportPreview = try CloudImportPreview(profile: profile, current: config)
             cloudError = nil
-            statusKey = "cloudImported"
-            statusDetail = nil
-            refreshConflicts()
         } catch {
             cloudError = cloudConfigErrorText(error, language: config.language)
         }
     }
 
+    func applyCloudImport(_ preview: CloudImportPreview) {
+        config = preview.proposed
+        selectedID = config.pairs.first?.id
+        cloudImportPreview = nil
+        statusKey = "cloudImported"
+        statusDetail = nil
+        refreshConflicts()
+    }
+
+    func restoreConfigSnapshot(_ snapshot: ConfigSnapshot) {
+        do {
+            let restored = try loadConfig(snapshot.url.path)
+            config = restored
+            selectedID = restored.pairs.first?.id
+            statusKey = "cloudImported"
+            statusDetail = nil
+            refreshConflicts()
+        } catch { statusKey = "error"; statusDetail = error.localizedDescription }
+    }
+
     private func publishCloudConfig(_ saved: SyncConfig) {
         let ownID = cloudDeviceID
         let deviceName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let profile = CloudConfiguration(config: saved, deviceID: ownID, deviceName: deviceName)
+        if let ownCloudProfile,
+           ownCloudProfile.sharedDigest == profile.sharedDigest,
+           ownCloudProfile.importedRevisions == profile.importedRevisions {
+            return
+        }
         cloudBusy = true
         DispatchQueue.global(qos: .utility).async {
             let result = Result {
-                try CloudConfigStore(root: CloudConfigStore.iCloudRoot).write(
-                    CloudConfiguration(config: saved, deviceID: ownID, deviceName: deviceName))
+                try CloudConfigStore(root: CloudConfigStore.iCloudRoot).write(profile)
             }
             DispatchQueue.main.async {
                 self.cloudBusy = false
                 switch result {
                 case .success:
                     self.lastCloudPublish = Date()
+                    self.ownCloudProfile = profile
+                    self.ownCloudTransferStatus = CloudConfigStore(root: CloudConfigStore.iCloudRoot)
+                        .transferStatus(for: ownID)
                     self.cloudError = nil
                     self.refreshCloudProfiles()
                 case .failure(let error):
@@ -690,8 +803,8 @@ final class SyncModel: ObservableObject {
             if config.enabled && !config.pairs.contains(where: { $0.enabled }) {
                 throw NSError(domain: appID, code: 9, userInfo: [NSLocalizedDescriptionKey: "启用后台同步前，请至少启用一组路径。"])
             }
+            try validatedPairSet(config.pairs)
             for pair in config.pairs where pair.enabled {
-                _ = try validatedPaths(pair)
                 _ = try pendingConflicts(for: pair)
             }
             config.intervalHours = min(168, max(6, config.intervalHours))
@@ -705,6 +818,7 @@ final class SyncModel: ObservableObject {
                 config.notificationMode = "off"
             }
             try saveConfig(config)
+            configBackups = configSnapshots()
             savedConfig = config
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
@@ -715,7 +829,7 @@ final class SyncModel: ObservableObject {
     }
 
     func syncNow(_ direction: SyncDirection? = nil, all: Bool = false) {
-        guard all || selectedID != nil else { return }
+        guard !hasUnsavedChanges, all || selectedID != nil else { return }
         busy = true
         statusKey = all ? "syncingAll" : "syncingPair"
         statusDetail = nil
@@ -749,7 +863,7 @@ final class SyncModel: ObservableObject {
     }
 
     func resolveConflict(_ name: String, choice: String) {
-        guard let pair = selectedPair, !busy else { return }
+        guard let pair = selectedPair, !busy, !hasUnsavedChanges else { return }
         let language = config.language
         let retentionDays = config.backupRetentionDays
         busy = true
@@ -831,7 +945,7 @@ final class SyncModel: ObservableObject {
     }
 
     func restoreBackup(pair: SyncPair, id: String) {
-        guard !busy else { return }
+        guard !busy, !hasUnsavedChanges else { return }
         let language = config.language
         let retentionDays = config.backupRetentionDays
         busy = true
@@ -869,8 +983,8 @@ struct ResearchSyncApp: App {
         if args.contains("--install") {
             do {
                 let config = try loadConfig()
+                try validatedPairSet(config.pairs)
                 for pair in config.pairs where pair.enabled {
-                    _ = try validatedPaths(pair)
                     _ = try pendingConflicts(for: pair)
                 }
                 try saveConfig(config)

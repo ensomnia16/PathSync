@@ -1,4 +1,17 @@
 import Foundation
+import CryptoKit
+
+struct CloudImportAnchor: Codable, Equatable {
+    let revisionID: UUID
+    let sharedDigest: String
+    let localDigest: String?
+}
+
+func localSharedDigest(_ config: SyncConfig, pairIDs: Set<UUID>) -> String {
+    var shared = config
+    shared.pairs = config.pairs.filter { pairIDs.contains($0.id) }
+    return CloudConfiguration(config: shared, deviceID: UUID(), deviceName: "local").sharedDigest
+}
 
 // Each Mac writes a separate iCloud Drive document; paths and active state stay local.
 struct CloudConfigPair: Codable, Equatable {
@@ -6,6 +19,11 @@ struct CloudConfigPair: Codable, Equatable {
     let name: String
     let scheduledDirection: String
     let oneDriveRelativePath: String?
+    let localRelativePath: String?
+    var isUnusedDefaultPlaceholder: Bool {
+        name == "新路径" && scheduledDirection == "merge" &&
+            oneDriveRelativePath == nil && localRelativePath == nil
+    }
 }
 
 struct CloudConfiguration: Codable, Equatable, Identifiable {
@@ -22,7 +40,24 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
     let excludeLatexIntermediates: Bool
     let conflictPolicy: String
     let backupRetentionDays: Int
+    let importedRevisions: [String: UUID]?
     var id: UUID { deviceID }
+    var effectivePairs: [CloudConfigPair] { pairs.filter { !$0.isUnusedDefaultPlaceholder } }
+
+    var sharedDigest: String {
+        let entries = effectivePairs.sorted { $0.id.uuidString < $1.id.uuidString }.map {
+            [$0.id.uuidString, $0.name, $0.scheduledDirection,
+             $0.oneDriveRelativePath ?? "", $0.localRelativePath ?? ""]
+        }
+        let value: [String: Any] = [
+            "pairs": entries, "scheduleMode": scheduleMode, "intervalHours": intervalHours,
+            "dailyHour": dailyHour, "dailyMinute": dailyMinute,
+            "excludeLatexIntermediates": excludeLatexIntermediates,
+            "conflictPolicy": conflictPolicy, "backupRetentionDays": backupRetentionDays
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 
     init(config: SyncConfig, deviceID: UUID, deviceName: String) {
         schemaVersion = 1
@@ -30,10 +65,11 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
         self.deviceName = deviceName
         revisionID = UUID()
         modifiedAt = Date()
-        pairs = config.pairs.map { pair in
+        pairs = config.pairs.filter { !$0.isUnusedDefaultPlaceholder }.map { pair in
             CloudConfigPair(id: pair.id, name: pair.name,
                             scheduledDirection: pair.scheduledDirection,
-                            oneDriveRelativePath: relativePath(pair.cloudPath, within: config.oneDriveRoot))
+                            oneDriveRelativePath: relativePath(pair.cloudPath, within: config.oneDriveRoot),
+                            localRelativePath: relativePath(pair.localPath, within: config.localRoot))
         }
         scheduleMode = config.scheduleMode
         intervalHours = config.intervalHours
@@ -42,6 +78,7 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
         excludeLatexIntermediates = config.excludeLatexIntermediates
         conflictPolicy = config.conflictPolicy
         backupRetentionDays = config.backupRetentionDays
+        importedRevisions = config.cloudImportAnchors.mapValues(\.revisionID)
     }
 
     func validate() throws {
@@ -51,10 +88,13 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
               (0...23).contains(dailyHour), (0...59).contains(dailyMinute),
               ["keep-both", "ask", "newest"].contains(conflictPolicy),
               (1...365).contains(backupRetentionDays),
+              (importedRevisions?.count ?? 0) <= 250,
+              (importedRevisions ?? [:]).keys.allSatisfy({ UUID(uuidString: $0) != nil }),
               pairs.allSatisfy({ pair in
                   !pair.name.isEmpty && pair.name.utf8.count <= 500 &&
                   ["merge", "upload", "download"].contains(pair.scheduledDirection) &&
-                  (pair.oneDriveRelativePath == nil || isSafeRelativePath(pair.oneDriveRelativePath!))
+                  (pair.oneDriveRelativePath == nil || isSafeRelativePath(pair.oneDriveRelativePath!)) &&
+                  (pair.localRelativePath == nil || isSafeRelativePath(pair.localRelativePath!))
               }) else { throw CloudConfigError.invalid }
     }
 }
@@ -86,9 +126,12 @@ func path(in root: String, relative: String) -> String? {
 func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -> SyncConfig {
     try profile.validate()
     var result = current
-    let old = Dictionary(uniqueKeysWithValues: current.pairs.map { ($0.id, $0) })
-    result.pairs = profile.pairs.map { shared in
+    let old = Dictionary(uniqueKeysWithValues: current.pairs
+        .filter { !$0.isUnusedDefaultPlaceholder }.map { ($0.id, $0) })
+    result.pairs = profile.effectivePairs.map { shared in
         var pair = old[shared.id] ?? SyncPair(id: shared.id)
+        if old[shared.id]?.scheduledDirection != nil &&
+            old[shared.id]?.scheduledDirection != shared.scheduledDirection { pair.enabled = false }
         pair.name = shared.name
         pair.scheduledDirection = shared.scheduledDirection
         if let relative = shared.oneDriveRelativePath,
@@ -96,10 +139,16 @@ func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -
             if !pair.cloudPath.isEmpty && pair.cloudPath != cloud { pair.enabled = false }
             pair.cloudPath = cloud
         }
+        if pair.localPath.isEmpty, let relative = shared.localRelativePath,
+           let local = path(in: current.localRoot, relative: relative) {
+            pair.localPath = local
+        }
         if old[shared.id] == nil { pair.enabled = false }
         return pair
     }
-    result.pairs += current.pairs.filter { pair in !profile.pairs.contains(where: { $0.id == pair.id }) }
+    result.pairs += current.pairs.filter { pair in
+        !pair.isUnusedDefaultPlaceholder && !profile.effectivePairs.contains(where: { $0.id == pair.id })
+    }
     result.scheduleMode = profile.scheduleMode
     result.intervalHours = profile.intervalHours
     result.dailyHour = profile.dailyHour
@@ -108,7 +157,52 @@ func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -
     result.conflictPolicy = profile.conflictPolicy
     result.backupRetentionDays = profile.backupRetentionDays
     if !result.pairs.contains(where: \.enabled) { result.enabled = false }
+    result.cloudImportAnchors[profile.deviceID.uuidString.lowercased()] =
+        CloudImportAnchor(revisionID: profile.revisionID, sharedDigest: profile.sharedDigest,
+            localDigest: localSharedDigest(result, pairIDs: Set(profile.effectivePairs.map(\.id))))
     return result
+}
+
+struct CloudImportPreview: Identifiable {
+    let profile: CloudConfiguration
+    let current: SyncConfig
+    let proposed: SyncConfig
+    let changed: [SyncPair]
+    let preservedLocalPairs: [SyncPair]
+    let localEditsConflict: Bool
+    let bothChanged: Bool
+    let ruleChanges: [String]
+    let missingFolders: [String]
+    var id: UUID { profile.revisionID }
+
+    init(profile: CloudConfiguration, current: SyncConfig) throws {
+        self.profile = profile
+        self.current = current
+        proposed = try importing(profile, into: current)
+        changed = proposed.pairs.filter { pair in
+            current.pairs.first(where: { $0.id == pair.id }) != pair
+        }
+        let remoteIDs = Set(profile.effectivePairs.map(\.id))
+        preservedLocalPairs = current.pairs.filter {
+            !$0.isUnusedDefaultPlaceholder && !remoteIDs.contains($0.id)
+        }
+        let anchor = current.cloudImportAnchors[profile.deviceID.uuidString.lowercased()]
+        let currentDigest = localSharedDigest(current, pairIDs: Set(profile.effectivePairs.map(\.id)))
+        localEditsConflict = anchor?.localDigest != nil && anchor?.localDigest != currentDigest
+        bothChanged = localEditsConflict && anchor?.sharedDigest != profile.sharedDigest
+        var changes: [String] = []
+        if current.scheduleMode != proposed.scheduleMode || current.intervalHours != proposed.intervalHours ||
+            current.dailyHour != proposed.dailyHour || current.dailyMinute != proposed.dailyMinute {
+            changes.append("schedule")
+        }
+        if current.conflictPolicy != proposed.conflictPolicy { changes.append("conflict") }
+        if current.backupRetentionDays != proposed.backupRetentionDays { changes.append("backup") }
+        if current.excludeLatexIntermediates != proposed.excludeLatexIntermediates { changes.append("latex") }
+        ruleChanges = changes
+        missingFolders = proposed.pairs.filter { pair in
+            !pair.localPath.isEmpty && !FileManager.default.fileExists(atPath: pair.localPath)
+        }.map { $0.name + ": " + $0.localPath }
+    }
 }
 
 enum CloudConfigError: LocalizedError {
@@ -143,6 +237,18 @@ struct CloudConfigStore {
     }
     static var iCloudRoot: URL {
         iCloudDrive.appendingPathComponent("PathSync/Configuration", isDirectory: true)
+    }
+
+    func transferStatus(for deviceID: UUID) -> String {
+        let url = root.appendingPathComponent(deviceID.uuidString.lowercased() + ".json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return "missing" }
+        guard let values = try? url.resourceValues(forKeys: [
+            .isUbiquitousItemKey, .ubiquitousItemIsUploadedKey, .ubiquitousItemIsUploadingKey,
+            .ubiquitousItemUploadingErrorKey]) else { return "unknown" }
+        if values.ubiquitousItemUploadingError != nil { return "error" }
+        if values.ubiquitousItemIsUploading == true { return "uploading" }
+        if values.ubiquitousItemIsUploaded == true { return "uploaded" }
+        return values.isUbiquitousItem == true ? "pending" : "unknown"
     }
 
     func write(_ profile: CloudConfiguration) throws {

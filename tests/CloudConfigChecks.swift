@@ -8,6 +8,7 @@ struct CloudConfigChecks {
         let pairID = UUID()
         var source = SyncConfig()
         source.oneDriveRoot = originalRoot
+        source.localRoot = "/Users/alice/Documents"
         let newPairID = UUID()
         source.pairs = [
             SyncPair(id: pairID, name: "科研",
@@ -25,6 +26,7 @@ struct CloudConfigChecks {
         let profile = CloudConfiguration(config: source, deviceID: alice, deviceName: "Alice Mac")
         try profile.validate()
         assert(profile.pairs[0].oneDriveRelativePath == "文档/科研")
+        assert(profile.pairs[0].localRelativePath == "科研")
         assert(profile.pairs[1].oneDriveRelativePath == nil)
         assert(profile.pairs[2].oneDriveRelativePath == "文档/论文")
         assert(inferredOneDriveRoot(source.pairs[0].cloudPath) == originalRoot)
@@ -43,6 +45,7 @@ struct CloudConfigChecks {
 
         var target = SyncConfig()
         target.oneDriveRoot = otherRoot
+        target.localRoot = "/Users/bob/Documents"
         target.pairs = [SyncPair(id: pairID, name: "旧名称",
                                  localPath: "/Users/bob/Documents/Research",
                                  cloudPath: otherRoot + "/文档/科研",
@@ -51,11 +54,35 @@ struct CloudConfigChecks {
         assert(imported.pairs[0].name == "科研")
         assert(imported.pairs[0].localPath == target.pairs[0].localPath)
         assert(imported.pairs[0].cloudPath == otherRoot + "/文档/科研")
-        assert(imported.pairs[0].enabled)
+        assert(!imported.pairs[0].enabled) // Direction changed; review before re-enabling.
         assert(imported.pairs[1].localPath.isEmpty && !imported.pairs[1].enabled)
         assert(imported.pairs[2].id == newPairID)
         assert(imported.pairs[2].cloudPath == otherRoot + "/文档/论文")
-        assert(imported.pairs[2].localPath.isEmpty && !imported.pairs[2].enabled)
+        assert(imported.pairs[2].localPath == "/Users/bob/Documents/论文" && !imported.pairs[2].enabled)
+        assert(imported.cloudImportAnchors[alice.uuidString.lowercased()]?.revisionID == profile.revisionID)
+
+        var localEdit = imported
+        localEdit.conflictPolicy = "newest"
+        let preview = try CloudImportPreview(profile: profile, current: localEdit)
+        assert(preview.localEditsConflict)
+        assert(!preview.bothChanged)
+        assert(preview.ruleChanges.contains("conflict"))
+        var withExtra = imported
+        withExtra.pairs.append(SyncPair(name: "只在本机", localPath: "/tmp/only-here"))
+        let noFalseConflict = try CloudImportPreview(profile: profile, current: withExtra)
+        assert(!noFalseConflict.localEditsConflict)
+        var remoteEdit = source
+        remoteEdit.backupRetentionDays = 30
+        let newerProfile = CloudConfiguration(config: remoteEdit, deviceID: alice, deviceName: "Alice Mac")
+        let divergent = try CloudImportPreview(profile: newerProfile, current: localEdit)
+        assert(divergent.bothChanged)
+
+        var placeholder = source
+        placeholder.pairs.append(SyncPair())
+        let encodedPlaceholder = try JSONEncoder().encode(placeholder)
+        let decodedPlaceholder = try JSONDecoder().decode(SyncConfig.self, from: encodedPlaceholder)
+        assert(decodedPlaceholder.pairs.count == source.pairs.count)
+        assert(CloudConfiguration(config: placeholder, deviceID: UUID(), deviceName: "X").pairs.count == source.pairs.count)
 
         target.pairs[0].cloudPath = otherRoot + "/other"
         let rebound = try importing(profile, into: target)
@@ -71,6 +98,73 @@ struct CloudConfigChecks {
         let bad = try JSONDecoder().decode(CloudConfiguration.self, from: badData)
         assert((try? bad.validate()) == nil)
         assert((try? store.write(bad)) == nil)
+
+        var malicious = tampered
+        var badLocal = malicious["pairs"] as! [[String: Any]]
+        badLocal[0]["oneDriveRelativePath"] = "文档/科研"
+        badLocal[0]["localRelativePath"] = "../escape"
+        malicious["pairs"] = badLocal
+        let badLocalProfile = try JSONDecoder().decode(CloudConfiguration.self,
+            from: JSONSerialization.data(withJSONObject: malicious))
+        assert((try? badLocalProfile.validate()) == nil)
+        var oldShape = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        oldShape.removeValue(forKey: "importedRevisions")
+        var oldPairs = oldShape["pairs"] as! [[String: Any]]
+        for index in oldPairs.indices { oldPairs[index].removeValue(forKey: "localRelativePath") }
+        oldShape["pairs"] = oldPairs
+        let oldProfile = try JSONDecoder().decode(CloudConfiguration.self,
+            from: JSONSerialization.data(withJSONObject: oldShape))
+        try oldProfile.validate()
+        var legacyWithPlaceholder = oldShape
+        var legacyPairs = legacyWithPlaceholder["pairs"] as! [[String: Any]]
+        legacyPairs.append(["id": UUID().uuidString, "name": "新路径", "scheduledDirection": "merge"])
+        legacyWithPlaceholder["pairs"] = legacyPairs
+        let legacyProfile = try JSONDecoder().decode(CloudConfiguration.self,
+            from: JSONSerialization.data(withJSONObject: legacyWithPlaceholder))
+        let withoutPlaceholder = try importing(legacyProfile, into: target)
+        assert(legacyProfile.effectivePairs.count == profile.pairs.count)
+        assert(withoutPlaceholder.pairs.count == profile.pairs.count)
+
+        let folderA = temporary.appendingPathComponent("A", isDirectory: true)
+        let folderChild = folderA.appendingPathComponent("child", isDirectory: true)
+        let folderB = temporary.appendingPathComponent("B", isDirectory: true)
+        let folderC = temporary.appendingPathComponent("C", isDirectory: true)
+        for folder in [folderA, folderChild, folderB, folderC] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        let first = SyncPair(name: "first", localPath: folderA.path, cloudPath: folderB.path, enabled: true)
+        let second = SyncPair(name: "second", localPath: folderChild.path, cloudPath: folderC.path, enabled: true)
+        assert((try? validatedPairSet([first, second])) == nil)
+        var disabledSecond = second
+        disabledSecond.enabled = false
+        try validatedPairSet([first, disabledSecond])
+        assert((try? validatedPairSet([first, disabledSecond], including: disabledSecond.id)) == nil)
+
+        let configURL = temporary.appendingPathComponent("config.json")
+        try saveConfig(source, at: configURL.path)
+        var newer = source
+        newer.dailyHour = 20
+        try saveConfig(newer, at: configURL.path)
+        let snapshots = configSnapshots(at: configURL.path)
+        assert(snapshots.count == 1)
+        let restoredSnapshot = try loadConfig(snapshots[0].url.path)
+        assert(restoredSnapshot.dailyHour == 23)
+
+        let texA = folderA.appendingPathComponent("main.tex")
+        let texB = folderB.appendingPathComponent("main.tex")
+        try "\\section{Intro}\nOld line\n".write(to: texA, atomically: true, encoding: .utf8)
+        try "\\section{Intro}\nNew line\n".write(to: texB, atomically: true, encoding: .utf8)
+        let diff = makeLatexDiff(left: texA, right: texB, leftTitle: "local", rightTitle: "cloud", language: "en")
+        assert(diff.error == nil && diff.summary.contains("Intro"))
+        assert(diff.unifiedDiff.contains("+New line"))
+        assert(safeHistoryFile(root: folderA.path, relative: "../B/main.tex") == nil)
+        let symlink = folderA.appendingPathComponent("escape")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: folderB)
+        assert(safeHistoryFile(root: folderA.path, relative: "escape/main.tex") == nil)
+        if ProcessInfo.processInfo.environment["PATHSYNC_TEST_CODEX_AI"] == "1" {
+            let summary = try summarizeLatexDiffWithCodex(diff, language: "zh-Hans")
+            assert(!summary.isEmpty)
+        }
 
         print("cloud configuration checks passed")
     }

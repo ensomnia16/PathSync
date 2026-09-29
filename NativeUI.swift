@@ -1,6 +1,95 @@
 import AppKit
 import SwiftUI
 
+private struct CloudImportPreviewSheet: View {
+    let preview: CloudImportPreview
+    let language: String
+    let apply: () -> Void
+    let cancel: () -> Void
+    private func t(_ key: String) -> String { uiText(key, language: language) }
+
+    private func schedule(_ config: SyncConfig) -> String {
+        config.scheduleMode == "daily"
+            ? String(format: "%02d:%02d", config.dailyHour, config.dailyMinute)
+            : "\(config.intervalHours) \(t("hours"))"
+    }
+
+    private func ruleValue(_ key: String, config: SyncConfig) -> String {
+        switch key {
+        case "schedule": return schedule(config)
+        case "conflict": return t(config.conflictPolicy == "keep-both" ? "autoKeepBoth" :
+                                  config.conflictPolicy == "newest" ? "keepNewest" : "askForConflicts")
+        case "backup": return "\(config.backupRetentionDays) \(t("days"))"
+        default: return config.excludeLatexIntermediates ? t("enabled") : t("disabled")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(t("cloudPreviewTitle")).font(.title2.bold())
+            Text(preview.profile.deviceName + " · " + String(preview.profile.effectivePairs.count) + " " + t("folders"))
+                .foregroundStyle(.secondary)
+            if preview.localEditsConflict {
+                Label(t(preview.bothChanged ? "cloudRulesConflict" : "cloudLocalEdits"),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+            Text(t("cloudPreviewHint")).font(.callout)
+            if preview.changed.isEmpty && preview.ruleChanges.isEmpty && preview.preservedLocalPairs.isEmpty {
+                Label(t("cloudNoChanges"), systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(preview.ruleChanges, id: \.self) { key in
+                        VStack(alignment: .leading) {
+                            Text(t(key == "schedule" ? "schedule" : key == "conflict" ? "conflictHandling" :
+                                   key == "backup" ? "backupRetention" : "latex")).font(.headline)
+                            Text(ruleValue(key, config: preview.current) + " → " + ruleValue(key, config: preview.proposed))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Divider()
+                    }
+                    ForEach(preview.changed) { pair in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(pair.name).font(.headline)
+                            if let before = preview.current.pairs.first(where: { $0.id == pair.id }),
+                               before.scheduledDirection != pair.scheduledDirection {
+                                Text(t("scheduledDirection") + ": " +
+                                     t(before.scheduledDirection) + " → " + t(pair.scheduledDirection))
+                            }
+                            Text("\(t("local")): \(pair.localPath.isEmpty ? t("cloudUnset") : pair.localPath)")
+                            Text("\(t("cloud")): \(pair.cloudPath.isEmpty ? t("cloudUnset") : pair.cloudPath)")
+                            if !pair.enabled { Text(t("cloudPairDisabled")).foregroundStyle(.orange) }
+                        }
+                        .font(.caption)
+                        .textSelection(.enabled)
+                        Divider()
+                    }
+                    if !preview.preservedLocalPairs.isEmpty {
+                        Text(t("cloudPreservedLocal")).font(.headline)
+                        ForEach(preview.preservedLocalPairs) { pair in
+                            Text(pair.name).font(.caption)
+                        }
+                    }
+                    if !preview.missingFolders.isEmpty {
+                        Text(t("cloudMissingFolders")).font(.headline)
+                        ForEach(preview.missingFolders, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button(t("cancel"), action: cancel)
+                Button(preview.localEditsConflict ? t("cloudUseRemoteRules") : t("cloudImport"), action: apply)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 680, height: 500)
+    }
+}
+
 // Template glyph from the app icon: a pierced diamond.
 func menuBarIcon() -> NSImage {
     let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
@@ -93,7 +182,7 @@ struct MenuBarContent: View {
         } label: {
             Label(t("syncAllNow"), systemImage: "arrow.triangle.2.circlepath")
         }
-        .disabled(model.busy || !model.hasEnabledPairs)
+        .disabled(model.busy || model.hasUnsavedChanges || !model.hasEnabledPairs)
 
         Button(t("menubarOpen")) { showWindow("overview") }
         Button(t("menubarOpenHistory")) { showWindow("history") }
@@ -201,6 +290,10 @@ struct ContentView: View {
         } message: {
             Text(t("removeConfirmHint"))
         }
+        .sheet(item: $model.cloudImportPreview) { preview in
+            CloudImportPreviewSheet(preview: preview, language: model.config.language,
+                apply: { model.applyCloudImport(preview) }, cancel: { model.cloudImportPreview = nil })
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshConflicts()
             model.refreshHistory()
@@ -272,13 +365,13 @@ struct ContentView: View {
                     Label(t("syncPairNow"), systemImage: "arrow.triangle.2.circlepath")
                 }
                 .help(t("syncPairHint"))
-                .disabled(model.busy || pair.localPath.isEmpty || pair.cloudPath.isEmpty)
+                .disabled(model.busy || model.hasUnsavedChanges || pair.localPath.isEmpty || pair.cloudPath.isEmpty)
             } else {
                 Button { model.syncNow(all: true) } label: {
                     Label(t("syncAllNow"), systemImage: "arrow.triangle.2.circlepath")
                 }
                 .help(t("syncAllHint"))
-                .disabled(model.busy || !model.hasEnabledPairs)
+                .disabled(model.busy || model.hasUnsavedChanges || !model.hasEnabledPairs)
             }
         }
         ToolbarItem(placement: .primaryAction) {
@@ -300,7 +393,8 @@ struct ContentView: View {
             HistoryPage(records: model.history, pairs: model.config.pairs,
                         language: model.config.language, error: model.historyError,
                         refresh: model.refreshHistory,
-                        restore: { pair, id in model.restoreBackup(pair: pair, id: id) })
+                        restore: { pair, id in model.restoreBackup(pair: pair, id: id) },
+                        canRestore: !model.hasUnsavedChanges && !model.busy)
         case "about":
             aboutForm
         case "pair":
@@ -418,7 +512,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(model.busy || !model.hasEnabledPairs)
+                .disabled(model.busy || model.hasUnsavedChanges || !model.hasEnabledPairs)
             }
         }
     }
@@ -538,7 +632,9 @@ struct ContentView: View {
                         .font(.system(size: 30))
                         .foregroundStyle(pair.enabled ? Color.accentColor : .secondary)
                     VStack(alignment: .leading, spacing: 2) {
-                        TextField(t("namePlaceholder"), text: $model.config.pairs[index].name)
+                        TextField(t("name"), text: $model.config.pairs[index].name,
+                                  prompt: Text(t("namePlaceholder")))
+                            .labelsHidden()
                             .textFieldStyle(.plain)
                             .font(.title2.weight(.semibold))
                         Text(pairFootnote(pair)).font(.callout).foregroundStyle(.secondary)
@@ -588,7 +684,7 @@ struct ContentView: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
-                    .disabled(model.busy || pair.localPath.isEmpty || pair.cloudPath.isEmpty)
+                    .disabled(model.busy || model.hasUnsavedChanges || pair.localPath.isEmpty || pair.cloudPath.isEmpty)
                 }
             } header: {
                 Text(t("directionSection"))
@@ -752,7 +848,7 @@ struct ContentView: View {
                         }
                     }
                     .fixedSize()
-                    .disabled(model.busy || conflict.blockedByTree != nil)
+                    .disabled(model.busy || model.hasUnsavedChanges || conflict.blockedByTree != nil)
                 }
                 .controlSize(.small)
             }
@@ -857,9 +953,23 @@ struct ContentView: View {
                 Text(t("autoCheckHint"))
             }
 
+            cloudConfigSection
+            configRollbackSection
+        }
+        .formStyle(.grouped)
+    }
+
+
+    private var cloudConfigSection: some View {
             Section {
                 Toggle(t("cloudConfigEnable"), isOn: $model.config.cloudConfigEnabled)
                 if model.config.cloudConfigEnabled {
+                    LabeledContent(t("localRoot")) {
+                        Text(abbreviatedPath(model.config.localRoot))
+                            .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
+                            .help(model.config.localRoot)
+                        Button(t("chooseLocalRoot")) { model.chooseLocalRoot() }
+                    }
                     LabeledContent(t("oneDriveRoot")) {
                         Text(model.config.oneDriveRoot.isEmpty ? "—" : abbreviatedPath(model.config.oneDriveRoot))
                             .lineLimit(1)
@@ -883,24 +993,17 @@ struct ContentView: View {
                         Button(t("cloudRefresh")) { model.refreshCloudProfiles() }
                             .disabled(model.cloudBusy)
                     }
+                    if let own = model.ownCloudProfile {
+                        LabeledContent(t("cloudThisDevice")) {
+                            Text(own.deviceName)
+                            Text(t("cloudTransfer_" + model.ownCloudTransferStatus))
+                                .foregroundStyle(model.ownCloudTransferStatus == "error" ? Color.orange : Color.secondary)
+                        }
+                    }
                     if model.cloudProfiles.isEmpty && !model.cloudBusy {
                         Text(t("cloudNone")).foregroundStyle(.secondary)
                     }
-                    ForEach(model.cloudProfiles) { profile in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(profile.deviceName)
-                                Text(profile.modifiedAt, style: .date)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text("\(profile.pairs.count) \(t("folders"))")
-                                .foregroundStyle(.secondary)
-                            Button(t("cloudImport")) { model.importCloudProfile(profile) }
-                                .disabled(model.hasUnsavedChanges || model.busy)
-                        }
-                    }
+                    ForEach(model.cloudProfiles) { profile in cloudProfileRow(profile) }
                     if let error = model.cloudError {
                         Label(error, systemImage: "exclamationmark.triangle")
                             .foregroundStyle(.orange)
@@ -912,10 +1015,58 @@ struct ContentView: View {
             } header: {
                 Text(t("cloudConfig"))
             } footer: {
-                Text(t("cloudConfigHint") + " " + t("oneDriveRootHint") + " " + t("cloudImportHint"))
+                Text(cloudConfigFooter)
             }
+
+
+    }
+
+    private var configRollbackSection: some View {
+            Section {
+                if model.configBackups.isEmpty {
+                    Text(t("configNoBackups")).foregroundStyle(.secondary)
+                }
+                ForEach(model.configBackups.prefix(5)) { snapshot in
+                    HStack {
+                        Text(snapshot.date, style: .date)
+                        Text(snapshot.date, style: .time).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(t("configLoadBackup")) { model.restoreConfigSnapshot(snapshot) }
+                    }
+                }
+            } header: {
+                Text(t("configRollback"))
+            } footer: {
+                Text(t("configRollbackHint"))
+            }
+    }
+
+    private var cloudConfigFooter: String {
+        ["cloudConfigHint", "oneDriveRootHint", "cloudImportHint"].map(t).joined(separator: " ")
+    }
+
+    private func cloudProfileRow(_ profile: CloudConfiguration) -> some View {
+        let anchor = model.config.cloudImportAnchors[profile.deviceID.uuidString.lowercased()]
+        let applied = anchor?.revisionID == profile.revisionID
+        let peerImportedOwn = model.ownCloudProfile.flatMap { own in
+            profile.importedRevisions?[own.deviceID.uuidString.lowercased()] == own.revisionID
+        } ?? false
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(profile.deviceName)
+                Text(profile.modifiedAt, style: .relative).font(.caption).foregroundStyle(.secondary)
+                Text(anchor == nil ? t("cloudRevisionNever") :
+                     t(applied ? "cloudRevisionApplied" : "cloudRevisionNew"))
+                    .font(.caption)
+                    .foregroundStyle(applied || anchor == nil ? Color.secondary : Color.orange)
+                Text(peerImportedOwn ? t("cloudPeerImported") : t("cloudPeerUnconfirmed"))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("\(profile.effectivePairs.count) \(t("folders"))").foregroundStyle(.secondary)
+            Button(t("cloudImport")) { model.importCloudProfile(profile) }
+                .disabled(model.hasUnsavedChanges || model.busy)
         }
-        .formStyle(.grouped)
     }
 
     // MARK: - About and updates
