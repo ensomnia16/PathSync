@@ -727,12 +727,20 @@ final class SyncModel: ObservableObject {
     }
 
     func applyCloudImport(_ preview: CloudImportPreview) {
-        config = preview.proposed
-        selectedID = config.pairs.first?.id
-        cloudImportPreview = nil
-        statusKey = "cloudImported"
-        statusDetail = nil
-        refreshConflicts()
+        do {
+            try createImportedLocalFolders(preview)
+            config = preview.proposed
+            selectedID = config.pairs.first?.id
+            cloudImportPreview = nil
+            cloudError = nil
+            statusKey = "cloudImported"
+            statusDetail = nil
+            refreshConflicts()
+        } catch {
+            let message = cloudConfigErrorText(error, language: config.language)
+            cloudError = message
+            cloudImportPreview = nil
+        }
     }
 
     func restoreConfigSnapshot(_ snapshot: ConfigSnapshot) {

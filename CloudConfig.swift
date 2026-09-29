@@ -122,6 +122,18 @@ func path(in root: String, relative: String) -> String? {
     return full.hasPrefix(base.path + "/") ? full : nil
 }
 
+// Profiles written before localRelativePath was added still contain a OneDrive-relative path.
+// The common OneDrive Documents container maps to the selected local working root.
+func importedLocalRelativePath(_ pair: CloudConfigPair) -> String? {
+    if let relative = pair.localRelativePath { return relative }
+    guard let cloudRelative = pair.oneDriveRelativePath else { return nil }
+    let components = cloudRelative.split(separator: "/").map(String.init)
+    if components.count > 1 && ["文档", "Documents"].contains(components[0]) {
+        return components.dropFirst().joined(separator: "/")
+    }
+    return cloudRelative
+}
+
 // Remote removal never silently removes a local pair. New or rebound pairs must be enabled locally.
 func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -> SyncConfig {
     try profile.validate()
@@ -139,7 +151,7 @@ func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -
             if !pair.cloudPath.isEmpty && pair.cloudPath != cloud { pair.enabled = false }
             pair.cloudPath = cloud
         }
-        if pair.localPath.isEmpty, let relative = shared.localRelativePath,
+        if pair.localPath.isEmpty, let relative = importedLocalRelativePath(shared),
            let local = path(in: current.localRoot, relative: relative) {
             pair.localPath = local
         }
@@ -173,13 +185,15 @@ struct CloudImportPreview: Identifiable {
     let bothChanged: Bool
     let ruleChanges: [String]
     let missingFolders: [String]
+    let localFoldersToCreate: [String]
     var id: UUID { profile.revisionID }
 
     init(profile: CloudConfiguration, current: SyncConfig) throws {
         self.profile = profile
         self.current = current
-        proposed = try importing(profile, into: current)
-        changed = proposed.pairs.filter { pair in
+        let derived = try importing(profile, into: current)
+        proposed = derived
+        changed = derived.pairs.filter { pair in
             current.pairs.first(where: { $0.id == pair.id }) != pair
         }
         let remoteIDs = Set(profile.effectivePairs.map(\.id))
@@ -191,28 +205,77 @@ struct CloudImportPreview: Identifiable {
         localEditsConflict = anchor?.localDigest != nil && anchor?.localDigest != currentDigest
         bothChanged = localEditsConflict && anchor?.sharedDigest != profile.sharedDigest
         var changes: [String] = []
-        if current.scheduleMode != proposed.scheduleMode || current.intervalHours != proposed.intervalHours ||
-            current.dailyHour != proposed.dailyHour || current.dailyMinute != proposed.dailyMinute {
+        if current.scheduleMode != derived.scheduleMode || current.intervalHours != derived.intervalHours ||
+            current.dailyHour != derived.dailyHour || current.dailyMinute != derived.dailyMinute {
             changes.append("schedule")
         }
-        if current.conflictPolicy != proposed.conflictPolicy { changes.append("conflict") }
-        if current.backupRetentionDays != proposed.backupRetentionDays { changes.append("backup") }
-        if current.excludeLatexIntermediates != proposed.excludeLatexIntermediates { changes.append("latex") }
+        if current.conflictPolicy != derived.conflictPolicy { changes.append("conflict") }
+        if current.backupRetentionDays != derived.backupRetentionDays { changes.append("backup") }
+        if current.excludeLatexIntermediates != derived.excludeLatexIntermediates { changes.append("latex") }
         ruleChanges = changes
-        missingFolders = proposed.pairs.filter { pair in
-            !pair.localPath.isEmpty && !FileManager.default.fileExists(atPath: pair.localPath)
+        let folders: [String] = profile.effectivePairs.compactMap { (shared: CloudConfigPair) -> String? in
+            guard current.pairs.first(where: { $0.id == shared.id })?.localPath.isEmpty ?? true,
+                  let relative = importedLocalRelativePath(shared),
+                  let local = path(in: current.localRoot, relative: relative),
+                  derived.pairs.first(where: { $0.id == shared.id })?.localPath == local,
+                  !FileManager.default.fileExists(atPath: local) else { return nil }
+            return local
+        }
+        localFoldersToCreate = folders
+        missingFolders = derived.pairs.filter { pair in
+            !pair.localPath.isEmpty && !FileManager.default.fileExists(atPath: pair.localPath) &&
+                !folders.contains(pair.localPath)
         }.map { $0.name + ": " + $0.localPath }
     }
 }
 
+func createImportedLocalFolders(_ preview: CloudImportPreview) throws {
+    let fm = FileManager.default
+    var isDirectory: ObjCBool = false
+    guard fm.fileExists(atPath: preview.current.localRoot, isDirectory: &isDirectory),
+          isDirectory.boolValue else { throw CloudConfigError.localRootMissing }
+    guard (try? fm.destinationOfSymbolicLink(atPath: preview.current.localRoot)) == nil else {
+        throw CloudConfigError.unsafeLocalPath
+    }
+    let resolvedRoot = URL(fileURLWithPath: preview.current.localRoot).resolvingSymlinksInPath().path
+    for folder in preview.localFoldersToCreate {
+        guard let relative = relativePath(folder, within: preview.current.localRoot) else {
+            throw CloudConfigError.unsafeLocalPath
+        }
+        var cursor = URL(fileURLWithPath: preview.current.localRoot)
+        for component in relative.split(separator: "/") {
+            cursor.appendPathComponent(String(component))
+            if (try? fm.destinationOfSymbolicLink(atPath: cursor.path)) != nil {
+                throw CloudConfigError.unsafeLocalPath
+            }
+        }
+        let resolvedFolder = URL(fileURLWithPath: folder).resolvingSymlinksInPath().path
+        guard resolvedFolder.hasPrefix(resolvedRoot + "/"),
+              !preview.proposed.pairs.contains(where: { pair in
+                  let cloud = URL(fileURLWithPath: pair.cloudPath).resolvingSymlinksInPath().path
+                  return !pair.cloudPath.isEmpty &&
+                      (resolvedFolder == cloud || resolvedFolder.hasPrefix(cloud + "/") ||
+                       cloud.hasPrefix(resolvedFolder + "/"))
+              }) else { throw CloudConfigError.unsafeLocalPath }
+        if fm.fileExists(atPath: folder, isDirectory: &isDirectory), !isDirectory.boolValue {
+            throw CloudConfigError.unsafeLocalPath
+        }
+    }
+    for folder in preview.localFoldersToCreate where !fm.fileExists(atPath: folder) {
+        try fm.createDirectory(atPath: folder, withIntermediateDirectories: true)
+    }
+}
+
 enum CloudConfigError: LocalizedError {
-    case unavailable, invalid, tooLarge, conflict
+    case unavailable, invalid, tooLarge, conflict, localRootMissing, unsafeLocalPath
     var errorDescription: String? {
         switch self {
         case .unavailable: return "iCloud Drive 不可用。请在系统设置中开启 iCloud Drive。"
         case .invalid: return "iCloud 中的配置格式或路径无效。"
         case .tooLarge: return "配置超过 1 MB，已停止读取。"
         case .conflict: return "iCloud 配置文件存在多个版本，请先在 Finder 中检查。"
+        case .localRootMissing: return "本机工作根目录不存在。请先在设置中选择一个已有目录。"
+        case .unsafeLocalPath: return "推导的本地路径与云端路径重叠，或经过符号链接。请检查本机工作根目录。"
         }
     }
 }
@@ -226,6 +289,8 @@ func cloudConfigErrorText(_ error: Error, language: String) -> String {
     case .invalid: return "The iCloud configuration contains invalid data or paths."
     case .tooLarge: return "The configuration exceeds 1 MB and was not read."
     case .conflict: return "The iCloud configuration has multiple versions. Review it in Finder."
+    case .localRootMissing: return "The local working root does not exist. Choose an existing folder in Settings."
+    case .unsafeLocalPath: return "A derived local path overlaps a cloud path or crosses a symbolic link. Review the local working root."
     }
 }
 

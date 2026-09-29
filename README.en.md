@@ -5,7 +5,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 ## Features
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
-- Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names, rules, and paths relative to each Mac's chosen local working and OneDrive roots. Review the derived paths and rule changes before importing. Absolute paths, enabled state, history, backups, and synced file contents are not included. Local edits to shared rules are flagged before replacement; saved configurations can be rolled back from local snapshots.
+- Optionally share configuration through iCloud Drive on Macs signed in with the same Apple ID. Saving publishes pair names, rules, and paths relative to each Mac's chosen local working and OneDrive roots. The local working root defaults to `~/Documents`; import derives local paths and creates missing empty folders after preview. For older profiles without local relative paths, it derives them from the OneDrive relative paths. Absolute paths, enabled state, history, backups, and synced file contents are not included. New pairs remain disabled until reviewed. Local edits to shared rules are flagged before replacement; saved configurations can be rolled back from local snapshots.
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - Use the menu bar to see the pending review count, sync all folders, or reopen the main window or History after closing it.
 - The app runs from the menu bar without a running Dock icon. Quitting the UI does not disable the installed sync schedule.
@@ -24,7 +24,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.14.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.14.1) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

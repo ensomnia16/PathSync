@@ -72,6 +72,12 @@ private struct CloudImportPreviewSheet: View {
                             Text(pair.name).font(.caption)
                         }
                     }
+                    if !preview.localFoldersToCreate.isEmpty {
+                        Text(t("cloudFoldersToCreate")).font(.headline)
+                        ForEach(preview.localFoldersToCreate, id: \.self) {
+                            Text($0).font(.caption).textSelection(.enabled)
+                        }
+                    }
                     if !preview.missingFolders.isEmpty {
                         Text(t("cloudMissingFolders")).font(.headline)
                         ForEach(preview.missingFolders, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }

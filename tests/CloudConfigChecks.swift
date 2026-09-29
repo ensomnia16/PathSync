@@ -124,6 +124,47 @@ struct CloudConfigChecks {
         let withoutPlaceholder = try importing(legacyProfile, into: target)
         assert(legacyProfile.effectivePairs.count == profile.pairs.count)
         assert(withoutPlaceholder.pairs.count == profile.pairs.count)
+        assert(withoutPlaceholder.pairs[2].localPath == "/Users/bob/Documents/论文")
+
+        let legacyCity = CloudConfigPair(id: UUID(), name: "CityU Meeting",
+                                         scheduledDirection: "merge",
+                                         oneDriveRelativePath: "文档/研三/CityU Meeting",
+                                         localRelativePath: nil)
+        assert(importedLocalRelativePath(legacyCity) == "研三/CityU Meeting")
+        let nonDocuments = CloudConfigPair(id: UUID(), name: "Images",
+                                           scheduledDirection: "merge",
+                                           oneDriveRelativePath: "Pictures/Images",
+                                           localRelativePath: nil)
+        assert(importedLocalRelativePath(nonDocuments) == "Pictures/Images")
+
+        let newLocalRoot = temporary.appendingPathComponent("Documents", isDirectory: true)
+        let newCloudRoot = temporary.appendingPathComponent("OneDrive-Personal", isDirectory: true)
+        try FileManager.default.createDirectory(at: newLocalRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: newCloudRoot, withIntermediateDirectories: true)
+        var freshTarget = SyncConfig()
+        freshTarget.localRoot = newLocalRoot.path
+        freshTarget.oneDriveRoot = newCloudRoot.path
+        let legacyPreview = try CloudImportPreview(profile: legacyProfile, current: freshTarget)
+        assert(legacyPreview.proposed.pairs[0].localPath == newLocalRoot.appendingPathComponent("科研").path)
+        assert(legacyPreview.proposed.pairs[2].localPath == newLocalRoot.appendingPathComponent("论文").path)
+        assert(legacyPreview.localFoldersToCreate.count == 2)
+        assert(legacyPreview.proposed.pairs.allSatisfy { !$0.enabled })
+        try createImportedLocalFolders(legacyPreview)
+        assert(FileManager.default.fileExists(atPath: newLocalRoot.appendingPathComponent("科研").path))
+        assert(FileManager.default.fileExists(atPath: newLocalRoot.appendingPathComponent("论文").path))
+
+        let symlinkRoot = temporary.appendingPathComponent("UnsafeDocuments", isDirectory: true)
+        try FileManager.default.createDirectory(at: symlinkRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: symlinkRoot.appendingPathComponent("研三"),
+                                                     withDestinationURL: newCloudRoot)
+        var nestedSource = source
+        nestedSource.pairs = [SyncPair(name: "CityU Meeting",
+                                       localPath: "/Users/alice/Documents/研三/CityU Meeting",
+                                       cloudPath: originalRoot + "/文档/研三/CityU Meeting")]
+        let nestedProfile = CloudConfiguration(config: nestedSource, deviceID: alice, deviceName: "Alice Mac")
+        freshTarget.localRoot = symlinkRoot.path
+        let unsafePreview = try CloudImportPreview(profile: nestedProfile, current: freshTarget)
+        assert((try? createImportedLocalFolders(unsafePreview)) == nil)
 
         let folderA = temporary.appendingPathComponent("A", isDirectory: true)
         let folderChild = folderA.appendingPathComponent("child", isDirectory: true)
