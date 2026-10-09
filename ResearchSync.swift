@@ -314,15 +314,34 @@ private struct ConflictState: Decodable {
     let conflicts: [String: StoredConflict]?
 }
 
-func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
+/// Moves aside a merge state left over from the pair's previous roots when it holds no conflicts,
+/// so editing a pair's paths starts a fresh baseline instead of failing the consistency check.
+/// States that still hold conflicts are kept and keep failing, so no conflict record is lost.
+func retireStaleMergeState(_ pair: SyncPair) throws {
     let path = mergeStatePath(pair)
-    guard fm.fileExists(atPath: path) else { return [] }
+    guard fm.fileExists(atPath: path) else { return }
     let state = try JSONDecoder().decode(ConflictState.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
     let local = URL(fileURLWithPath: pair.localPath).standardizedFileURL.resolvingSymlinksInPath().path
     let cloud = URL(fileURLWithPath: pair.cloudPath).standardizedFileURL.resolvingSymlinksInPath().path
-    guard state.local == local, state.cloud == cloud else {
-        throw NSError(domain: appID, code: 10, userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」的路径与冲突记录不一致。请检查路径配置。"])
+    guard state.local != local || state.cloud != cloud else { return }
+    var isDirectory: ObjCBool = false
+    guard (state.conflicts ?? [:]).isEmpty,
+          fm.fileExists(atPath: local, isDirectory: &isDirectory), isDirectory.boolValue,
+          fm.fileExists(atPath: cloud, isDirectory: &isDirectory), isDirectory.boolValue else {
+        throw NSError(domain: appID, code: 10, userInfo: [NSLocalizedDescriptionKey:
+            "「\(pair.name)」的路径与冲突记录不一致：记录对应 \(state.local)，当前为 \(local)。请先在原路径处理完冲突，或检查路径配置。"])
     }
+    let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
+    let retired = URL(fileURLWithPath: path).deletingPathExtension().path + ".retired-\(stamp).json"
+    try fm.moveItem(atPath: path, toPath: retired)
+    appendLog("「\(pair.name)」路径已从 \(state.local) 改为 \(local)，旧合并状态已移至 \(retired)")
+}
+
+func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
+    try retireStaleMergeState(pair)
+    let path = mergeStatePath(pair)
+    guard fm.fileExists(atPath: path) else { return [] }
+    let state = try JSONDecoder().decode(ConflictState.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
     let records = state.conflicts ?? [:]
     let treeNames = records.compactMap { name, record in record.kind == "tree" ? name : nil }
     return records.map { name, record in
@@ -361,6 +380,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
                      language: String, progress: ((String) -> Void)?) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
+    try retireStaleMergeState(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
