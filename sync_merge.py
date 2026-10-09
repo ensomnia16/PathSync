@@ -334,7 +334,102 @@ def backup_root(state_path):
     return state_path.parent / (state_path.stem + '-backups')
 
 
-def backup_file(state_path, root, name, side, reason, retention_days):
+def conflict_backup_root(state_path):
+    return state_path.parent / (state_path.stem + '-conflict-backups')
+
+
+PENDING_MOVE = '.pending-move'
+
+
+def within_or_same(path, other):
+    return path == other or str(path).startswith(str(other).rstrip('/') + '/')
+
+
+class BackupPlace:
+    """Where this pair's backups live: beside the merge state, or in a chosen folder.
+
+    A chosen folder (iCloud Drive, OneDrive, ...) may be offline. A backup is
+    then kept beside the merge state with a marker and moved on a later run;
+    restore and retention cleanup look in both places."""
+
+    def __init__(self, args):
+        self.local = {'backups': backup_root(args.state),
+                      'conflict-backups': conflict_backup_root(args.state)}
+        self.remote = None
+        self.available = False
+        self.dry_run = args.dry_run
+        self.written = {}
+        if args.backup_root is None:
+            return
+        relative = Path(args.backup_subpath or '')
+        if relative.is_absolute() or not relative.parts or '..' in relative.parts:
+            raise ValueError('备份子目录无效')
+        base = Path(args.backup_root).resolve()
+        self.remote = base / relative
+        for sync_root in (args.local, args.cloud):
+            if within_or_same(self.remote, sync_root) or within_or_same(sync_root, self.remote):
+                raise ValueError('备份位置不能位于同步路径内，也不能包含同步路径')
+        # Never create the chosen folder itself: a missing OneDrive mount would
+        # otherwise turn into an ordinary local folder at the same path.
+        self.available = base.is_dir() and os.access(base, os.W_OK)
+
+    def targets(self, kind):
+        if self.available and not self.dry_run:
+            return [(self.remote / kind, True), (self.local[kind], False)]
+        return [(self.local[kind], False)]
+
+    def pending(self):
+        return self.remote is not None
+
+    def failed(self, error):
+        if self.available:
+            print(f'BACKUP_FALLBACK\t{self.remote}\t备份位置暂不可用，先存放在本机：{error}')
+        self.available = False
+
+    def roots(self, kind):
+        found = [self.local[kind]]
+        if self.remote is not None and self.available:
+            found.insert(0, self.remote / kind)
+        return found
+
+    def find(self, backup_id):
+        if backup_id in self.written:
+            return self.written[backup_id]
+        candidates = [self.local['backups'] / backup_id]
+        if self.remote is not None:
+            candidates.insert(0, self.remote / 'backups' / backup_id)
+        for directory in candidates:
+            if (directory / 'manifest.json').is_file() and not directory.is_symlink():
+                return directory
+        return None
+
+
+def write_backup(directory, source, before, content_hash, metadata, remote, pending):
+    directory.mkdir(parents=True, exist_ok=False)
+    try:
+        payload = directory / 'content'
+        copy_atomic(source, payload, before, None)
+        if digest(payload) != content_hash or signature(source) != before:
+            raise OSError('备份校验失败，已取消覆盖或删除')
+        with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=directory,
+                                         prefix='manifest.', delete=False) as target:
+            json.dump(metadata, target, ensure_ascii=False, sort_keys=True)
+            target.flush()
+            os.fsync(target.fileno())
+            temporary = Path(target.name)
+        os.replace(temporary, directory / 'manifest.json')
+        written = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
+        if written.get('sha256') != content_hash or digest(payload) != content_hash:
+            raise OSError('备份写入后校验失败')
+        if pending:
+            (directory / PENDING_MOVE).write_text('', encoding='utf-8')
+    except BaseException:
+        if remote:
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def backup_file(args, root, name, side, reason, retention_days):
     source = safe_path(root, name)
     before = signature(source)
     if before is None:
@@ -343,27 +438,103 @@ def backup_file(state_path, root, name, side, reason, retention_days):
     if signature(source) != before:
         raise OSError('备份期间文件发生变化，已取消覆盖或删除')
     backup_id = uuid.uuid4().hex
-    directory = backup_root(state_path) / backup_id
-    directory.mkdir(parents=True, exist_ok=False)
-    payload = directory / 'content'
-    copy_atomic(source, payload, before, None)
-    if digest(payload) != content_hash or signature(source) != before:
-        raise OSError('备份校验失败，已取消覆盖或删除')
     created = datetime.now(timezone.utc)
     metadata = {'id': backup_id, 'name': name, 'side': side, 'reason': reason,
                 'root': str(root), 'createdAt': created.isoformat(),
                 'createdAtEpoch': created.timestamp(),
                 'retentionDays': retention_days, 'sha256': content_hash,
                 'size': before[0]}
-    with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=directory,
-                                     prefix='manifest.', delete=False) as target:
-        json.dump(metadata, target, ensure_ascii=False, sort_keys=True)
-        target.flush()
-        os.fsync(target.fileno())
-        temporary = Path(target.name)
-    os.replace(temporary, directory / 'manifest.json')
+    place = args.backups
+    for target_root, remote in place.targets('backups'):
+        directory = target_root / backup_id
+        try:
+            write_backup(directory, source, before, content_hash, metadata,
+                         remote, pending=not remote and place.pending())
+        except OSError as error:
+            if not remote:
+                raise
+            place.failed(error)
+            continue
+        place.written[backup_id] = directory
+        break
     print(f'BACKUP\t{name}\tside={side}\tid={backup_id}\treason={reason}')
     return backup_id
+
+
+def backup_manifest(args, backup_id):
+    return json.loads((args.backups.find(backup_id) / 'manifest.json').read_text(encoding='utf-8'))
+
+
+def backup_leaves(root, kind):
+    """Each backup is <id>/ under backups and <file key>/<versions>/ under conflict backups."""
+    if not root.is_dir() or root.is_symlink():
+        return []
+    children = [item for item in root.iterdir() if item.is_dir() and not item.is_symlink()
+                and '.partial-' not in item.name]
+    if kind == 'backups':
+        return sorted(children)
+    return sorted(version for key in children for version in key.iterdir()
+                  if version.is_dir() and not version.is_symlink()
+                  and '.partial-' not in version.name)
+
+
+def move_verified(source, target):
+    """Copy one backup directory, verify every byte, and only then remove the source."""
+    members = sorted(item for item in source.rglob('*')
+                     if item.is_file() and not item.is_symlink() and item.name != PENDING_MOVE)
+    if target.exists():
+        for item in members:
+            existing = target / item.relative_to(source)
+            if not existing.is_file() or digest(existing) != digest(item):
+                raise OSError(f'目标位置已有内容不同的同名备份：{target}')
+    else:
+        staging = target.with_name(target.name + '.partial-' + uuid.uuid4().hex[:8])
+        staging.mkdir(parents=True)
+        try:
+            for item in members:
+                destination = staging / item.relative_to(source)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                copy_atomic(item, destination, signature(item), None)
+                if digest(destination) != digest(item):
+                    raise OSError(f'复制后校验失败：{destination}')
+            manifest = staging / 'manifest.json'
+            if manifest.is_file():
+                expected = json.loads(manifest.read_text(encoding='utf-8')).get('sha256')
+                if expected and digest(staging / 'content') != expected:
+                    raise OSError('备份内容与清单校验值不一致')
+            os.rename(staging, target)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    shutil.rmtree(source)
+
+
+def move_backups(args, only_pending):
+    """Move local backups to the chosen backup folder; return (moved, failed)."""
+    place = args.backups
+    if place.remote is None:
+        raise ValueError('尚未设置本机以外的备份位置')
+    if not place.available:
+        if only_pending:
+            return 0, 0
+        raise OSError(f'备份位置当前不可用：{place.remote}')
+    moved = failed = 0
+    for kind in ('backups', 'conflict-backups'):
+        local_root = place.local[kind]
+        for directory in backup_leaves(local_root, kind):
+            if only_pending and not (directory / PENDING_MOVE).exists():
+                continue
+            relative = directory.relative_to(local_root)
+            try:
+                move_verified(directory, place.remote / kind / relative)
+                moved += 1
+                print(f'MOVED_BACKUP\t{kind}/{relative.as_posix()}')
+            except OSError as error:
+                failed += 1
+                print(f'BACKUP_PENDING\t{kind}/{relative.as_posix()}\t备份暂未移动，仍保留在本机：{error}')
+            if kind == 'conflict-backups' and directory.parent.is_dir() and not any(directory.parent.iterdir()):
+                directory.parent.rmdir()
+    return moved, failed
 
 
 def copy_protected(args, source, destination, source_sig, destination_sig,
@@ -373,12 +544,11 @@ def copy_protected(args, source, destination, source_sig, destination_sig,
     if signature(source) != source_sig or signature(destination) != destination_sig:
         raise OSError('文件在备份前发生变化，已跳过本次复制')
     if destination_sig is not None:
-        backup_id = backup_file(args.state, args.local if destination_side == 'local' else args.cloud,
+        backup_id = backup_file(args, args.local if destination_side == 'local' else args.cloud,
                                 name, destination_side, reason, args.backup_retention_days)
         if backup_id:
             args.backup_count += 1
-            if json.loads((backup_root(args.state) / backup_id / 'manifest.json').read_text(
-                    encoding='utf-8'))['sha256'] != destination_hash:
+            if backup_manifest(args, backup_id)['sha256'] != destination_hash:
                 raise OSError('目标文件在备份期间发生变化，已取消覆盖')
     copy_atomic(source, destination, source_sig, destination_sig,
                 source_hash, destination_hash)
@@ -389,20 +559,23 @@ def delete_protected(args, root, name, side):
     before = signature(target)
     if before is None:
         return
-    backup_id = backup_file(args.state, root, name, side, 'delete', args.backup_retention_days)
+    backup_id = backup_file(args, root, name, side, 'delete', args.backup_retention_days)
     if backup_id is None:
         raise OSError('删除前文件已改变，已取消删除')
     args.backup_count += 1
-    backed_up_hash = json.loads((backup_root(args.state) / backup_id / 'manifest.json').read_text(
-        encoding='utf-8'))['sha256']
+    backed_up_hash = backup_manifest(args, backup_id)['sha256']
     if signature(target) != before or digest(target) != backed_up_hash:
         raise OSError('删除前文件发生变化，已取消删除')
     target.unlink()
     print(f'DELETED\t{name}\tside={side}')
 
 
-def prune_backups(state_path, retention_days):
-    root = backup_root(state_path)
+def prune_backups(args, retention_days):
+    for root in args.backups.roots('backups'):
+        prune_backup_root(root, retention_days)
+
+
+def prune_backup_root(root, retention_days):
     if not root.exists():
         return
     now = datetime.now(timezone.utc)
@@ -426,7 +599,9 @@ def restore_backup(args, local, cloud):
     backup_id = args.restore
     if not re.fullmatch(r'[0-9a-f]{32}', backup_id):
         raise ValueError('无效的备份 ID')
-    directory = backup_root(args.state) / backup_id
+    directory = args.backups.find(backup_id)
+    if directory is None:
+        raise OSError('找不到这个备份；备份位置可能暂时不可用')
     metadata = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
     if metadata.get('id') != backup_id or metadata.get('side') not in ('local', 'cloud'):
         raise ValueError('备份信息无效')
@@ -440,7 +615,7 @@ def restore_backup(args, local, cloud):
         raise OSError('备份内容校验失败，已取消恢复')
     existing = signature(destination)
     if existing is not None:
-        backup_file(args.state, root, name, metadata['side'], 'restore-overwrite',
+        backup_file(args, root, name, metadata['side'], 'restore-overwrite',
                     args.backup_retention_days)
     copy_atomic(payload, destination, signature(payload), existing)
     print(f'RESTORED\t{name}\tside={metadata["side"]}\tfrom={backup_id}')
@@ -493,16 +668,27 @@ def backup_original(source, destination, expected_hash):
         raise OSError(f'备份文件校验失败：{destination}')
 
 
-def backup_pair(state_path, name, local_file, cloud_file, local_sig, cloud_sig, hashes):
+def backup_pair(args, name, local_file, cloud_file, local_sig, cloud_sig, hashes):
     key = hashlib.sha256(name.encode('utf-8')).hexdigest()[:16]
     version = hashes[0][:12] + '-' + hashes[1][:12]
-    backup_dir = state_path.parent / (state_path.stem + '-conflict-backups') / key / version
     suffix = local_file.suffix
-    local_backup = backup_dir / ('local' + suffix)
-    cloud_backup = backup_dir / ('cloud' + suffix)
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_original(local_file, local_backup, hashes[0])
-    backup_original(cloud_file, cloud_backup, hashes[1])
+    place = args.backups
+    for target_root, remote in place.targets('conflict-backups'):
+        backup_dir = target_root / key / version
+        local_backup = backup_dir / ('local' + suffix)
+        cloud_backup = backup_dir / ('cloud' + suffix)
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup_original(local_file, local_backup, hashes[0])
+            backup_original(cloud_file, cloud_backup, hashes[1])
+            if not remote and place.pending():
+                (backup_dir / PENDING_MOVE).write_text('', encoding='utf-8')
+        except OSError as error:
+            if not remote:
+                raise
+            place.failed(error)
+            continue
+        break
     if checked_digests(local_file, cloud_file, local_sig, cloud_sig) != hashes:
         raise OSError('备份期间文件发生变化；请重新同步')
     return backup_dir, local_backup, cloud_backup
@@ -514,7 +700,7 @@ def preserve_both(args, local, cloud, name, local_sig, cloud_sig, hashes,
     local_file = safe_path(local, name)
     cloud_file = safe_path(cloud, name)
     backup_dir, local_backup, cloud_backup = backups or backup_pair(
-        state_path, name, local_file, cloud_file, local_sig, cloud_sig, hashes)
+        args, name, local_file, cloud_file, local_sig, cloud_sig, hashes)
     secondary = 'cloud' if primary == 'local' else 'local'
     secondary_hash = hashes[1] if primary == 'local' else hashes[0]
     secondary_backup = cloud_backup if primary == 'local' else local_backup
@@ -561,6 +747,12 @@ def sync_files(args, local, cloud, files, conflicts):
     tree_record_names = {name for name, record in active_conflicts.items()
                          if record.get('kind') == 'tree'}
     blocked_directories = set()
+    plan = []
+
+    def planned(action, name, **detail):
+        # Only a preview reports individual planned actions; it never writes.
+        if args.dry_run:
+            plan.append({'action': action, 'name': name, **detail})
 
     def blocked(name):
         return any(name == directory or within_directory(name, directory)
@@ -586,10 +778,12 @@ def sync_files(args, local, cloud, files, conflicts):
                 continue
             blocked_directories.add(directory)
             print(f'CONFLICT\t{directory}\t目录删除与内部修改尚未解决，已暂停整个目录')
+            planned('conflict', directory, kind='tree')
             counts['conflicts'] += 1
         except (OSError, ValueError) as error:
             blocked_directories.add(directory)
             print(f'FAILED\t{directory}\t无法核验目录冲突：{error}')
+            planned('failed', directory, detail=str(error))
             counts['failed'] += 1
 
     anchored_directories = {directory for name, record in active_files.items()
@@ -631,10 +825,12 @@ def sync_files(args, local, cloud, files, conflicts):
                     'local': None, 'cloud': None,
                     'detectedAt': datetime.now(timezone.utc).isoformat()}
             print(f'CONFLICT\t{directory}\t目录删除与内部修改冲突，已暂停整个目录')
+            planned('conflict', directory, kind='tree')
             counts['conflicts'] += 1
         except (OSError, ValueError) as error:
             blocked_directories.add(directory)
             print(f'FAILED\t{directory}\t无法核验目录状态：{error}')
+            planned('failed', directory, detail=str(error))
             counts['failed'] += 1
 
     # New cloud-only files are independent of the existing anchor. Import the
@@ -650,7 +846,9 @@ def sync_files(args, local, cloud, files, conflicts):
             return float('inf'), name
 
     import_names = sorted(new_cloud_only, key=import_priority)
-    prefetch = CloudPrefetch(cloud, import_names)
+    # A preview never needs the content of a file that exists on one side only,
+    # so it does not ask the cloud provider to download placeholders.
+    prefetch = CloudPrefetch(cloud, [] if args.dry_run else import_names)
     ordered_names = sorted(names - new_cloud_only) + import_names
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
@@ -665,6 +863,7 @@ def sync_files(args, local, cloud, files, conflicts):
         prefetch_error = prefetch.check(name)
         if prefetch_error:
             print(f'FAILED\t{name}\t{prefetch_error}')
+            planned('failed', name, detail=prefetch_error)
             counts['failed'] += 1
             continue
         try:
@@ -693,6 +892,20 @@ def sync_files(args, local, cloud, files, conflicts):
                     if previous is not None:
                         next_files[name] = aligned(name, None, None, None)
                     clear_pending(next_conflicts, name)
+                continue
+
+            if (args.dry_run and previous is None and name not in conflicts
+                    and (local_sig is None) != (cloud_sig is None)):
+                # A first copy has no anchor to compare with: its outcome does
+                # not depend on the content, so a preview skips reading it.
+                upload = local_sig is not None
+                if (upload and args.direction == 'download') or (
+                        not upload and args.direction == 'upload'):
+                    counts['skipped'] += 1
+                    continue
+                planned('upload' if upload else 'download', name,
+                        size=(local_sig if upload else cloud_sig)[0])
+                counts['uploaded' if upload else 'downloaded'] += 1
                 continue
 
             if review and (local_sig is None or cloud_sig is None):
@@ -767,6 +980,7 @@ def sync_files(args, local, cloud, files, conflicts):
                             next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes,
                                                                     'same_mtime')
                         print(f'CONFLICT\t{name}\t修改时间相同但内容不同，等待人工选择')
+                        planned('conflict', name, reason='same_mtime')
                         counts['conflicts'] += 1
                         continue
                     upload = local_sig[1] > cloud_sig[1]
@@ -776,6 +990,7 @@ def sync_files(args, local, cloud, files, conflicts):
                             next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes,
                                                                     'newest_opposes_direction')
                         print(f'CONFLICT\t{name}\t较新版本与指定单向同步方向相反，未覆盖任何一侧')
+                        planned('conflict', name, reason='newest_opposes_direction')
                         counts['conflicts'] += 1
                         continue
                     if not args.dry_run:
@@ -790,6 +1005,7 @@ def sync_files(args, local, cloud, files, conflicts):
                         print(f'NEWEST\t{name}\tside={"local" if upload else "cloud"}')
                     else:
                         print(f'WOULD_KEEP_NEWEST\t{name}\tside={"local" if upload else "cloud"}')
+                        planned('newest', name, side='local' if upload else 'cloud')
                     counts['newest'] += 1
                     counts['uploaded' if upload else 'downloaded'] += 1
                     continue
@@ -823,6 +1039,7 @@ def sync_files(args, local, cloud, files, conflicts):
                         print(f'KEPT_BOTH\t{name}\tcopy={sidecar_name}\tbackup={backup_dir}')
                     else:
                         print(f'WOULD_KEEP_BOTH\t{name}')
+                        planned('keep_both', name)
                     counts['kept_both'] += 1
                 else:
                     reason = ('delete_edit' if local_sig is None or cloud_sig is None else
@@ -831,6 +1048,7 @@ def sync_files(args, local, cloud, files, conflicts):
                     if not args.dry_run:
                         next_conflicts[name] = conflict_record(local_sig, cloud_sig, hashes, reason)
                     print(f'CONFLICT\t{name}\t两侧内容不同，等待选择版本')
+                    planned('conflict', name, reason=reason)
                     counts['conflicts'] += 1
                 continue
 
@@ -856,20 +1074,26 @@ def sync_files(args, local, cloud, files, conflicts):
             else:
                 if source_sig is None:
                     print(f'WOULD_DELETE\t{name}\tside={"cloud" if upload else "local"}')
+                    planned('delete', name, side='cloud' if upload else 'local')
+                else:
+                    planned('upload' if upload else 'download', name, size=source_sig[0])
             counts['deleted' if source_sig is None else 'uploaded' if upload else 'downloaded'] += 1
         except (OSError, ValueError) as error:
             print(f'FAILED\t{name}\t{error}')
+            planned('failed', name, detail=str(error))
             counts['failed'] += 1
 
     prefetch.close()
     for path, error in errors:
         print(f'FAILED\t{path}\t{error}')
+        planned('failed', path, detail=error)
         counts['failed'] += 1
     for name, record in sorted(next_conflicts.items()):
         if excluded_path(name, args, directory=record.get('kind') == 'tree'):
             continue
         if is_review(record):
             print(f'NEEDS_REVIEW\t{name}\tcopy={record["sidecar"]}')
+            planned('review', name, copy=record['sidecar'])
             counts['reviews'] += 1
             try:
                 if (signature(safe_path(local, record['sidecar'])) is None
@@ -883,8 +1107,11 @@ def sync_files(args, local, cloud, files, conflicts):
         counts['conflicts'] = sum(not is_review(record) for name, record in next_conflicts.items()
                                   if not excluded_path(name, args,
                                                        directory=record.get('kind') == 'tree'))
-        prune_backups(args.state, args.backup_retention_days)
+        prune_backups(args, args.backup_retention_days)
     counts['backups'] = args.backup_count
+    if args.plan_json:
+        print('PLAN_JSON\t' + json.dumps({'direction': args.direction, 'items': plan,
+                                          'counts': counts}, ensure_ascii=False))
     print(' '.join(f'{key}={value}' for key, value in counts.items()))
     return 2 if counts['conflicts'] or counts['failed'] else 0
 
@@ -942,7 +1169,7 @@ def resolve_conflict(args, local, cloud, files, conflicts):
             raise ValueError('两侧修改时间相同，无法自动选出较新版本')
         args.choice = 'local' if local_sig[1] > cloud_sig[1] else 'cloud'
 
-    backups = backup_pair(args.state, name, local_file, cloud_file,
+    backups = backup_pair(args, name, local_file, cloud_file,
                           local_sig, cloud_sig, hashes)
     backup_dir, local_backup, cloud_backup = backups
 
@@ -1081,12 +1308,26 @@ def main():
     parser.add_argument('--skip-claude', action='store_true')
     parser.add_argument('--include-temp', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--plan-json', action='store_true',
+                        help='with --dry-run, also print the planned actions as one JSON line')
     parser.add_argument('--resolve', metavar='RELATIVE_PATH')
     parser.add_argument('--acknowledge', metavar='RELATIVE_PATH')
     parser.add_argument('--review-newest', metavar='RELATIVE_PATH')
     parser.add_argument('--restore', metavar='BACKUP_ID')
     parser.add_argument('--choice', choices=('local', 'cloud', 'both', 'newest'))
+    parser.add_argument('--backup-root', type=Path,
+                        help='existing folder (iCloud Drive, OneDrive, ...) that holds backups')
+    parser.add_argument('--backup-subpath', help='this pair\'s folder relative to --backup-root')
+    parser.add_argument('--migrate-backups', action='store_true',
+                        help='move existing local backups to --backup-root, verifying each copy')
     args = parser.parse_args()
+    if (args.backup_root is None) != (args.backup_subpath is None):
+        parser.error('--backup-root and --backup-subpath must be given together')
+    if args.migrate_backups and (args.backup_root is None or args.resolve or args.acknowledge
+                                 or args.review_newest or args.restore or args.dry_run):
+        parser.error('--migrate-backups requires --backup-root and no other action')
+    if args.plan_json and not args.dry_run:
+        parser.error('--plan-json requires --dry-run')
     if args.resolve and (not args.choice or args.dry_run):
         parser.error('--resolve requires --choice and cannot be combined with --dry-run')
     if args.choice and not args.resolve:
@@ -1103,7 +1344,17 @@ def main():
     cloud = args.cloud.resolve()
     args.local, args.cloud = local, cloud
     args.backup_count = 0
+    args.backups = BackupPlace(args)
+    if args.migrate_backups:
+        moved, failed = move_backups(args, only_pending=False)
+        print(f'backups_moved={moved} backups_pending={failed}')
+        return 2 if failed else 0
     files, conflicts = load_state(args.state, local, cloud)
+    if not (args.dry_run or args.restore):
+        # Backups kept here while the chosen folder was offline move there now.
+        moved, _ = move_backups(args, only_pending=True) if args.backups.remote else (0, 0)
+        if moved:
+            print(f'BACKUPS_MOVED\t{moved}')
     if args.restore:
         return restore_backup(args, local, cloud)
     if args.review_newest:

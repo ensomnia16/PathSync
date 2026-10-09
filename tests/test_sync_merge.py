@@ -94,6 +94,241 @@ class MergeTests(unittest.TestCase):
         self.assertFalse(self.state.exists())
         self.assertFalse(list(self.local.glob('paper (* conflict *).tex')))
 
+    def snapshot_everything(self):
+        """Every path, byte and timestamp under the test root, including state."""
+        found = {}
+        for path in sorted(self.root.rglob('*')):
+            info = path.lstat()
+            found[path.relative_to(self.root).as_posix()] = (
+                path.read_bytes() if path.is_file() else None, info.st_mtime_ns, info.st_mode)
+        return found
+
+    def plan(self, result):
+        lines = [line for line in result.stdout.splitlines() if line.startswith('PLAN_JSON\t')]
+        self.assertEqual(len(lines), 1, result.stdout + result.stderr)
+        return json.loads(lines[0].split('\t', 1)[1])
+
+    def test_plan_json_lists_every_planned_action_without_writing(self):
+        for name in ('keep.tex', 'gone.tex', 'both.tex', 'edited.tex'):
+            (self.local / name).write_text('base ' + name)
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        (self.local / 'new local.tex').write_text('fresh local')
+        (self.cloud / 'sub').mkdir()
+        (self.cloud / 'sub' / 'new cloud.tex').write_text('fresh cloud')
+        (self.local / 'gone.tex').unlink()
+        (self.local / 'both.tex').write_text('local side')
+        (self.cloud / 'both.tex').write_text('cloud side')
+        (self.cloud / 'edited.tex').write_text('cloud edit')
+        before = self.snapshot_everything()
+        result = self.run_merge('--dry-run', '--plan-json', policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.snapshot_everything(), before)
+        plan = self.plan(result)
+        actions = {(item['action'], item['name']) for item in plan['items']}
+        self.assertEqual(actions, {
+            ('upload', 'new local.tex'), ('download', 'sub/new cloud.tex'),
+            ('download', 'edited.tex'), ('delete', 'gone.tex'), ('keep_both', 'both.tex')})
+        deletion = next(item for item in plan['items'] if item['action'] == 'delete')
+        self.assertEqual(deletion['side'], 'cloud')
+        upload = next(item for item in plan['items'] if item['action'] == 'upload')
+        self.assertEqual(upload['size'], len('fresh local'))
+        self.assertEqual(plan['direction'], 'merge')
+        self.assertEqual(plan['counts']['uploaded'], 1)
+        self.assertEqual(plan['counts']['downloaded'], 2)
+        self.assertEqual(plan['counts']['deleted'], 1)
+        self.assertEqual(plan['counts']['kept_both'], 1)
+        self.assertIn('uploaded=1 downloaded=2', result.stdout)
+
+    def test_plan_json_reports_conflicts_reviews_and_skips(self):
+        (self.local / 'paper.tex').write_text('base')
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        (self.cloud / 'only cloud.tex').write_text('cloud')
+        before = self.snapshot_everything()
+        ask = self.run_merge('--dry-run', '--plan-json', '--direction', 'upload', policy='ask')
+        self.assertEqual(ask.returncode, 2, ask.stdout + ask.stderr)
+        self.assertEqual(self.snapshot_everything(), before)
+        plan = self.plan(ask)
+        self.assertEqual([(item['action'], item['name']) for item in plan['items']],
+                         [('conflict', 'paper.tex')])
+        self.assertEqual(plan['counts']['skipped'], 1)
+        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        before = self.snapshot_everything()
+        review = self.run_merge('--dry-run', '--plan-json', policy='keep-both')
+        self.assertEqual(self.snapshot_everything(), before)
+        items = self.plan(review)['items']
+        self.assertEqual([item['action'] for item in items], ['review'])
+        self.assertTrue(items[0]['copy'].startswith('paper (cloud conflict '))
+
+    def test_preview_does_not_read_files_that_exist_on_one_side_only(self):
+        unreadable = self.cloud / 'placeholder.pdf'
+        unreadable.write_text('cloud only content')
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o600)
+        result = self.run_merge('--dry-run', '--plan-json')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.plan(result)['items'],
+                         [{'action': 'download', 'name': 'placeholder.pdf',
+                           'size': len('cloud only content')}])
+        self.assertFalse(self.state.exists())
+
+    def test_plan_json_requires_dry_run(self):
+        result = self.run_merge('--plan-json')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--plan-json requires --dry-run', result.stderr)
+        self.assertFalse(self.state.exists())
+
+    def backup_args(self, base):
+        return ['--backup-root', str(base), '--backup-subpath', 'PathSync/Backups/pair']
+
+    def test_backups_go_to_chosen_folder_and_restore_from_there(self):
+        drive = self.root / 'drive'
+        drive.mkdir()
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge(*self.backup_args(drive)).returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        result = self.run_merge(*self.backup_args(drive))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        remote = drive / 'PathSync/Backups/pair/backups' / backup_id
+        self.assertEqual((remote / 'content').read_text(), 'anchor')
+        self.assertFalse((remote / sync_merge.PENDING_MOVE).exists())
+        self.assertFalse((self.root / 'state-backups').exists())
+        self.assertEqual(json.loads((remote / 'manifest.json').read_text())['sha256'],
+                         hashlib.sha256(b'anchor').hexdigest())
+        restored = self.run_merge('--restore', backup_id, *self.backup_args(drive))
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'anchor')
+
+    def test_conflict_backups_use_chosen_folder(self):
+        drive = self.root / 'drive'
+        drive.mkdir()
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        result = self.run_merge(*self.backup_args(drive), policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        backup = Path(result.stdout.split('backup=', 1)[1].splitlines()[0])
+        self.assertTrue(str(backup).startswith(
+            str(drive.resolve() / 'PathSync/Backups/pair/conflict-backups')))
+        self.assertEqual((backup / 'cloud.tex').read_text(), 'cloud')
+        self.assertFalse((self.root / 'state-conflict-backups').exists())
+
+    def test_offline_folder_keeps_backup_locally_then_moves_it(self):
+        drive = self.root / 'offline drive'
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge(*self.backup_args(drive)).returncode, 0)
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        result = self.run_merge(*self.backup_args(drive))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(drive.exists(), 'a missing backup folder must not be created')
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        local_copy = self.root / 'state-backups' / backup_id
+        self.assertTrue((local_copy / sync_merge.PENDING_MOVE).exists())
+        offline_restore = self.run_merge('--restore', backup_id, *self.backup_args(drive))
+        self.assertEqual(offline_restore.returncode, 0, offline_restore.stdout + offline_restore.stderr)
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'anchor')
+        (self.local / 'paper.tex').write_text('cloud edit')
+        drive.mkdir()
+        moved = self.run_merge(*self.backup_args(drive))
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        self.assertIn('BACKUPS_MOVED\t', moved.stdout)
+        remote = drive / 'PathSync/Backups/pair/backups' / backup_id
+        self.assertEqual((remote / 'content').read_text(), 'anchor')
+        self.assertFalse((remote / sync_merge.PENDING_MOVE).exists())
+        self.assertFalse(local_copy.exists())
+        restored = self.run_merge('--restore', backup_id, *self.backup_args(drive))
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_failed_remote_write_falls_back_to_local_copy(self):
+        drive = self.root / 'drive'
+        drive.mkdir()
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge(*self.backup_args(drive)).returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        args = mock.Mock(state=self.state, dry_run=False, local=self.local.resolve(),
+                         cloud=self.cloud.resolve(), backup_root=drive,
+                         backup_subpath='PathSync/Backups/pair', backup_retention_days=15)
+        args.backups = sync_merge.BackupPlace(args)
+        real_write = sync_merge.write_backup
+
+        def failing_remote(directory, *rest, **options):
+            if str(directory).startswith(str(drive.resolve())):
+                directory.mkdir(parents=True)
+                (directory / 'content').write_text('partial')
+                raise OSError('provider rejected the write')
+            return real_write(directory, *rest, **options)
+
+        with mock.patch.object(sync_merge, 'write_backup', side_effect=failing_remote):
+            backup_id = sync_merge.backup_file(args, self.cloud.resolve(), 'paper.tex',
+                                               'cloud', 'overwrite', 15)
+        local_copy = self.root / 'state-backups' / backup_id
+        self.assertEqual((local_copy / 'content').read_text(), 'anchor')
+        self.assertTrue((local_copy / sync_merge.PENDING_MOVE).exists())
+        self.assertEqual(args.backups.find(backup_id), local_copy)
+        self.assertFalse(args.backups.available)
+
+    def test_migrate_moves_all_local_backups_after_verifying(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        result = self.run_merge()
+        backup_id = re.search(r'id=([0-9a-f]{32})', result.stdout).group(1)
+        (self.local / 'other.tex').write_text('local')
+        (self.cloud / 'other.tex').write_text('cloud')
+        kept = self.run_merge(policy='keep-both')
+        conflict_backup = Path(kept.stdout.split('backup=', 1)[1].splitlines()[0])
+        self.assertTrue(conflict_backup.exists())
+        drive = self.root / 'drive'
+        drive.mkdir()
+        moved = self.run_merge('--migrate-backups', *self.backup_args(drive))
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+        # Two overwrite backups plus the pair of conflict originals.
+        self.assertIn('backups_moved=3', moved.stdout)
+        base = drive / 'PathSync/Backups/pair'
+        self.assertEqual((base / 'backups' / backup_id / 'content').read_text(), 'anchor')
+        relative = conflict_backup.relative_to(self.root / 'state-conflict-backups')
+        self.assertEqual((base / 'conflict-backups' / relative / 'cloud.tex').read_text(), 'cloud')
+        self.assertFalse((self.root / 'state-backups' / backup_id).exists())
+        self.assertFalse(conflict_backup.exists())
+        offline = self.run_merge('--migrate-backups', '--backup-root', str(self.root / 'missing'),
+                                 '--backup-subpath', 'pair')
+        self.assertEqual(offline.returncode, 2)
+
+    def test_move_keeps_source_when_copy_does_not_verify(self):
+        source = self.root / 'source-backup'
+        source.mkdir()
+        (source / 'content').write_text('payload')
+        (source / 'manifest.json').write_text(json.dumps(
+            {'sha256': hashlib.sha256(b'something else').hexdigest()}))
+        target = self.root / 'remote' / 'backup'
+        with self.assertRaises(OSError):
+            sync_merge.move_verified(source, target)
+        self.assertTrue((source / 'content').exists())
+        self.assertFalse(target.exists())
+        self.assertFalse(list((self.root / 'remote').glob('*.partial-*')))
+
+    def test_backup_folder_cannot_overlap_sync_paths(self):
+        for base, subpath in ((self.cloud, 'backups'), (self.root.parent, self.root.name)):
+            result = self.run_merge('--backup-root', str(base), '--backup-subpath', subpath)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        inside = self.run_merge('--backup-root', str(self.cloud), '--backup-subpath', 'backups')
+        self.assertIn('备份位置不能位于同步路径内', inside.stderr)
+        self.assertFalse((self.cloud / 'backups').exists())
+        self.assertFalse(self.state.exists())
+
+    def test_preview_never_writes_to_backup_folder(self):
+        drive = self.root / 'drive'
+        drive.mkdir()
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'paper.tex').write_text('local edit')
+        before = self.snapshot_everything()
+        preview = self.run_merge('--dry-run', '--plan-json', *self.backup_args(drive))
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual(self.snapshot_everything(), before)
+        self.assertEqual(list(drive.iterdir()), [])
+
     def test_unique_files_and_one_sided_updates(self):
         (self.local / 'paper.tex').write_text('local v1')
         (self.cloud / 'figure.pdf').write_text('cloud v1')
