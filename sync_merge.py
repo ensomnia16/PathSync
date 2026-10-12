@@ -725,6 +725,10 @@ def preserve_both(args, local, cloud, name, local_sig, cloud_sig, hashes,
 
 
 def sync_files(args, local, cloud, files, conflicts):
+    if args.conflict_policy == 'keep-both':
+        # Automatic keep-both needs no follow-up: both versions are already on
+        # both sides and in the history, so no review stays pending.
+        conflicts = {name: record for name, record in conflicts.items() if not is_review(record)}
     next_files = dict(files)
     next_conflicts = dict(conflicts)
     errors = []
@@ -950,7 +954,10 @@ def sync_files(args, local, cloud, files, conflicts):
                     if not args.dry_run:
                         next_files[sidecar] = aligned(sidecar, signature(local / sidecar),
                                                       signature(cloud / sidecar), expected_copy)
-                        next_conflicts[name] = preserved_record(preserving, sidecar, primary)
+                        if args.conflict_policy == 'keep-both':
+                            next_conflicts.pop(name, None)
+                        else:
+                            next_conflicts[name] = preserved_record(preserving, sidecar, primary)
                 if not args.dry_run:
                     next_files[name] = aligned(name, local_sig, cloud_sig, hashes[0])
                     clear_pending(next_conflicts, name)
@@ -1034,8 +1041,7 @@ def sync_files(args, local, cloud, files, conflicts):
                         next_files[sidecar_name] = aligned(sidecar_name, signature(local / sidecar_name),
                                                            signature(cloud / sidecar_name),
                                                            hashes[1] if primary == 'local' else hashes[0])
-                        next_conflicts[name] = preserved_record(
-                            next_conflicts[name], sidecar_name, primary)
+                        next_conflicts.pop(name, None)
                         print(f'KEPT_BOTH\t{name}\tcopy={sidecar_name}\tbackup={backup_dir}')
                     else:
                         print(f'WOULD_KEEP_BOTH\t{name}')

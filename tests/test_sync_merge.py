@@ -28,6 +28,13 @@ class MergeTests(unittest.TestCase):
         self.cloud.mkdir()
         self.state = self.root / 'state.json'
 
+    def preserve_for_review(self, name='paper.tex'):
+        """Keep both versions by hand, which leaves a review until it is acknowledged."""
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge('--resolve', name, '--choice', 'both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
     def run_merge(self, *extra, policy='ask'):
         arguments = [sys.executable, str(HELPER), str(self.local), str(self.cloud),
                      str(self.state), '--exclude-latex']
@@ -53,14 +60,28 @@ class MergeTests(unittest.TestCase):
         backup = Path(result.stdout.split('backup=', 1)[1].splitlines()[0])
         self.assertEqual((backup / 'local.tex').read_text(), 'local revision')
         self.assertEqual((backup / 'cloud.tex').read_text(), 'cloud revision')
-        record = json.loads(self.state.read_text())['conflicts']['paper.tex']
-        self.assertEqual(record['status'], 'preserved')
-        self.assertEqual(record['sidecar'], copies[0].name)
+        # Automatic keep-both completes the sync: nothing waits for a review.
+        state = json.loads(self.state.read_text())
+        self.assertEqual(state['conflicts'], {})
+        self.assertIn(copies[0].name, state['files'])
+        self.assertIn(f'KEPT_BOTH\tpaper.tex\tcopy={copies[0].name}', result.stdout)
+        self.assertNotIn('NEEDS_REVIEW', result.stdout)
         again = self.run_merge(policy='keep-both')
         self.assertEqual(again.returncode, 0)
-        self.assertIn('reviews=1', again.stdout)
+        self.assertIn('reviews=0', again.stdout)
         self.assertNotIn('KEPT_BOTH\t', again.stdout)
         self.assertEqual(len(list(self.local.glob('paper (* conflict *).tex'))), 1)
+
+    def test_automatic_keep_both_clears_reviews_left_by_earlier_runs(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        self.preserve_for_review()
+        self.assertIn('paper.tex', json.loads(self.state.read_text())['conflicts'])
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('reviews=0', result.stdout)
+        self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
+        self.assertEqual(len(list(self.local.glob('paper (cloud conflict *).tex'))), 1)
 
     def test_existing_pending_conflict_is_kept_on_next_default_run(self):
         (self.local / 'paper.tex').write_text('local')
@@ -153,9 +174,9 @@ class MergeTests(unittest.TestCase):
         self.assertEqual([(item['action'], item['name']) for item in plan['items']],
                          [('conflict', 'paper.tex')])
         self.assertEqual(plan['counts']['skipped'], 1)
-        self.assertEqual(self.run_merge(policy='keep-both').returncode, 0)
+        self.preserve_for_review()
         before = self.snapshot_everything()
-        review = self.run_merge('--dry-run', '--plan-json', policy='keep-both')
+        review = self.run_merge('--dry-run', '--plan-json')
         self.assertEqual(self.snapshot_everything(), before)
         items = self.plan(review)['items']
         self.assertEqual([item['action'] for item in items], ['review'])
@@ -515,10 +536,10 @@ class MergeTests(unittest.TestCase):
     def test_review_survives_later_sync_until_explicit_acknowledgement(self):
         (self.local / 'paper.tex').write_text('local original')
         (self.cloud / 'paper.tex').write_text('cloud original')
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         copy = next(self.local.glob('paper (cloud conflict *).tex'))
         (self.local / 'paper.tex').write_text('manually merged content')
-        synced = self.run_merge(policy=None)
+        synced = self.run_merge()
         self.assertEqual(synced.returncode, 0, synced.stdout + synced.stderr)
         self.assertEqual((self.cloud / 'paper.tex').read_text(), 'manually merged content')
         self.assertIn('NEEDS_REVIEW\tpaper.tex', synced.stdout)
@@ -526,16 +547,16 @@ class MergeTests(unittest.TestCase):
         acknowledged = self.run_merge('--acknowledge', 'paper.tex')
         self.assertEqual(acknowledged.returncode, 0, acknowledged.stdout + acknowledged.stderr)
         self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
-        self.assertIn('reviews=0', self.run_merge(policy=None).stdout)
+        self.assertIn('reviews=0', self.run_merge().stdout)
         self.assertEqual((self.local / copy.name).read_text(), 'cloud original')
 
     def test_review_never_overwrites_new_divergence(self):
         (self.local / 'paper.tex').write_text('local original')
         (self.cloud / 'paper.tex').write_text('cloud original')
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         (self.local / 'paper.tex').write_text('local new')
         (self.cloud / 'paper.tex').write_text('cloud new')
-        result = self.run_merge(policy=None)
+        result = self.run_merge()
         self.assertEqual(result.returncode, 2)
         self.assertIn('FAILED\tpaper.tex', result.stdout)
         self.assertIn('reviews=1', result.stdout)
@@ -551,13 +572,13 @@ class MergeTests(unittest.TestCase):
         old_state['conflicts'] = {}
         old_state.pop('reviewsInitialized')
         self.state.write_text(json.dumps(old_state))
-        migrated = self.run_merge(policy=None)
+        migrated = self.run_merge()
         self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
         self.assertIn('reviews=1', migrated.stdout)
         self.assertEqual(json.loads(self.state.read_text())['conflicts']['paper.tex']['status'], 'preserved')
         self.assertEqual(self.run_merge('--acknowledge', 'paper.tex').returncode, 0)
         self.assertEqual(json.loads(self.state.read_text())['conflicts'], {})
-        self.assertIn('reviews=0', self.run_merge(policy=None).stdout)
+        self.assertIn('reviews=0', self.run_merge().stdout)
 
     def test_keep_both_rejects_sidecar_name_collision_before_writing(self):
         (self.local / 'chapter.tex').write_text('base')
@@ -772,7 +793,7 @@ class MergeTests(unittest.TestCase):
         base = 1_800_000_000_000_000_000
         os.utime(self.local / 'paper.tex', ns=(base, base))
         os.utime(self.cloud / 'paper.tex', ns=(base + 1_000_000_000, base + 1_000_000_000))
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         self.assertEqual((self.local / 'paper.tex').read_text(), 'local')
         result = self.run_merge('--review-newest', 'paper.tex')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -788,7 +809,7 @@ class MergeTests(unittest.TestCase):
         os.utime(self.local / 'paper.tex', ns=(base, base))
         os.utime(self.cloud / 'paper.tex', ns=(base - 1_000_000_000,
                                                base - 1_000_000_000))
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         state = json.loads(self.state.read_text())
         sidecar = state['conflicts']['paper.tex']['sidecar']
         (self.local / 'paper.tex').write_text('edited after preservation')
@@ -812,7 +833,7 @@ class MergeTests(unittest.TestCase):
         os.utime(self.local / 'paper.tex', ns=(base, base))
         os.utime(self.cloud / 'paper.tex', ns=(base - 1_000_000_000,
                                                base - 1_000_000_000))
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         sidecar = json.loads(self.state.read_text())['conflicts']['paper.tex']['sidecar']
         for root in (self.local, self.cloud):
             (root / 'paper.tex').write_text('main edited later')
@@ -832,7 +853,7 @@ class MergeTests(unittest.TestCase):
     def test_preserved_versions_must_agree_across_roots_before_date_choice(self):
         (self.local / 'paper.tex').write_text('main')
         (self.cloud / 'paper.tex').write_text('copy')
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         main_before = (self.local / 'paper.tex').read_text()
         sidecar = json.loads(self.state.read_text())['conflicts']['paper.tex']['sidecar']
         (self.cloud / sidecar).write_text('different copy')
@@ -850,7 +871,7 @@ class MergeTests(unittest.TestCase):
         os.utime(self.local / 'paper.tex', ns=(base, base))
         os.utime(self.cloud / 'paper.tex', ns=(base - 1_000_000_000,
                                                base - 1_000_000_000))
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         (self.local / 'paper.tex').write_text('new local edit')
         os.utime(self.local / 'paper.tex', ns=(base + 1_000_000_000,
                                                base + 1_000_000_000))
@@ -865,7 +886,7 @@ class MergeTests(unittest.TestCase):
     def test_two_new_main_versions_remain_pending_after_preservation(self):
         (self.local / 'paper.tex').write_text('main')
         (self.cloud / 'paper.tex').write_text('copy')
-        self.assertEqual(self.run_merge(policy=None).returncode, 0)
+        self.preserve_for_review()
         (self.local / 'paper.tex').write_text('new local edit')
         (self.cloud / 'paper.tex').write_text('new cloud edit')
         result = self.run_merge('--review-newest', 'paper.tex')
@@ -1168,7 +1189,7 @@ class MergeTests(unittest.TestCase):
         self.assertFalse(chapter.exists())
         self.assertEqual((self.cloud / 'chapter' / 'edited.tex').read_text(), 'cloud edit')
 
-    def test_interrupted_keep_both_recovery_preserves_review(self):
+    def test_interrupted_keep_both_recovery_finishes_without_review(self):
         (self.local / 'paper.tex').write_text('base')
         self.assertEqual(self.run_merge().returncode, 0)
         (self.local / 'paper.tex').write_text('local edit')
@@ -1185,9 +1206,9 @@ class MergeTests(unittest.TestCase):
         result = self.run_merge(policy='keep-both')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         state = json.loads(self.state.read_text())
-        self.assertEqual(state['conflicts']['paper.tex']['status'], 'preserved')
-        self.assertEqual(state['conflicts']['paper.tex']['sidecar'], sidecar)
-        self.assertIn('NEEDS_REVIEW\tpaper.tex', result.stdout)
+        self.assertEqual(state['conflicts'], {})
+        self.assertIn(sidecar, state['files'])
+        self.assertNotIn('NEEDS_REVIEW', result.stdout)
 
     def test_interrupted_keep_both_cannot_disappear_without_sidecar(self):
         (self.local / 'paper.tex').write_text('base')
