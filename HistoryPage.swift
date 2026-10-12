@@ -14,7 +14,7 @@ private final class LatexSummaryState: ObservableObject {
     @Published var error: String?
 }
 
-private struct LatexDiffSheet: View {
+struct LatexDiffSheet: View {
     let result: LatexDiffResult
     let language: String
     @Environment(\.dismiss) private var dismiss
@@ -88,6 +88,8 @@ struct HistoryPage: View {
     let records: [SyncHistoryRecord]
     let pairs: [SyncPair]
     let language: String
+    /// Saved settings, used to find backups kept in a chosen backup folder.
+    let backupConfig: SyncConfig
     let error: String?
     let refresh: () -> Void
     let restore: (SyncPair, String) -> Void
@@ -157,7 +159,7 @@ struct HistoryPage: View {
 
     private func eventBackup(_ pair: SyncPair, _ event: SyncHistoryEvent) -> URL? {
         guard event.kind == "BACKUP", let id = event.backupID else { return nil }
-        return backupContentURL(pair, id: id, name: event.path)
+        return backupContentURL(pair, id: id, name: event.path, config: backupConfig)
     }
 
     private func showLatexDiff(pair: SyncPair, event: SyncHistoryEvent) {
@@ -341,7 +343,7 @@ struct HistoryPage: View {
                                 HStack(spacing: 10) {
                                     Text(t(event.side == "cloud" ? "backupSideCloud" : "backupSideLocal"))
                                         .font(.caption).foregroundStyle(.secondary)
-                                    if backupAvailable(pair, id: id) {
+                                    if backupAvailable(pair, id: id, config: backupConfig) {
                                         Button(t("restoreBackup")) { restore(pair, id) }
                                             .buttonStyle(.bordered)
                                             .controlSize(.small)

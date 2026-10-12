@@ -16,10 +16,22 @@ private func mergeStatePath(_ pair: SyncPair) -> String {
     supportDirectory + "/merge-state/" + pair.id.uuidString.lowercased() + ".json"
 }
 
-func backupAvailable(_ pair: SyncPair, id: String) -> Bool {
-    guard id.range(of: "^[0-9a-f]{32}$", options: .regularExpression) != nil else { return false }
-    let root = URL(fileURLWithPath: mergeStatePath(pair)).deletingPathExtension()
-        .path + "-backups/" + id
+func localBackupFolders(_ pair: SyncPair) -> [String] {
+    let stem = URL(fileURLWithPath: mergeStatePath(pair)).deletingPathExtension().path
+    return [stem + "-backups", stem + "-conflict-backups"]
+}
+
+/// A saved backup lives in the chosen backup folder, or beside the merge state
+/// while that folder was unavailable.
+private func backupDirectory(_ pair: SyncPair, id: String, config: SyncConfig) -> String? {
+    guard id.range(of: "^[0-9a-f]{32}$", options: .regularExpression) != nil else { return nil }
+    var candidates = [localBackupFolders(pair)[0] + "/" + id]
+    if let remote = config.remoteBackupDirectory(pair) { candidates.insert(remote + "/backups/" + id, at: 0) }
+    return candidates.first { fm.fileExists(atPath: $0 + "/manifest.json") }
+}
+
+func backupAvailable(_ pair: SyncPair, id: String, config: SyncConfig) -> Bool {
+    guard let root = backupDirectory(pair, id: id, config: config) else { return false }
     let manifest = URL(fileURLWithPath: root + "/manifest.json")
     let content = root + "/content"
     guard fm.fileExists(atPath: content),
@@ -31,10 +43,9 @@ func backupAvailable(_ pair: SyncPair, id: String) -> Bool {
     return Date().timeIntervalSince1970 - created < Double(days * 86400)
 }
 
-func backupContentURL(_ pair: SyncPair, id: String, name: String) -> URL? {
-    guard backupAvailable(pair, id: id) else { return nil }
-    let root = URL(fileURLWithPath: mergeStatePath(pair)).deletingPathExtension()
-        .path + "-backups/" + id
+func backupContentURL(_ pair: SyncPair, id: String, name: String, config: SyncConfig) -> URL? {
+    guard backupAvailable(pair, id: id, config: config),
+          let root = backupDirectory(pair, id: id, config: config) else { return nil }
     let manifest = URL(fileURLWithPath: root + "/manifest.json")
     guard let data = try? Data(contentsOf: manifest),
           let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -111,11 +122,15 @@ struct SyncConfig: Codable, Equatable {
     var oneDriveRoot = ""
     var localRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
     var cloudImportAnchors: [String: CloudImportAnchor] = [:]
+    /// "local" (beside the merge state), "icloud" or "folder" (backupFolder).
+    var backupLocation = "local"
+    var backupFolder = ""
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
         case checkForUpdates, autoInstallUpdates, cloudConfigEnabled, oneDriveRoot, localRoot, cloudImportAnchors
+        case backupLocation, backupFolder
         case source, destination, scheduledDirection
     }
 
@@ -141,6 +156,8 @@ struct SyncConfig: Codable, Equatable {
         localRoot = try data.decodeIfPresent(String.self, forKey: .localRoot)
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
         cloudImportAnchors = try data.decodeIfPresent([String: CloudImportAnchor].self, forKey: .cloudImportAnchors) ?? [:]
+        backupLocation = try data.decodeIfPresent(String.self, forKey: .backupLocation) ?? "local"
+        backupFolder = try data.decodeIfPresent(String.self, forKey: .backupFolder) ?? ""
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
             pairs = saved.filter { !$0.isUnusedDefaultPlaceholder }
         } else {
@@ -175,6 +192,59 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(oneDriveRoot, forKey: .oneDriveRoot)
         try data.encode(localRoot, forKey: .localRoot)
         try data.encode(cloudImportAnchors, forKey: .cloudImportAnchors)
+        try data.encode(backupLocation, forKey: .backupLocation)
+        try data.encode(backupFolder, forKey: .backupFolder)
+    }
+}
+
+extension SyncConfig {
+    /// The existing folder that receives backups, or nil to keep them on this Mac.
+    var backupBaseFolder: String? {
+        switch backupLocation {
+        case "icloud": return CloudConfigStore.iCloudDrive.path
+        case "folder": return backupFolder.isEmpty ? nil : backupFolder
+        default: return nil
+        }
+    }
+
+    /// The folder shown to the person and checked against every sync path.
+    var backupDisplayFolder: String? {
+        guard let base = backupBaseFolder else { return nil }
+        return backupLocation == "icloud" ? base + "/PathSync/Backups" : base
+    }
+
+    func backupSubpath(_ pair: SyncPair) -> String {
+        let id = pair.id.uuidString.lowercased()
+        return backupLocation == "icloud" ? "PathSync/Backups/" + id : id
+    }
+
+    func remoteBackupDirectory(_ pair: SyncPair) -> String? {
+        backupBaseFolder.map { $0 + "/" + backupSubpath(pair) }
+    }
+
+    func backupArguments(_ pair: SyncPair) -> [String] {
+        guard let base = backupBaseFolder else { return [] }
+        return ["--backup-root", base, "--backup-subpath", backupSubpath(pair)]
+    }
+}
+
+func validatedBackupLocation(_ config: SyncConfig) throws {
+    guard ["local", "icloud", "folder"].contains(config.backupLocation) else {
+        throw NSError(domain: appID, code: 16, userInfo: [NSLocalizedDescriptionKey: "未知的备份位置。"])
+    }
+    if config.backupLocation == "folder" && config.backupFolder.isEmpty {
+        throw NSError(domain: appID, code: 16, userInfo: [NSLocalizedDescriptionKey: "请选择用于存放备份的文件夹。"])
+    }
+    guard let folder = config.backupDisplayFolder else { return }
+    let backups = URL(fileURLWithPath: folder).standardizedFileURL.resolvingSymlinksInPath().path
+    for pair in config.pairs {
+        for path in [pair.localPath, pair.cloudPath] where !path.isEmpty {
+            let root = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+            if backups == root || backups.hasPrefix(root + "/") || root.hasPrefix(backups + "/") {
+                throw NSError(domain: appID, code: 17, userInfo: [NSLocalizedDescriptionKey:
+                    "备份位置不能位于「\(pair.name)」的同步路径内，也不能包含它：\(root)"])
+            }
+        }
     }
 }
 
@@ -335,7 +405,13 @@ func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 }
 
+private let logLock = NSLock()
+
+/// Folder pairs run in parallel; each message, including multi-line output,
+/// is appended as one contiguous write so the history parser can pair it.
 func appendLog(_ message: String) {
+    logLock.lock()
+    defer { logLock.unlock() }
     try? fm.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
     let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
     if !fm.fileExists(atPath: logPath) { fm.createFile(atPath: logPath, contents: nil) }
@@ -359,7 +435,8 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
-                     language: String, progress: ((String) -> Void)?) throws -> String {
+                     plan: Bool = false, backupArguments: [String] = [], language: String,
+                     progress: ((UUID, String) -> Void)?) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
@@ -373,6 +450,8 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
     if pair.syncTemporaryFiles { arguments.append("--include-temp") }
     if dryRun { arguments.append("--dry-run") }
+    if dryRun && plan { arguments.append("--plan-json") }
+    arguments += backupArguments
     process.arguments = arguments
     let output = Pipe()
     process.standardOutput = output
@@ -410,20 +489,20 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
             guard fields.first == "PROGRESS", let progress else { continue }
             if fields.count == 5, fields[1] == "SCAN" || fields[1] == "SCAN_DONE" {
                 let side = uiText(fields[2] == "cloud" ? "cloud" : "local", language: language)
-                progress(String(format: uiText("scanProgress", language: language),
-                                pair.name, side, String(fields[3]), String(fields[4])))
+                progress(pair.id, String(format: uiText("scanProgress", language: language),
+                                         pair.name, side, String(fields[3]), String(fields[4])))
             } else if fields.count == 4, fields[1] == "PROCESS" {
-                progress(String(format: uiText("processProgress", language: language),
-                                pair.name, String(fields[2]), String(fields[3])))
+                progress(pair.id, String(format: uiText("processProgress", language: language),
+                                         pair.name, String(fields[2]), String(fields[3])))
             } else if fields.count == 4, fields[1] == "PREFETCH" {
-                progress(String(format: uiText("prefetchProgress", language: language),
-                                pair.name, String(fields[2]), String(fields[3])))
+                progress(pair.id, String(format: uiText("prefetchProgress", language: language),
+                                         pair.name, String(fields[2]), String(fields[3])))
             } else if fields.count >= 3, fields[1] == "FILE" {
-                progress(String(format: uiText("fileProgress", language: language),
-                                pair.name, fields.dropFirst(2).joined(separator: "\t")))
+                progress(pair.id, String(format: uiText("fileProgress", language: language),
+                                         pair.name, fields.dropFirst(2).joined(separator: "\t")))
             } else if fields.count >= 4, fields[1] == "WAIT" {
-                progress(String(format: uiText("waitingForCloud", language: language),
-                                pair.name, String(fields[2]), String(fields[3])))
+                progress(pair.id, String(format: uiText("waitingForCloud", language: language),
+                                         pair.name, String(fields[2]), String(fields[3])))
             }
         }
     }
@@ -432,7 +511,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
         .filter { !$0.hasPrefix("PROGRESS\t") }
         .joined(separator: "\n")
     process.waitUntilExit()
-    appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+    appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(strippingSyncPlan(result).trimmingCharacters(in: .whitespacesAndNewlines))")
     activityLock.lock()
     let stalled = inactivityTimedOut
     activityLock.unlock()
@@ -440,15 +519,18 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
         throw NSError(domain: appID, code: 15, userInfo: [NSLocalizedDescriptionKey:
             "「\(pair.name)」连续 3 分钟未收到 OneDrive 文件系统响应，已停止本次运行；其他路径继续同步。"])
     }
-    guard process.terminationStatus == 0 else {
-        let summary = result.split(separator: "\n").last.map(String.init) ?? "退出码 \(process.terminationStatus)"
+    // A preview that finds conflicts or unreadable files exits with 2, yet its
+    // plan is complete and is exactly what the person needs to see.
+    let completePreview = dryRun && plan && process.terminationStatus == 2 && parseSyncPlan(result) != nil
+    guard process.terminationStatus == 0 || completePreview else {
+        let summary = strippingSyncPlan(result).split(separator: "\n").last.map(String.init) ?? "退出码 \(process.terminationStatus)"
         throw NSError(domain: appID, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」未完全成功：\(summary)。详情见同步记录。"])
     }
     return result
 }
 
 func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
-                            retentionDays: Int = 15) throws -> String {
+                            retentionDays: Int = 15, backupArguments: [String] = []) throws -> String {
     guard ["local", "cloud", "both", "newest"].contains(choice) else {
         throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "无效的冲突处理方式。"])
     }
@@ -459,6 +541,7 @@ func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--resolve", name,
                              "--choice", choice, "--backup-retention-days", String(retentionDays)]
+            + backupArguments
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -474,13 +557,15 @@ func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
     }
 }
 
-func acknowledgePreservedConflict(_ pair: SyncPair, name: String) throws -> String {
+func acknowledgePreservedConflict(_ pair: SyncPair, name: String,
+                                  backupArguments: [String] = []) throws -> String {
     try withSyncLock {
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--acknowledge", name]
+            + backupArguments
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -496,14 +581,15 @@ func acknowledgePreservedConflict(_ pair: SyncPair, name: String) throws -> Stri
     }
 }
 
-func resolvePreservedNewest(_ pair: SyncPair, name: String, retentionDays: Int) throws -> String {
+func resolvePreservedNewest(_ pair: SyncPair, name: String, retentionDays: Int,
+                            backupArguments: [String] = []) throws -> String {
     try withSyncLock {
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--review-newest", name,
-                             "--backup-retention-days", String(retentionDays)]
+                             "--backup-retention-days", String(retentionDays)] + backupArguments
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -519,14 +605,15 @@ func resolvePreservedNewest(_ pair: SyncPair, name: String, retentionDays: Int) 
     }
 }
 
-func restoreSavedBackup(_ pair: SyncPair, id: String, retentionDays: Int) throws -> String {
+func restoreSavedBackup(_ pair: SyncPair, id: String, retentionDays: Int,
+                        backupArguments: [String] = []) throws -> String {
     try withSyncLock {
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--restore", id,
-                             "--backup-retention-days", String(retentionDays)]
+                             "--backup-retention-days", String(retentionDays)] + backupArguments
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -542,35 +629,144 @@ func restoreSavedBackup(_ pair: SyncPair, id: String, retentionDays: Int) throws
     }
 }
 
-@discardableResult
-func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection? = nil,
-             dryRun: Bool = false, progress: ((String) -> Void)? = nil) throws -> String {
-    let selected = config.pairs.filter { pairID == nil ? $0.enabled : $0.id == pairID }
+/// Total size of backups still kept beside the merge state.
+func localBackupBytes(_ pairs: [SyncPair]) -> Int64 {
+    var total: Int64 = 0
+    for folder in pairs.flatMap(localBackupFolders) {
+        guard let items = fm.enumerator(at: URL(fileURLWithPath: folder),
+                                        includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]) else { continue }
+        for case let item as URL in items {
+            let values = try? item.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey])
+            if values?.isRegularFile == true { total += Int64(values?.totalFileAllocatedSize ?? 0) }
+        }
+    }
+    return total
+}
+
+/// Copies every local backup to the chosen backup folder, verifies it, then
+/// removes the local copy. Returns how many backups moved and how many remain.
+func moveLocalBackups(_ config: SyncConfig) throws -> (moved: Int, remaining: Int) {
+    guard config.backupBaseFolder != nil else { return (0, 0) }
+    try validatedBackupLocation(config)
+    return try withSyncLock {
+        var moved = 0
+        var remaining = 0
+        for pair in config.pairs where !pair.localPath.isEmpty && !pair.cloudPath.isEmpty
+            && localBackupFolders(pair).contains(where: { fm.fileExists(atPath: $0) }) {
+            let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = [helper, pair.localPath, pair.cloudPath, mergeStatePath(pair),
+                                 "--migrate-backups"] + config.backupArguments(pair)
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
+            try process.run()
+            let result = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            appendLog("移动备份 [\(pair.name)]，退出码 \(process.terminationStatus)：\(result.trimmingCharacters(in: .whitespacesAndNewlines))")
+            func count(_ key: String) -> Int {
+                result.components(separatedBy: key + "=").dropFirst().compactMap { Int($0.prefix(while: \.isNumber)) }.first ?? 0
+            }
+            if process.terminationStatus != 0 && count("backups_pending") == 0 {
+                let message = result.split(separator: "\n").last.map(String.init) ?? "退出码 \(process.terminationStatus)"
+                throw NSError(domain: appID, code: 18, userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」的备份未能移动：\(message)"])
+            }
+            moved += count("backups_moved")
+            remaining += count("backups_pending")
+        }
+        return (moved, remaining)
+    }
+}
+
+/// Pairs never share or nest a directory (validatedPairSet), and each keeps its
+/// own merge state and backups, so a few can run at once under the global lock.
+let maxParallelPairs = 3
+
+func selectedPairs(_ config: SyncConfig, pairID: UUID?) -> [SyncPair] {
+    config.pairs.filter { pairID == nil ? $0.enabled : $0.id == pairID }
+}
+
+private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirection?,
+                      dryRun: Bool, plan: Bool,
+                      progress: ((UUID, String) -> Void)?) throws -> [(SyncPair, Result<String, Error>)] {
+    let selected = selectedPairs(config, pairID: pairID)
     guard !selected.isEmpty else {
         throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "没有可同步的路径。"])
     }
     return try withSyncLock {
         try validatedPairSet(config.pairs, including: pairID)
-        var outputs: [String] = []
-        var errors: [String] = []
-        for pair in selected {
-            do {
+        var results = [Result<String, Error>?](repeating: nil, count: selected.count)
+        let resultsLock = NSLock()
+        let slots = DispatchSemaphore(value: maxParallelPairs)
+        let group = DispatchGroup()
+        for (index, pair) in selected.enumerated() {
+            slots.wait()
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                defer {
+                    slots.signal()
+                    group.leave()
+                }
                 let chosen = direction ?? SyncDirection(rawValue: pair.scheduledDirection) ?? .upload
-                let result = try syncOne(pair, direction: chosen,
-                                         excludeLatex: config.excludeLatexIntermediates,
-                                         conflictPolicy: config.conflictPolicy,
-                                         backupRetentionDays: config.backupRetentionDays,
-                                         dryRun: dryRun, language: config.language, progress: progress)
-                outputs.append("[\(pair.name)] \(result)")
-            } catch {
-                errors.append(error.localizedDescription)
-                appendLog("失败 [\(pair.name)]：\(error.localizedDescription)")
+                let result = Result {
+                    try syncOne(pair, direction: chosen,
+                                excludeLatex: config.excludeLatexIntermediates,
+                                conflictPolicy: config.conflictPolicy,
+                                backupRetentionDays: config.backupRetentionDays,
+                                dryRun: dryRun, plan: plan,
+                                backupArguments: config.backupArguments(pair), language: config.language,
+                                progress: progress)
+                }
+                if case .failure(let error) = result {
+                    appendLog("失败 [\(pair.name)]：\(error.localizedDescription)")
+                }
+                resultsLock.lock()
+                results[index] = result
+                resultsLock.unlock()
             }
         }
-        if !errors.isEmpty {
-            throw NSError(domain: appID, code: 8, userInfo: [NSLocalizedDescriptionKey: "\(selected.count - errors.count)/\(selected.count) 组完成；\(errors.joined(separator: "；"))"])
+        group.wait()
+        return zip(selected, results.compactMap { $0 }).map { ($0, $1) }
+    }
+}
+
+@discardableResult
+func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection? = nil,
+             dryRun: Bool = false, progress: ((UUID, String) -> Void)? = nil) throws -> String {
+    let results = try runPairs(config, pairID: pairID, direction: direction,
+                               dryRun: dryRun, plan: false, progress: progress)
+    var outputs: [String] = []
+    var errors: [String] = []
+    for (pair, result) in results {
+        switch result {
+        case .success(let output): outputs.append("[\(pair.name)] \(output)")
+        case .failure(let error): errors.append(error.localizedDescription)
         }
-        return outputs.joined(separator: "\n")
+    }
+    if !errors.isEmpty {
+        throw NSError(domain: appID, code: 8, userInfo: [NSLocalizedDescriptionKey: "\(results.count - errors.count)/\(results.count) 组完成；\(errors.joined(separator: "；"))"])
+    }
+    return outputs.joined(separator: "\n")
+}
+
+/// Runs each selected pair with --dry-run --plan-json. Nothing in either folder
+/// or in the merge state is written; only the sync log records the preview.
+func previewSync(_ config: SyncConfig, pairID: UUID? = nil,
+                 progress: ((UUID, String) -> Void)? = nil) throws -> [PairPreview] {
+    let results = try runPairs(config, pairID: pairID, direction: nil,
+                               dryRun: true, plan: true, progress: progress)
+    return results.map { pair, result in
+        let direction = SyncDirection(rawValue: pair.scheduledDirection) ?? .upload
+        switch result {
+        case .success(let output):
+            let plan = parseSyncPlan(output)
+            return PairPreview(pairID: pair.id, pairName: pair.name, direction: direction.rawValue,
+                               plan: plan, error: plan == nil ? strippingSyncPlan(output) : nil)
+        case .failure(let error):
+            return PairPreview(pairID: pair.id, pairName: pair.name, direction: direction.rawValue,
+                               plan: nil, error: uiError(error, language: config.language))
+        }
     }
 }
 
@@ -613,6 +809,20 @@ func installSchedule(_ config: SyncConfig) throws {
     }
 }
 
+/// Adds up the key=value summary lines that every pair prints at the end of a run.
+func summedCounts(_ output: String) -> [String: Int] {
+    var total: [String: Int] = [:]
+    for line in output.split(separator: "\n") where line.contains("uploaded=") {
+        for word in line.split(separator: " ") {
+            let parts = word.split(separator: "=", maxSplits: 1)
+            if parts.count == 2, let value = Int(parts[1]) {
+                total[String(parts[0].split(separator: "]").last ?? parts[0]).trimmingCharacters(in: .whitespaces), default: 0] += value
+            }
+        }
+    }
+    return total
+}
+
 final class SyncModel: ObservableObject {
     @Published var config: SyncConfig
     @Published private(set) var savedConfig: SyncConfig
@@ -638,6 +848,31 @@ final class SyncModel: ObservableObject {
     @Published var ownCloudTransferStatus = "unknown"
     @Published var cloudImportPreview: CloudImportPreview?
     @Published var configBackups: [ConfigSnapshot] = configSnapshots()
+    /// The latest dry-run plan; confirming it runs the real sync for the same scope.
+    @Published var preview: SyncPreview? {
+        didSet {
+            // A dismissed preview leaves nothing to confirm.
+            if preview == nil && statusKey == "previewReady" {
+                statusKey = conflictCount > 0 ? "conflictsPending" : "ready"
+                statusDetail = nil
+            }
+        }
+    }
+    /// "window" shows the preview as a sheet; "menu" shows it inside the menu bar panel.
+    @Published var previewOrigin = "window"
+    @Published var syncingPairIDs: Set<UUID> = []
+    @Published var pairProgress: [UUID: String] = [:]
+    /// Summed counts of the last finished sync, for the result banner.
+    @Published var lastRunCounts: [String: Int]?
+    @Published var localBackupSize: Int64?
+    @Published var backupMoveBusy = false
+    @Published var backupMoveMessage: String?
+    @Published var diffResult: LatexDiffResult?
+    private let refreshQueue = DispatchQueue(label: "com.ensom.ResearchSync.refresh", qos: .utility)
+    private let historyReader = SyncHistoryReader(path: logPath)
+    /// Touched only on refreshQueue: merge-state files are re-read only after they change.
+    private var conflictCache: [UUID: (stamp: String, conflicts: [PendingConflict])] = [:]
+    private var refreshTimer: Timer?
     private var lastUpdateAttempt = UserDefaults.standard.object(forKey: "lastUpdateAttempt") as? Date
     private var notificationRequestID = UUID()
     private let cloudDeviceID: UUID = {
@@ -668,6 +903,15 @@ final class SyncModel: ObservableObject {
         if loaded.cloudConfigEnabled {
             DispatchQueue.main.async { self.refreshCloudProfiles() }
         }
+        // One timer for the whole app: the window and the menu bar panel share it.
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refreshState()
+            self?.checkForUpdates(automatic: true)
+            self?.refreshCloudProfiles()
+        }
+        timer.tolerance = 10
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
@@ -788,32 +1032,121 @@ final class SyncModel: ObservableObject {
     }
     var conflictCount: Int { conflictsByPair.values.reduce(0) { $0 + $1.count } }
 
-    func refreshHistory() {
-        do {
-            history = try readSyncHistory(at: logPath).filter { record in
-                config.pairs.contains { pair in
-                    (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
-                    || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+    func refreshHistory() { refreshState(conflicts: false) }
+    func refreshConflicts() { refreshState(history: false) }
+
+    /// Reads merge states and the sync log off the main thread. The log is read
+    /// incrementally and a merge state is decoded again only after it changes.
+    func refreshState(conflicts: Bool = true, history: Bool = true) {
+        let pairs = config.pairs
+        let language = config.language
+        refreshQueue.async {
+            var updated: [UUID: [PendingConflict]]?
+            var conflictError: String?
+            if conflicts {
+                var found: [UUID: [PendingConflict]] = [:]
+                for pair in pairs {
+                    let path = mergeStatePath(pair)
+                    let attributes = try? fm.attributesOfItem(atPath: path)
+                    let stamp = [pair.localPath, pair.cloudPath,
+                                 String(describing: attributes?[.modificationDate]),
+                                 String(describing: attributes?[.size])].joined(separator: "\u{0}")
+                    if let cached = self.conflictCache[pair.id], cached.stamp == stamp {
+                        found[pair.id] = cached.conflicts
+                        continue
+                    }
+                    do {
+                        let current = try pendingConflicts(for: pair)
+                        self.conflictCache[pair.id] = (stamp, current)
+                        found[pair.id] = current
+                    } catch {
+                        self.conflictCache[pair.id] = nil
+                        conflictError = uiError(error, language: language)
+                    }
+                }
+                updated = found
+            }
+            let records = history ? Result { () throws -> [SyncHistoryRecord] in
+                try self.historyReader.read().filter { record in
+                    pairs.contains { pair in
+                        (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
+                        || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+                    }
+                }
+            } : nil
+            DispatchQueue.main.async {
+                if let updated {
+                    self.conflictsByPair = updated.filter { id, _ in self.config.pairs.contains { $0.id == id } }
+                    if let conflictError {
+                        self.statusKey = "error"
+                        self.statusDetail = conflictError
+                    } else if self.statusKey == "ready" || self.statusKey == "conflictsPending" {
+                        self.statusKey = self.conflictCount > 0 ? "conflictsPending" : "ready"
+                    }
+                }
+                switch records {
+                case .success(let value)?:
+                    self.history = value
+                    self.historyError = nil
+                case .failure(let error)?:
+                    self.historyError = uiError(error, language: language)
+                case nil:
+                    break
                 }
             }
-            historyError = nil
-        } catch {
-            historyError = uiError(error, language: config.language)
         }
     }
 
-    func refreshConflicts() {
-        var updated: [UUID: [PendingConflict]] = [:]
-        for pair in config.pairs {
-            do { updated[pair.id] = try pendingConflicts(for: pair) }
-            catch {
-                statusKey = "error"
-                statusDetail = uiError(error, language: config.language)
-            }
+    func pair(_ id: UUID) -> SyncPair? { config.pairs.first { $0.id == id } }
+
+    func lastSync(for pair: SyncPair) -> Date? {
+        lastRecord(for: pair).map { $0.finishedAt ?? $0.startedAt }
+    }
+
+    func refreshLocalBackupSize() {
+        let pairs = savedConfig.pairs
+        DispatchQueue.global(qos: .utility).async {
+            let size = localBackupBytes(pairs)
+            DispatchQueue.main.async { self.localBackupSize = size }
         }
-        conflictsByPair = updated
-        if statusKey == "ready" || statusKey == "conflictsPending" {
-            statusKey = conflictCount > 0 ? "conflictsPending" : "ready"
+    }
+
+    func chooseBackupFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: config.backupFolder.isEmpty
+            ? (config.oneDriveRoot.isEmpty ? home + "/Library/CloudStorage" : config.oneDriveRoot)
+            : config.backupFolder)
+        if panel.runModal() == .OK, let folder = panel.url?.standardizedFileURL.path {
+            config.backupFolder = folder
+            config.backupLocation = "folder"
+        }
+    }
+
+    /// Moves backups kept on this Mac into the saved backup folder, verifying each one.
+    func moveExistingBackups() {
+        guard !busy, !backupMoveBusy, !hasUnsavedChanges, savedConfig.backupBaseFolder != nil else { return }
+        backupMoveBusy = true
+        backupMoveMessage = nil
+        let current = savedConfig
+        DispatchQueue.global(qos: .utility).async {
+            let outcome = Result { try moveLocalBackups(current) }
+            DispatchQueue.main.async {
+                self.backupMoveBusy = false
+                switch outcome {
+                case .success(let result):
+                    self.backupMoveMessage = String(format: uiText(result.remaining > 0 ? "backupsMovedPartly" : "backupsMoved",
+                                                                   language: current.language),
+                                                    result.moved, result.remaining)
+                case .failure(let error):
+                    self.backupMoveMessage = uiError(error, language: current.language)
+                }
+                self.refreshLocalBackupSize()
+                self.refreshHistory()
+            }
         }
     }
 
@@ -995,6 +1328,7 @@ final class SyncModel: ObservableObject {
                 throw NSError(domain: appID, code: 9, userInfo: [NSLocalizedDescriptionKey: "启用后台同步前，请至少启用一组路径。"])
             }
             try validatedPairSet(config.pairs)
+            try validatedBackupLocation(config)
             for pair in config.pairs where pair.enabled {
                 _ = try pendingConflicts(for: pair)
             }
@@ -1011,6 +1345,8 @@ final class SyncModel: ObservableObject {
             try saveConfig(config)
             configBackups = configSnapshots()
             savedConfig = config
+            // A plan made with other folders, directions or rules no longer applies.
+            preview = nil
             try installSchedule(config)
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
             statusDetail = nil
@@ -1020,23 +1356,31 @@ final class SyncModel: ObservableObject {
         } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
     }
 
-    func syncNow(_ direction: SyncDirection? = nil, all: Bool = false) {
-        guard !hasUnsavedChanges, all || selectedID != nil else { return }
+    func syncNow(_ direction: SyncDirection? = nil, all: Bool = false, pairID: UUID? = nil) {
+        let id = all ? nil : (pairID ?? selectedID)
+        guard !busy, !hasUnsavedChanges, all || id != nil else { return }
         busy = true
+        preview = nil
+        lastRunCounts = nil
         statusKey = all ? "syncingAll" : "syncingPair"
         statusDetail = nil
         let current = config
-        let id = all ? nil : selectedID
+        syncingPairIDs = Set(selectedPairs(current, pairID: id).map(\.id))
+        pairProgress = [:]
         DispatchQueue.global(qos: .utility).async {
             let resultKey: String
             let resultDetail: String?
+            var counts: [String: Int]?
             do {
-                let output = try runSync(current, pairID: id, direction: direction) { message in
-                    DispatchQueue.main.async { self.statusDetail = message }
+                let output = try runSync(current, pairID: id, direction: direction) { pairID, message in
+                    DispatchQueue.main.async {
+                        self.pairProgress[pairID] = message
+                        self.statusDetail = message
+                    }
                 }
                 postSyncNotification(config: current, output: output, failed: false)
-                let reviews = output.components(separatedBy: "reviews=").dropFirst()
-                    .compactMap { Int($0.prefix(while: \.isNumber)) }.reduce(0, +)
+                counts = summedCounts(output)
+                let reviews = counts?["reviews"] ?? 0
                 resultKey = all ? "doneAll" : "donePair"
                 resultDetail = reviews > 0
                     ? String(format: uiText("reviewsRemain", language: current.language), reviews)
@@ -1049,18 +1393,64 @@ final class SyncModel: ObservableObject {
             DispatchQueue.main.async {
                 self.statusKey = resultKey
                 self.statusDetail = resultDetail
+                self.lastRunCounts = counts
                 self.busy = false
-                self.refreshConflicts()
-                self.refreshHistory()
+                self.syncingPairIDs = []
+                self.pairProgress = [:]
+                self.refreshState()
                 if self.config.autoInstallUpdates { self.installAvailableUpdate() }
             }
         }
     }
 
-    func resolveConflict(_ name: String, choice: String) {
-        guard let pair = selectedPair, !busy, !hasUnsavedChanges else { return }
+    /// Builds a dry-run plan for one pair or every enabled pair. Nothing is written.
+    func previewNow(pairID: UUID? = nil, origin: String = "window") {
+        guard !busy, !hasUnsavedChanges, pairID != nil || hasEnabledPairs else { return }
+        busy = true
+        preview = nil
+        previewOrigin = origin
+        statusKey = "previewing"
+        statusDetail = nil
+        let current = config
+        syncingPairIDs = Set(selectedPairs(current, pairID: pairID).map(\.id))
+        pairProgress = [:]
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = Result {
+                try previewSync(current, pairID: pairID) { id, message in
+                    DispatchQueue.main.async {
+                        self.pairProgress[id] = message
+                        self.statusDetail = message
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                self.busy = false
+                self.syncingPairIDs = []
+                self.pairProgress = [:]
+                switch outcome {
+                case .success(let pairs):
+                    self.preview = SyncPreview(scope: pairID, createdAt: Date(), pairs: pairs)
+                    self.statusKey = "previewReady"
+                    self.statusDetail = nil
+                case .failure(let error):
+                    self.statusKey = "error"
+                    self.statusDetail = uiError(error, language: current.language)
+                }
+                self.refreshHistory()
+            }
+        }
+    }
+
+    func confirmPreview() {
+        guard let preview, !busy else { return }
+        syncNow(all: preview.scope == nil, pairID: preview.scope)
+    }
+
+    func resolveConflict(_ name: String, choice: String, in target: SyncPair? = nil) {
+        guard let pair = target ?? selectedPair, !busy, !hasUnsavedChanges else { return }
         let language = config.language
         let retentionDays = config.backupRetentionDays
+        let backupArguments = config.backupArguments(pair)
         busy = true
         statusKey = "resolving"
         statusDetail = nil
@@ -1069,7 +1459,8 @@ final class SyncModel: ObservableObject {
             let resultDetail: String?
             do {
                 _ = try resolvePendingConflict(pair, name: name, choice: choice,
-                                               retentionDays: retentionDays)
+                                               retentionDays: retentionDays,
+                                               backupArguments: backupArguments)
                 resultKey = choice == "both" ? "preservedReview" : "resolved"
                 resultDetail = nil
             } catch {
@@ -1085,9 +1476,10 @@ final class SyncModel: ObservableObject {
         }
     }
 
-    func acknowledgeConflict(_ name: String) {
-        guard let pair = selectedPair, !busy else { return }
+    func acknowledgeConflict(_ name: String, in target: SyncPair? = nil) {
+        guard let pair = target ?? selectedPair, !busy else { return }
         let language = config.language
+        let backupArguments = config.backupArguments(pair)
         busy = true
         statusKey = "resolving"
         statusDetail = nil
@@ -1095,7 +1487,7 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try acknowledgePreservedConflict(pair, name: name)
+                _ = try acknowledgePreservedConflict(pair, name: name, backupArguments: backupArguments)
                 resultKey = "reviewAcknowledged"
                 resultDetail = nil
             } catch {
@@ -1111,10 +1503,11 @@ final class SyncModel: ObservableObject {
         }
     }
 
-    func chooseNewestForReview(_ name: String) {
-        guard let pair = selectedPair, !busy else { return }
+    func chooseNewestForReview(_ name: String, in target: SyncPair? = nil) {
+        guard let pair = target ?? selectedPair, !busy else { return }
         let language = config.language
         let retentionDays = config.backupRetentionDays
+        let backupArguments = config.backupArguments(pair)
         busy = true
         statusKey = "resolving"
         statusDetail = nil
@@ -1122,7 +1515,8 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try resolvePreservedNewest(pair, name: name, retentionDays: retentionDays)
+                _ = try resolvePreservedNewest(pair, name: name, retentionDays: retentionDays,
+                                               backupArguments: backupArguments)
                 resultKey = "newestResolved"
                 resultDetail = nil
             } catch {
@@ -1143,6 +1537,7 @@ final class SyncModel: ObservableObject {
         guard !busy, !hasUnsavedChanges else { return }
         let language = config.language
         let retentionDays = config.backupRetentionDays
+        let backupArguments = config.backupArguments(pair)
         busy = true
         statusKey = "restoringBackup"
         statusDetail = nil
@@ -1150,7 +1545,8 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try restoreSavedBackup(pair, id: id, retentionDays: retentionDays)
+                _ = try restoreSavedBackup(pair, id: id, retentionDays: retentionDays,
+                                           backupArguments: backupArguments)
                 resultKey = "backupRestored"
                 resultDetail = nil
             } catch {
@@ -1179,6 +1575,7 @@ struct ResearchSyncApp: App {
             do {
                 let config = try loadConfig()
                 try validatedPairSet(config.pairs)
+                try validatedBackupLocation(config)
                 for pair in config.pairs where pair.enabled {
                     _ = try pendingConflicts(for: pair)
                 }
@@ -1205,7 +1602,8 @@ struct ResearchSyncApp: App {
                 }
                 print(try resolvePendingConflict(pair, name: args[resolution + 1],
                                                  choice: args[choiceIndex + 1],
-                                                 retentionDays: config.backupRetentionDays))
+                                                 retentionDays: config.backupRetentionDays,
+                                                 backupArguments: config.backupArguments(pair)))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
@@ -1223,7 +1621,8 @@ struct ResearchSyncApp: App {
                 guard let pair = config.pairs.first(where: { $0.id == id }) else {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
-                print(try acknowledgePreservedConflict(pair, name: args[review + 1]))
+                print(try acknowledgePreservedConflict(pair, name: args[review + 1],
+                                                       backupArguments: config.backupArguments(pair)))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
@@ -1242,7 +1641,8 @@ struct ResearchSyncApp: App {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
                 print(try resolvePreservedNewest(pair, name: args[selection + 1],
-                                                 retentionDays: config.backupRetentionDays))
+                                                 retentionDays: config.backupRetentionDays,
+                                                 backupArguments: config.backupArguments(pair)))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
@@ -1261,7 +1661,8 @@ struct ResearchSyncApp: App {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
                 print(try restoreSavedBackup(pair, id: args[restoration + 1],
-                                             retentionDays: config.backupRetentionDays))
+                                             retentionDays: config.backupRetentionDays,
+                                             backupArguments: config.backupArguments(pair)))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
@@ -1278,7 +1679,7 @@ struct ResearchSyncApp: App {
                 else { id = nil }
                 let dryRun = args.contains("--dry-run")
                 let output = try runSync(config, pairID: id, direction: direction,
-                                         dryRun: dryRun) { message in
+                                         dryRun: dryRun) { _, message in
                     fputs(message + "\n", stderr)
                 }
                 if !dryRun { postSyncNotification(config: config, output: output, failed: false) }
@@ -1301,21 +1702,13 @@ struct ResearchSyncApp: App {
             .windowStyle(.titleBar)
             .defaultSize(width: 980, height: 680)
         MenuBarExtra {
-            MenuBarContent(model: model)
-                .onAppear {
-                    model.refreshConflicts()
-                    model.refreshHistory()
-                }
-                .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
-                    model.refreshConflicts()
-                    model.refreshHistory()
-                    model.checkForUpdates(automatic: true)
-                }
+            MenuBarPanel(model: model)
+                .onAppear { model.refreshState() }
         } label: {
             Image(nsImage: menuBarIcon())
                 .accessibilityLabel(uiText("appName", language: model.config.language))
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
     }
 }
 #endif

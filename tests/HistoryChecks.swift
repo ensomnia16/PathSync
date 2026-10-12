@@ -53,6 +53,56 @@ struct HistoryChecks {
         """
         assert(parseSyncHistory(legacy).first?.counts["uploaded"] == 2)
 
+        // Parallel folder pairs interleave their start and end entries.
+        let interleaved = """
+        2026-10-09T10:00:00Z 开始 [A] 双向合并：/a-local → /a-cloud
+        2026-10-09T10:00:00Z 开始 [B] 本地 → 云端：/b-local → /b-cloud
+        2026-10-09T10:00:01Z 开始 [C] 双向合并：/c-local → /c-cloud
+        2026-10-09T10:00:02Z 结束 [B]，退出码 0：uploaded=3 downloaded=0 failed=0
+        2026-10-09T10:00:03Z 结束 [A]，退出码 2：FAILED\tx.tex\tunreadable
+        uploaded=0 downloaded=1 failed=1
+        2026-10-09T10:00:04Z 失败 [A]：「A」未完全成功
+        2026-10-09T10:00:05Z 失败 [C]：无法启动同步程序
+        """
+        let parallel = parseSyncHistory(interleaved)
+        assert(parallel.count == 3)
+        assert(parallel.map(\.pairName) == ["C", "B", "A"])
+        assert(parallel[1].counts["uploaded"] == 3 && parallel[1].exitCode == 0)
+        assert(parallel[2].counts["downloaded"] == 1 && parallel[2].events.first?.kind == "FAILED")
+        assert(parallel[2].exitCode == 2)
+        assert(parallel[0].exitCode == 1 && parallel[0].events.first?.detail == "无法启动同步程序")
+
+        let growing = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".log")
+        defer { try? FileManager.default.removeItem(at: growing) }
+        try "".write(to: growing, atomically: true, encoding: .utf8)
+        let reader = SyncHistoryReader(path: growing.path, maxBytes: 400)
+        let empty = try reader.read()
+        assert(empty.isEmpty)
+        let appendable = try FileHandle(forWritingTo: growing)
+        func append(_ text: String) throws {
+            try appendable.seekToEnd()
+            try appendable.write(contentsOf: Data(text.utf8))
+        }
+        try append("2026-10-09T11:00:00Z 开始 [科研] 双向合并：/local → /cloud\n")
+        let open = try reader.read()
+        assert(open.count == 1 && open[0].finishedAt == nil)
+        try append("2026-10-09T11:00:05Z 结束 [科研]，退出码 0：uploaded=2 failed=0\n")
+        let done = try reader.read()
+        assert(done.count == 1 && done[0].counts["uploaded"] == 2)
+        for minute in 10..<20 {
+            try append("2026-10-09T11:\(minute):00Z 开始 [科研] 双向合并：/local → /cloud\n")
+            try append("2026-10-09T11:\(minute):30Z 结束 [科研]，退出码 0：downloaded=\(minute) failed=0\n")
+        }
+        try appendable.close()
+        let trimmed = try reader.read()
+        assert(trimmed.first?.counts["downloaded"] == 19)
+        assert(trimmed.count < 12, "the reader keeps only the newest maxBytes of the log")
+        assert(trimmed.allSatisfy { $0.finishedAt != nil })
+        try "2026-10-09T12:00:00Z 开始 [新] 双向合并：/n → /m\n".write(to: growing, atomically: true, encoding: .utf8)
+        let replaced = try reader.read()
+        assert(replaced.map(\.pairName) == ["新"], "a replaced log is read again from the start")
+
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + ".log")
         try sample.write(to: temporary, atomically: true, encoding: .utf8)

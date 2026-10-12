@@ -100,50 +100,63 @@ private func startRecord(_ body: String, date: Date, id: Int) -> SyncHistoryReco
                              destinationPath: paths[1], isPreview: preview)
 }
 
+/// Folder pairs run in parallel, so their log entries interleave. A record is
+/// matched to its end by pair name; the end entry's output lines follow it
+/// contiguously because each log entry is a single write.
 func parseSyncHistory(_ text: String) -> [SyncHistoryRecord] {
     let formatter = ISO8601DateFormatter()
     var records: [SyncHistoryRecord] = []
-    var current: SyncHistoryRecord?
+    var open: [String: SyncHistoryRecord] = [:]
+    var trailing: SyncHistoryRecord?
+    var started = 0
 
-    func flush() {
-        if var record = current {
-            record.finishParsing()
-            records.append(record)
-        }
-        current = nil
+    func finish(_ record: SyncHistoryRecord) {
+        var record = record
+        record.finishParsing()
+        records.append(record)
+    }
+
+    func flushTrailing() {
+        if let record = trailing { finish(record) }
+        trailing = nil
     }
 
     for line in text.components(separatedBy: .newlines) {
-        if let (date, body) = logEntry(line, formatter: formatter) {
-            if body.hasPrefix("结束 ["), var record = current,
-               body.hasPrefix("结束 [\(record.pairName)]，退出码 "),
-               let colon = body.firstIndex(of: "：") {
-                let codeStart = body.range(of: "，退出码 ")!.upperBound
-                record.exitCode = Int(body[codeStart..<colon])
-                record.finishedAt = date
-                record.output = String(body[body.index(after: colon)...])
-                current = record
-                continue
-            }
-            if body.hasPrefix("失败 ["), var record = current,
-               record.finishedAt == nil,
-               body.hasPrefix("失败 [\(record.pairName)]：") {
-                record.finishedAt = date
-                record.exitCode = 1
-                record.output = "FAILED\t\(record.pairName)\t"
-                    + String(body.dropFirst("失败 [\(record.pairName)]：".count))
-                current = record
-                flush()
-                continue
-            }
-            flush()
-            current = startRecord(body, date: date, id: records.count)
-        } else if current?.finishedAt != nil {
-            current?.output += "\n" + line
+        guard let (date, body) = logEntry(line, formatter: formatter) else {
+            trailing?.output += "\n" + line
+            continue
+        }
+        flushTrailing()
+        if body.hasPrefix("结束 ["),
+           let name = open.keys.first(where: { body.hasPrefix("结束 [\($0)]，退出码 ") }),
+           var record = open[name], let colon = body.firstIndex(of: "：") {
+            let codeStart = body.range(of: "，退出码 ")!.upperBound
+            record.exitCode = Int(body[codeStart..<colon])
+            record.finishedAt = date
+            record.output = String(body[body.index(after: colon)...])
+            open[name] = nil
+            trailing = record
+            continue
+        }
+        if body.hasPrefix("失败 ["),
+           let name = open.keys.first(where: { body.hasPrefix("失败 [\($0)]：") }),
+           var record = open[name] {
+            record.finishedAt = date
+            record.exitCode = 1
+            record.output = "FAILED\t\(name)\t" + String(body.dropFirst("失败 [\(name)]：".count))
+            open[name] = nil
+            finish(record)
+            continue
+        }
+        if let record = startRecord(body, date: date, id: started) {
+            started += 1
+            if let interrupted = open[record.pairName] { finish(interrupted) }
+            open[record.pairName] = record
         }
     }
-    flush()
-    return records.reversed()
+    flushTrailing()
+    open.values.forEach(finish)
+    return records.sorted { $0.id > $1.id }
 }
 
 func readSyncHistory(at path: String, maxBytes: UInt64 = 2_000_000) throws -> [SyncHistoryRecord] {
@@ -158,4 +171,57 @@ func readSyncHistory(at path: String, maxBytes: UInt64 = 2_000_000) throws -> [S
         text = String(text[text.index(after: newline)...])
     }
     return Array(parseSyncHistory(text).prefix(200))
+}
+
+/// Keeps the parsed tail of sync.log between refreshes and reads only the bytes
+/// appended since the last call. Use from one queue at a time.
+final class SyncHistoryReader {
+    let path: String
+    let maxBytes: Int
+    private var buffer = Data()
+    private var offset: UInt64 = 0
+    private var fileID: UInt64?
+    private var records: [SyncHistoryRecord] = []
+
+    init(path: String, maxBytes: Int = 2_000_000) {
+        self.path = path
+        self.maxBytes = maxBytes
+    }
+
+    func read() throws -> [SyncHistoryRecord] {
+        var info = stat()
+        guard stat(path, &info) == 0 else {
+            buffer = Data()
+            offset = 0
+            fileID = nil
+            records = []
+            return []
+        }
+        let size = UInt64(info.st_size)
+        let inode = UInt64(info.st_ino)
+        if fileID == inode && size == offset { return records }
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        var cutMidLine = false
+        if fileID != inode || size < offset {
+            let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+            buffer = Data()
+            offset = start
+            cutMidLine = start > 0
+        }
+        try handle.seek(toOffset: offset)
+        let appended = handle.readDataToEndOfFile()
+        offset += UInt64(appended.count)
+        buffer.append(appended)
+        if buffer.count > maxBytes {
+            buffer = Data(buffer.suffix(maxBytes))
+            cutMidLine = true
+        }
+        if cutMidLine, let newline = buffer.firstIndex(of: 10) {
+            buffer = Data(buffer[buffer.index(after: newline)...])
+        }
+        fileID = inode
+        records = Array(parseSyncHistory(String(decoding: buffer, as: UTF8.self)).prefix(200))
+        return records
+    }
 }
