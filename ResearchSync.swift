@@ -516,6 +516,46 @@ func appendLog(_ message: String) {
     }
 }
 
+/// True while another process or thread holds the sync lock. Takes nothing.
+func syncIsRunning() -> Bool {
+    let lockFD = open(supportDirectory + "/sync.lock", O_RDWR)
+    guard lockFD >= 0 else { return false }
+    defer { close(lockFD) }
+    guard flock(lockFD, LOCK_SH | LOCK_NB) == 0 else { return true }
+    flock(lockFD, LOCK_UN)
+    return false
+}
+
+/// The --status report for Shortcuts and scripts: read-only JSON.
+func syncStatusJSON(_ config: SyncConfig) -> String {
+    let history = (try? readSyncHistory(at: logPath)) ?? []
+    let formatter = ISO8601DateFormatter()
+    let pairs: [[String: Any]] = config.pairs.map { pair in
+        let record = history.first { record in
+            !record.isPreview && (
+                (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
+                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath))
+        }
+        let result: String
+        switch record {
+        case nil: result = "never"
+        case let record? where record.finishedAt == nil || record.hasFailures: result = "incomplete"
+        case let record? where record.needsAttention: result = "attention"
+        default: result = "ok"
+        }
+        var entry: [String: Any] = [
+            "id": pair.id.uuidString, "name": pair.name, "enabled": pair.enabled,
+            "direction": pair.scheduledDirection, "lastResult": result,
+            "pendingConflicts": (try? pendingConflicts(for: pair).count) ?? 0
+        ]
+        if let record { entry["lastSync"] = formatter.string(from: record.finishedAt ?? record.startedAt) }
+        return entry
+    }
+    let report: [String: Any] = ["running": syncIsRunning(), "scheduledSync": config.enabled, "pairs": pairs]
+    let data = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+    return String(decoding: data, as: UTF8.self)
+}
+
 private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
     try fm.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
     let lockFD = open(supportDirectory + "/sync.lock", O_CREAT | O_RDWR, 0o600)
@@ -1682,6 +1722,7 @@ final class SyncModel: ObservableObject {
 @main
 struct ResearchSyncApp: App {
     @StateObject private var model: SyncModel
+    @NSApplicationDelegateAdaptor(PathSyncAppDelegate.self) private var appDelegate
 
     init() {
         let args = CommandLine.arguments
@@ -1780,6 +1821,15 @@ struct ResearchSyncApp: App {
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
+        if args.contains("--status") {
+            let configPath: String
+            if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
+            else { configPath = defaultConfigPath }
+            do {
+                print(syncStatusJSON(try loadConfig(configPath)))
+                exit(0)
+            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
         if args.contains("--sync") || args.contains("--dry-run") || args.contains("--push") || args.contains("--pull") || args.contains("--merge") {
             let configPath: String
             if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
@@ -1807,7 +1857,9 @@ struct ResearchSyncApp: App {
                 exit(1)
             }
         }
-        self._model = StateObject(wrappedValue: SyncModel())
+        let model = SyncModel()
+        URLCommandRouter.model = model
+        self._model = StateObject(wrappedValue: model)
         UNUserNotificationCenter.current().delegate = syncNotificationDelegate
     }
 

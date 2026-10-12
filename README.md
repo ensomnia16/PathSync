@@ -51,6 +51,20 @@
 
 当前图标源图是 `PathSyncIcon.png`，由选定的“轨道梭”方案直接生成；旧版 `GenerateIcon.swift` 仅保留作历史参考。应用内“关于”页面可以选择界面语言。
 
+## 快捷指令
+
+在“快捷指令”中用“打开 URL”动作：
+
+```text
+pathsync://sync                 按各组设定的方向同步全部已启用路径
+pathsync://sync?pair=ID或名称    只同步一组路径（路径组 ID，或唯一的路径名称）
+pathsync://open                 打开主窗口
+```
+
+有未保存的设置或已有同步在运行时，同步请求会被忽略。获取同步状态可用“运行 Shell 脚本”动作执行 `/Applications/路径同步.app/Contents/MacOS/ResearchSync --status`，它以 JSON 输出每组路径的上次同步时间、结果和待处理冲突数，以及是否正在同步；该命令只读取，不同步。
+
+目前用 `build.sh`（只需命令行工具，不需要 Xcode）构建，无法生成 App Intents 所需的元数据，因此快捷指令里不会出现“同步全部路径”等原生动作；需要用 Xcode 工程构建时才能加入。
+
 ## 命令行
 
 应用包中的 `Contents/MacOS/ResearchSync` 支持：
@@ -71,6 +85,7 @@
                        对当前主文件与保留副本采用修改日期较新的版本
 --restore-backup ID --pair UUID
                        恢复同步记录中的一个备份；覆盖当前文件前再次备份
+--status                以 JSON 输出各组路径的同步状态（只读）
 --install               安装或更新当前用户的定时任务
 ```
 

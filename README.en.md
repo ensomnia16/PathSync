@@ -49,3 +49,17 @@ Starting with 2.11.0, there is no separate deletion-propagation switch. The old 
 In two-way merge and upload, the local version remains at the original path while a labeled cloud copy appears in both folders. In download, the cloud version remains at the original path and a labeled local copy appears in both folders. Backups are stored under `~/Library/Application Support/ResearchSync/merge-state/`. Keeping both preserves content but does not merge it into the original file; merge the two versions yourself when needed. Automatic keep-both leaves nothing pending, and reviews left by older versions are cleared on the next automatic sync. With “Pause for a decision”, choosing Keep both by hand marks the item for review until you acknowledge it; the copy and backup remain. Manual conflicts stay pending until resolved; if either original changes after listing, sync again before choosing a version.
 
 History reads the existing `sync.log`, so older runs remain visible. It shows records for currently configured folder pairs, loading up to the last 2 MB of the log and displaying the newest 200 runs. Ordinary transfers show counts; conflicts and failures include filenames.
+
+## Shortcuts
+
+Use the “Open URL” action in Shortcuts:
+
+```text
+pathsync://sync                 sync all enabled folders in their own directions
+pathsync://sync?pair=ID-or-name sync one folder pair (its ID or a unique name)
+pathsync://open                 open the main window
+```
+
+A sync request is ignored while settings are unsaved or another sync is running. For status, use “Run Shell Script” with `/Applications/路径同步.app/Contents/MacOS/ResearchSync --status`. It prints each pair's last sync, result, and pending conflicts, plus whether a sync is running, as JSON, and only reads.
+
+`build.sh` builds with the Command Line Tools and cannot produce App Intents metadata, so native Shortcuts actions are not available in this build; adding them needs an Xcode project.

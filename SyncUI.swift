@@ -325,6 +325,7 @@ private let translations: [String: (zh: String, en: String)] = [
     "syncShort": ("同步", "Sync"),
     "editPair": ("编辑", "Edit"),
     "pendingTitle": ("待处理", "Needs attention"),
+    "urlPairNotFound": ("快捷指令要求同步“%@”，但没有找到这组路径（可用路径组 ID 或唯一的名称）。", "Shortcuts asked to sync “%@”, but no folder pair matches (use its ID or a unique name)."),
     "checkCloud": ("同步前检查 OneDrive 等云盘", "Check OneDrive and other cloud folders before syncing"),
     "checkCloudHint": ("位于 ~/Library/CloudStorage 的路径：OneDrive 没有运行或文件夹 20 秒内无响应时，这组路径本次跳过，不会把读不到的文件当作删除。需要比较的仅在线文件会先下载再比较；预览只统计数量，不触发下载。", "For folders in ~/Library/CloudStorage: if OneDrive isn't running or the folder doesn't respond within 20 seconds, the pair is skipped this time and unreadable files are never treated as deletions. Online-only files that must be compared are downloaded first; preview only counts them."),
     "precheckNotRunning": ("「%@」已跳过：OneDrive 没有运行。打开 OneDrive 后再同步。", "“%@” skipped: OneDrive isn’t running. Open OneDrive and sync again."),
