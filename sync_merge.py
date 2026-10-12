@@ -96,6 +96,17 @@ def signature(path):
     return [info.st_size, info.st_mtime_ns]
 
 
+SF_DATALESS = 0x40000000
+
+
+def is_dataless(path):
+    """True for an online-only placeholder whose content the provider must download first."""
+    try:
+        return bool(getattr(path.lstat(), 'st_flags', 0) & SF_DATALESS)
+    except OSError:
+        return False
+
+
 def change_time(path):
     try:
         return path.lstat().st_ctime_ns
@@ -191,8 +202,11 @@ def scan(root, args, errors):
 class CloudPrefetch:
     """Hydrate cloud-only files ahead of the merge without delaying its first copy."""
 
-    def __init__(self, root, names):
-        self.names = names if len(names) >= 100 else []
+    def __init__(self, root, names, online_only=()):
+        # Many new files, or any online-only file the merge must read, are
+        # downloaded ahead in parallel with a bounded wait for each.
+        self.names = list(names) if len(names) >= 100 else []
+        self.names += [name for name in online_only if name not in set(self.names)]
         self.executor = ThreadPoolExecutor(max_workers=4) if self.names else None
         self.futures = {}
         self.completed = 0
@@ -742,7 +756,7 @@ def sync_files(args, local, cloud, files, conflicts):
     names = local_names | cloud_names | set(active_files) | set(active_conflicts)
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
-              'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0}
+              'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0, 'online_only': 0}
 
     def aligned(path_name, local_sig, cloud_sig, content_hash):
         return {'local': local_sig, 'cloud': cloud_sig, 'anchorHash': content_hash,
@@ -851,9 +865,30 @@ def sync_files(args, local, cloud, files, conflicts):
             return float('inf'), name
 
     import_names = sorted(new_cloud_only, key=import_priority)
-    # A preview never needs the content of a file that exists on one side only,
-    # so it does not ask the cloud provider to download placeholders.
-    prefetch = CloudPrefetch(cloud, [] if args.dry_run else import_names)
+
+    def needs_cloud_content(name):
+        record = files.get(name)
+        local_file, cloud_file = local / name, cloud / name
+        try:
+            if record is None or name in conflicts:
+                return True
+            return not (unchanged_metadata(signature(local_file), record.get('local'))
+                        and unchanged_metadata(signature(cloud_file), record.get('cloud'), cloud=True)
+                        and record.get('localCtime') == change_time(local_file))
+        except OSError:
+            return True
+
+    online_only = []
+    if args.hydrate_online_only and not args.dry_run:
+        online_only = sorted((name for name in cloud_names
+                              if name not in tree_record_names and not blocked(name)
+                              and is_dataless(cloud / name) and needs_cloud_content(name)),
+                             key=import_priority)
+        if online_only:
+            print(f'ONLINE_ONLY\t{len(online_only)}\t先从云端下载仅在线的文件')
+        counts['online_only'] = len(online_only)
+    # A preview never downloads placeholders; it reports them instead.
+    prefetch = CloudPrefetch(cloud, [] if args.dry_run else import_names, online_only)
     ordered_names = sorted(names - new_cloud_only) + import_names
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
@@ -908,8 +943,11 @@ def sync_files(args, local, cloud, files, conflicts):
                         not upload and args.direction == 'upload'):
                     counts['skipped'] += 1
                     continue
-                planned('upload' if upload else 'download', name,
-                        size=(local_sig if upload else cloud_sig)[0])
+                detail = {'size': (local_sig if upload else cloud_sig)[0]}
+                if not upload and is_dataless(cloud_file):
+                    detail['online'] = True
+                    counts['online_only'] += 1
+                planned('upload' if upload else 'download', name, **detail)
                 counts['uploaded' if upload else 'downloaded'] += 1
                 continue
 
@@ -927,6 +965,12 @@ def sync_files(args, local, cloud, files, conflicts):
                     if review_hashes[0] != review_hashes[1]:
                         raise OSError('待合并的主文件两侧又出现不同版本；请先人工检查，未覆盖任何一侧')
                 counts['unchanged'] += 1
+                continue
+
+            if args.dry_run and cloud_sig is not None and is_dataless(cloud_file):
+                # Comparing needs the content, and a preview must not download it.
+                planned('online', name, size=cloud_sig[0])
+                counts['online_only'] += 1
                 continue
 
             print(f'PROGRESS\tFILE\t{name}', flush=True)
@@ -1316,6 +1360,8 @@ def main():
     parser.add_argument('--include-temp', action='store_true')
     parser.add_argument('--exclude', action='append', default=[], metavar='PATTERN',
                         help='custom exclusion rule; may be repeated')
+    parser.add_argument('--hydrate-online-only', action='store_true',
+                        help='download online-only cloud files the merge must read before comparing')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--plan-json', action='store_true',
                         help='with --dry-run, also print the planned actions as one JSON line')

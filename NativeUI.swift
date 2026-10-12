@@ -295,7 +295,8 @@ private struct PairPlanRows: View {
         ("upload", "arrow.up.circle", .blue), ("download", "arrow.down.circle", .green),
         ("delete", "trash", .red), ("newest", "clock.arrow.circlepath", .purple),
         ("keep_both", "doc.on.doc", .orange), ("conflict", "exclamationmark.triangle", .orange),
-        ("review", "hourglass", .orange), ("failed", "xmark.octagon", .red)
+        ("review", "hourglass", .orange), ("online", "icloud.and.arrow.down", .teal),
+        ("failed", "xmark.octagon", .red)
     ]
 
     private func t(_ key: String) -> String { model.t(key) }
@@ -357,6 +358,10 @@ private struct PairPlanRows: View {
                 }
             }
             .font(compact ? .caption : .callout)
+            if let online = preview.plan?.counts["online_only"], online > 0 {
+                Label(String(format: t("previewOnline"), online), systemImage: "icloud.and.arrow.down")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if !compact, let skipped = preview.plan?.counts["skipped"], skipped > 0 {
                 Text(String(format: t("previewSkipped"), skipped))
                     .font(.caption).foregroundStyle(.secondary)
@@ -1277,6 +1282,12 @@ struct ContentView: View {
             } footer: {
                 Text(t("backgroundHint") + " "
                      + (model.config.scheduleMode == "daily" ? t("dailyHint") : t("atLeastSix")))
+            }
+
+            Section {
+                Toggle(t("checkCloud"), isOn: $model.config.checkCloudBeforeSync)
+            } footer: {
+                Text(t("checkCloudHint"))
             }
 
             Section {

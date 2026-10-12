@@ -10,6 +10,8 @@ import shutil
 from datetime import datetime, timedelta, timezone
 import unittest
 from unittest import mock
+import contextlib
+import io
 
 
 HELPER = Path(__file__).resolve().parents[1] / 'sync_merge.py'
@@ -396,6 +398,59 @@ class MergeTests(unittest.TestCase):
         self.assertIn('data/raw/big.csv', json.loads(self.state.read_text())['files'],
                       'the anchor of a newly excluded file is kept')
         self.assertNotIn('DELETED', result.stdout)
+
+    def run_in_process(self, *extra, online=()):
+        """Run main() here so is_dataless can mark chosen cloud files as online-only."""
+        online_paths = {str((self.cloud / name).resolve()) for name in online}
+        hydrated = []
+
+        def fake_dataless(path):
+            return str(Path(path).resolve()) in online_paths and str(Path(path).resolve()) not in hydrated
+
+        def fake_hydrate(path):
+            hydrated.append(str(Path(path).resolve()))
+            return None
+
+        argv = ['sync_merge.py', str(self.local), str(self.cloud), str(self.state),
+                '--exclude-latex', '--conflict-policy', 'keep-both', *extra]
+        output = io.StringIO()
+        with mock.patch.object(sync_merge, 'is_dataless', side_effect=fake_dataless), \
+                mock.patch.object(sync_merge.CloudPrefetch, 'hydrate', side_effect=fake_hydrate), \
+                mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(output):
+            code = sync_merge.main()
+        return code, output.getvalue(), hydrated
+
+    def test_preview_reports_online_only_files_without_downloading(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        (self.cloud / 'new.pdf').write_text('new online file')
+        before = self.snapshot_everything()
+        code, output, hydrated = self.run_in_process(
+            '--dry-run', '--plan-json', '--hydrate-online-only', online=['paper.tex', 'new.pdf'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(hydrated, [], 'a preview never downloads placeholders')
+        self.assertEqual(self.snapshot_everything(), before)
+        plan = json.loads(next(line for line in output.splitlines()
+                               if line.startswith('PLAN_JSON\t')).split('\t', 1)[1])
+        self.assertIn({'action': 'online', 'name': 'paper.tex', 'size': len('cloud edit')}, plan['items'])
+        self.assertIn({'action': 'download', 'name': 'new.pdf', 'size': len('new online file'),
+                       'online': True}, plan['items'])
+        self.assertEqual(plan['counts']['online_only'], 2)
+
+    def test_sync_downloads_needed_online_only_files_first(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        (self.local / 'untouched.tex').write_text('same')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.cloud / 'paper.tex').write_text('cloud edit')
+        code, output, hydrated = self.run_in_process(
+            '--hydrate-online-only', online=['paper.tex', 'untouched.tex'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual([Path(item).name for item in hydrated], ['paper.tex'],
+                         'only files the merge must read are downloaded')
+        self.assertIn('ONLINE_ONLY\t1', output)
+        self.assertLess(output.index('PROGRESS\tPREFETCH\t0\t1'), output.index('PROGRESS\tFILE\tpaper.tex'))
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud edit')
 
     def test_unique_files_and_one_sided_updates(self):
         (self.local / 'paper.tex').write_text('local v1')

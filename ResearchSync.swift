@@ -137,12 +137,14 @@ struct SyncConfig: Codable, Equatable {
     /// "local" (beside the merge state), "icloud" or "folder" (backupFolder).
     var backupLocation = "local"
     var backupFolder = ""
+    /// Before each sync, skip pairs whose cloud provider folder is offline.
+    var checkCloudBeforeSync = true
 
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
         case checkForUpdates, autoInstallUpdates, cloudConfigEnabled, oneDriveRoot, localRoot, cloudImportAnchors
-        case backupLocation, backupFolder
+        case backupLocation, backupFolder, checkCloudBeforeSync
         case source, destination, scheduledDirection
     }
 
@@ -170,6 +172,7 @@ struct SyncConfig: Codable, Equatable {
         cloudImportAnchors = try data.decodeIfPresent([String: CloudImportAnchor].self, forKey: .cloudImportAnchors) ?? [:]
         backupLocation = try data.decodeIfPresent(String.self, forKey: .backupLocation) ?? "local"
         backupFolder = try data.decodeIfPresent(String.self, forKey: .backupFolder) ?? ""
+        checkCloudBeforeSync = try data.decodeIfPresent(Bool.self, forKey: .checkCloudBeforeSync) ?? true
         if let saved = try data.decodeIfPresent([SyncPair].self, forKey: .pairs) {
             pairs = saved.filter { !$0.isUnusedDefaultPlaceholder }
         } else {
@@ -206,6 +209,7 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(cloudImportAnchors, forKey: .cloudImportAnchors)
         try data.encode(backupLocation, forKey: .backupLocation)
         try data.encode(backupFolder, forKey: .backupFolder)
+        try data.encode(checkCloudBeforeSync, forKey: .checkCloudBeforeSync)
     }
 }
 
@@ -399,6 +403,53 @@ private struct ConflictState: Decodable {
 /// Moves aside a merge state left over from the pair's previous roots when it holds no conflicts,
 /// so editing a pair's paths starts a fresh baseline instead of failing the consistency check.
 /// States that still hold conflicts are kept and keep failing, so no conflict record is lost.
+/// The File Provider folder (e.g. "OneDrive-Personal") that holds a path, if any.
+func cloudStorageProvider(_ path: String) -> String? {
+    let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+    guard let index = parts.firstIndex(of: "CloudStorage"), index >= 2,
+          parts[index - 1] == "Library", parts.indices.contains(index + 1) else { return nil }
+    return parts[index + 1]
+}
+
+func oneDriveIsRunning() -> Bool {
+    NSWorkspace.shared.runningApplications.contains { app in
+        (app.bundleIdentifier ?? "").hasPrefix("com.microsoft.OneDrive")
+            || app.localizedName == "OneDrive"
+    }
+}
+
+/// Lists a folder on a background thread, so an offline provider cannot hang the sync.
+func folderResponds(_ path: String, within seconds: Double = 20) -> Bool {
+    let done = DispatchSemaphore(value: 0)
+    let result = NSLock()
+    var listed = false
+    DispatchQueue.global(qos: .utility).async {
+        let ok = (try? FileManager.default.contentsOfDirectory(atPath: path)) != nil
+        result.lock(); listed = ok; result.unlock()
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + seconds) == .success else { return false }
+    result.lock(); defer { result.unlock() }
+    return listed
+}
+
+/// Explains why a pair should be skipped before syncing, or nil when it can run.
+/// A skipped pair is never scanned, so an offline provider cannot read as deletions.
+func cloudPrecheckProblem(_ pair: SyncPair, language: String,
+                          isOneDriveRunning: () -> Bool = oneDriveIsRunning,
+                          responds: (String) -> Bool = { folderResponds($0) }) -> String? {
+    for path in [pair.cloudPath, pair.localPath] {
+        guard let provider = cloudStorageProvider(path) else { continue }
+        if provider.hasPrefix("OneDrive") && !isOneDriveRunning() {
+            return String(format: uiText("precheckNotRunning", language: language), pair.name)
+        }
+        if !responds(path) {
+            return String(format: uiText("precheckNoResponse", language: language), pair.name, provider)
+        }
+    }
+    return nil
+}
+
 /// Whether the merge state belongs to the pair's previous roots and can be retired.
 /// Throws when it still holds conflicts. Reads only.
 func mergeStateIsStale(_ pair: SyncPair) throws -> Bool {
@@ -479,7 +530,13 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
                      plan: Bool = false, backupArguments: [String] = [], language: String,
+                     checkCloud: Bool = false,
                      progress: ((UUID, String) -> Void)?) throws -> String {
+    if checkCloud, let problem = cloudPrecheckProblem(pair, language: language) {
+        // Logged as a run so History shows the skipped pair and its reason.
+        appendLog("\(dryRun ? "预览" : "开始") [\(pair.name)] \(direction.label)：\(pair.localPath) → \(pair.cloudPath)")
+        throw NSError(domain: appID, code: 19, userInfo: [NSLocalizedDescriptionKey: problem])
+    }
     let (local, cloud) = try validatedPaths(pair)
     // A preview never moves files: it plans against an empty baseline instead,
     // which is what the real sync uses after retiring the stale state.
@@ -504,6 +561,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     if pair.syncTemporaryFiles { arguments.append("--include-temp") }
     // --exclude=VALUE keeps a rule that starts with "-" from reading as an option.
     arguments += pair.excludePatterns.map { "--exclude=" + $0 }
+    if checkCloud && cloudStorageProvider(pair.cloudPath) != nil { arguments.append("--hydrate-online-only") }
     if dryRun { arguments.append("--dry-run") }
     if dryRun && plan { arguments.append("--plan-json") }
     arguments += backupArguments
@@ -771,6 +829,7 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
                                 backupRetentionDays: config.backupRetentionDays,
                                 dryRun: dryRun, plan: plan,
                                 backupArguments: config.backupArguments(pair), language: config.language,
+                                checkCloud: config.checkCloudBeforeSync,
                                 progress: progress)
                 }
                 if case .failure(let error) = result {

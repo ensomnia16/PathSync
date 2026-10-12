@@ -325,6 +325,12 @@ private let translations: [String: (zh: String, en: String)] = [
     "syncShort": ("同步", "Sync"),
     "editPair": ("编辑", "Edit"),
     "pendingTitle": ("待处理", "Needs attention"),
+    "checkCloud": ("同步前检查 OneDrive 等云盘", "Check OneDrive and other cloud folders before syncing"),
+    "checkCloudHint": ("位于 ~/Library/CloudStorage 的路径：OneDrive 没有运行或文件夹 20 秒内无响应时，这组路径本次跳过，不会把读不到的文件当作删除。需要比较的仅在线文件会先下载再比较；预览只统计数量，不触发下载。", "For folders in ~/Library/CloudStorage: if OneDrive isn't running or the folder doesn't respond within 20 seconds, the pair is skipped this time and unreadable files are never treated as deletions. Online-only files that must be compared are downloaded first; preview only counts them."),
+    "precheckNotRunning": ("「%@」已跳过：OneDrive 没有运行。打开 OneDrive 后再同步。", "“%@” skipped: OneDrive isn’t running. Open OneDrive and sync again."),
+    "precheckNoResponse": ("「%@」已跳过：%@ 文件夹 20 秒内没有响应，可能离线。", "“%@” skipped: the %@ folder didn’t respond within 20 seconds and may be offline."),
+    "plan_online": ("仅在线", "Online only"),
+    "previewOnline": ("同步时会先从云端下载 %d 个仅在线的文件，下载后再比较。", "%d online-only file(s) will be downloaded first when syncing, then compared."),
     "excludeRules": ("自定义排除规则", "Custom exclusion rules"),
     "excludeRulesHint": ("每行一条，写法同 .gitignore：*.pdf、data/raw/（结尾 / 只匹配文件夹）、/build（开头 / 从此路径根目录算起）、figures/**/*.png；# 开头为注释，不支持 !。匹配的文件两侧都不会复制、覆盖或删除；新加规则不会删除已同步的副本。预览会按规则计算。", "One rule per line, like .gitignore: *.pdf, data/raw/ (a trailing / matches folders only), /build (a leading / starts at this pair's root), figures/**/*.png. Lines starting with # are comments; ! is not supported. Matching files are never copied, overwritten, or deleted on either side, and adding a rule never deletes synced copies. Preview applies the rules."),
     "attentionNeeded": ("有冲突待处理", "Conflicts need attention"),
@@ -395,6 +401,7 @@ func uiError(_ error: Error, language: String) -> String {
     case 16: return "Choose a folder for backups, or keep them on this Mac."
     case 17: return "The backup folder can't be inside or contain a sync folder."
     case 18: return "Some backups could not be moved. They remain on this Mac."
+    case 19: return error.localizedDescription
     default: return "The operation did not complete. Check History for details."
     }
 }

@@ -239,6 +239,28 @@ struct CloudConfigChecks {
         let ruleless = try JSONDecoder().decode(SyncPair.self, from: Data(rulelessJSON.utf8))
         assert(ruleless.excludeRules.isEmpty && ruleless.excludePatterns.isEmpty)
 
+        // OneDrive precheck: provider folders are detected, and an offline one skips the pair.
+        let oneDrivePair = SyncPair(name: "论文", localPath: "/Users/alice/Documents/论文",
+                                    cloudPath: "/Users/alice/Library/CloudStorage/OneDrive-Personal/文档/论文")
+        assert(cloudStorageProvider(oneDrivePair.cloudPath) == "OneDrive-Personal")
+        assert(cloudStorageProvider(oneDrivePair.localPath) == nil)
+        assert(cloudPrecheckProblem(oneDrivePair, language: "zh-Hans",
+                                    isOneDriveRunning: { true }, responds: { _ in true }) == nil)
+        let stopped = cloudPrecheckProblem(oneDrivePair, language: "en",
+                                           isOneDriveRunning: { false }, responds: { _ in true })
+        assert(stopped?.contains("OneDrive isn’t running") == true)
+        let silent = cloudPrecheckProblem(oneDrivePair, language: "zh-Hans",
+                                          isOneDriveRunning: { true }, responds: { _ in false })
+        assert(silent?.contains("20 秒内没有响应") == true)
+        var checked = false
+        _ = cloudPrecheckProblem(SyncPair(name: "本地", localPath: "/tmp/a", cloudPath: "/Volumes/B/c"),
+                                 language: "zh-Hans", isOneDriveRunning: { checked = true; return false },
+                                 responds: { _ in checked = true; return false })
+        assert(!checked, "folders outside CloudStorage are not checked")
+        assert(folderResponds(FileManager.default.temporaryDirectory.path, within: 5))
+        assert(!folderResponds("/nonexistent-\(UUID().uuidString)", within: 5))
+        assert(SyncConfig().checkCloudBeforeSync)
+
         print("cloud configuration checks passed")
     }
 }
