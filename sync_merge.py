@@ -18,7 +18,7 @@ import tempfile
 import time
 import uuid
 
-from sync_tree import excluded_relative
+from sync_tree import ExcludeRules, excluded_relative
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
@@ -140,8 +140,9 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
 
 
 def excluded_path(name, args, directory=False):
-    return excluded_relative(name, args.exclude_latex, args.skip_codex,
-                             args.skip_claude, args.include_temp, directory=directory)
+    return (excluded_relative(name, args.exclude_latex, args.skip_codex,
+                              args.skip_claude, args.include_temp, directory=directory)
+            or args.exclude_rules.matches(name, directory=directory))
 
 
 def scan(root, args, errors):
@@ -1313,6 +1314,8 @@ def main():
     parser.add_argument('--skip-codex', action='store_true')
     parser.add_argument('--skip-claude', action='store_true')
     parser.add_argument('--include-temp', action='store_true')
+    parser.add_argument('--exclude', action='append', default=[], metavar='PATTERN',
+                        help='custom exclusion rule; may be repeated')
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--plan-json', action='store_true',
                         help='with --dry-run, also print the planned actions as one JSON line')
@@ -1350,6 +1353,7 @@ def main():
     cloud = args.cloud.resolve()
     args.local, args.cloud = local, cloud
     args.backup_count = 0
+    args.exclude_rules = ExcludeRules(args.exclude)
     args.backups = BackupPlace(args)
     if args.migrate_backups:
         moved, failed = move_backups(args, only_pending=False)

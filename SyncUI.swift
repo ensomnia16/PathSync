@@ -325,6 +325,8 @@ private let translations: [String: (zh: String, en: String)] = [
     "syncShort": ("同步", "Sync"),
     "editPair": ("编辑", "Edit"),
     "pendingTitle": ("待处理", "Needs attention"),
+    "excludeRules": ("自定义排除规则", "Custom exclusion rules"),
+    "excludeRulesHint": ("每行一条，写法同 .gitignore：*.pdf、data/raw/（结尾 / 只匹配文件夹）、/build（开头 / 从此路径根目录算起）、figures/**/*.png；# 开头为注释，不支持 !。匹配的文件两侧都不会复制、覆盖或删除；新加规则不会删除已同步的副本。预览会按规则计算。", "One rule per line, like .gitignore: *.pdf, data/raw/ (a trailing / matches folders only), /build (a leading / starts at this pair's root), figures/**/*.png. Lines starting with # are comments; ! is not supported. Matching files are never copied, overwritten, or deleted on either side, and adding a rule never deletes synced copies. Preview applies the rules."),
     "attentionNeeded": ("有冲突待处理", "Conflicts need attention"),
     "noPending": ("没有待处理的冲突。", "No conflicts need attention."),
     "pendingMore": ("另有 %d 项，在主窗口查看", "%d more in the main window"),

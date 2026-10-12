@@ -1168,6 +1168,17 @@ struct ContentView: View {
             }
 
             Section {
+                TextEditor(text: $model.config.pairs[index].excludeRules)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 80)
+                    .accessibilityLabel(t("excludeRules"))
+            } header: {
+                Text(t("excludeRules"))
+            } footer: {
+                Text(t("excludeRulesHint"))
+            }
+
+            Section {
                 if conflicts.isEmpty {
                     Label(t("noConflicts"), systemImage: "checkmark.seal")
                         .foregroundStyle(.secondary)

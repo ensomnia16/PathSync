@@ -6,6 +6,7 @@ import concurrent.futures
 import fnmatch
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -61,6 +62,64 @@ def excluded_relative(name, latex, skip_codex=False, skip_claude=False,
         return True
     return not include_temp and any(fnmatch.fnmatch(parts[-1], pattern)
                                     for pattern in TEMP_FILES)
+
+
+class ExcludeRules:
+    """A .gitignore-style subset: * ? ** globs, '/' at the end matches folders only,
+    a '/' at the start or in the middle anchors the rule at the pair's root,
+    '#' starts a comment. Negation with '!' is not supported and such lines are ignored."""
+
+    def __init__(self, lines=()):
+        self.rules = []
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith('!'):
+                continue
+            directory_only = line.endswith('/')
+            pattern = line.rstrip('/')
+            anchored = pattern.startswith('/') or '/' in pattern
+            pattern = pattern.lstrip('/')
+            if pattern:
+                self.rules.append((self.compile(pattern), anchored, directory_only))
+
+    @staticmethod
+    def compile(pattern):
+        expression = ''
+        index = 0
+        while index < len(pattern):
+            if pattern.startswith('**/', index):
+                expression += '(?:.*/)?'
+                index += 3
+            elif pattern.startswith('**', index):
+                expression += '.*'
+                index += 2
+            elif pattern[index] == '*':
+                expression += '[^/]*'
+                index += 1
+            elif pattern[index] == '?':
+                expression += '[^/]'
+                index += 1
+            else:
+                expression += re.escape(pattern[index])
+                index += 1
+        return re.compile(expression + r'\Z')
+
+    def __bool__(self):
+        return bool(self.rules)
+
+    def matches(self, name, directory=False):
+        """True when the path, or any folder above it, matches a rule."""
+        parts = Path(name).parts
+        for depth in range(1, len(parts) + 1):
+            candidate = '/'.join(parts[:depth])
+            is_directory = directory or depth < len(parts)
+            for expression, anchored, directory_only in self.rules:
+                if directory_only and not is_directory:
+                    continue
+                subject = candidate if anchored else parts[depth - 1]
+                if expression.match(subject):
+                    return True
+        return False
 
 
 def transfer(pair):

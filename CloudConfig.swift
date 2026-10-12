@@ -24,6 +24,7 @@ struct CloudConfigPair: Codable, Equatable {
     var syncCodexFiles: Bool? = nil
     var syncClaudeFiles: Bool? = nil
     var syncTemporaryFiles: Bool? = nil
+    var excludeRules: String? = nil
     var isUnusedDefaultPlaceholder: Bool {
         name == "新路径" && scheduledDirection == "merge" &&
             oneDriveRelativePath == nil && localRelativePath == nil
@@ -64,6 +65,8 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
                 values += [String(pair.syncCodexFiles ?? true),
                            String(pair.syncClaudeFiles ?? true),
                            String(pair.syncTemporaryFiles ?? true)]
+                // Only present rules join the digest, so older profiles keep theirs.
+                if let rules = pair.excludeRules, !rules.isEmpty { values.append(rules) }
             }
             return values
         }
@@ -90,7 +93,8 @@ struct CloudConfiguration: Codable, Equatable, Identifiable {
                             localRelativePath: relativePath(pair.localPath, within: config.localRoot),
                             syncCodexFiles: pair.syncCodexFiles,
                             syncClaudeFiles: pair.syncClaudeFiles,
-                            syncTemporaryFiles: pair.syncTemporaryFiles)
+                            syncTemporaryFiles: pair.syncTemporaryFiles,
+                            excludeRules: pair.excludeRules)
         }
         scheduleMode = config.scheduleMode
         intervalHours = config.intervalHours
@@ -170,6 +174,7 @@ func importing(_ profile: CloudConfiguration, into current: SyncConfig) throws -
         if let value = shared.syncCodexFiles { pair.syncCodexFiles = value }
         if let value = shared.syncClaudeFiles { pair.syncClaudeFiles = value }
         if let value = shared.syncTemporaryFiles { pair.syncTemporaryFiles = value }
+        if let value = shared.excludeRules { pair.excludeRules = value }
         if let relative = shared.oneDriveRelativePath,
            let cloud = path(in: current.oneDriveRoot, relative: relative) {
             if !pair.cloudPath.isEmpty && pair.cloudPath != cloud { pair.enabled = false }

@@ -223,6 +223,22 @@ struct CloudConfigChecks {
             assert(!summary.isEmpty)
         }
 
+        // Custom exclusion rules travel with the shared rules and survive import.
+        var ruled = source
+        ruled.pairs[0].excludeRules = "# comment\n*.pdf\n\n data/raw/ \n-dash"
+        assert(ruled.pairs[0].excludePatterns == ["*.pdf", "data/raw/", "-dash"])
+        let ruledProfile = CloudConfiguration(config: ruled, deviceID: alice, deviceName: "Alice Mac")
+        assert(ruledProfile.pairs[0].excludeRules == ruled.pairs[0].excludeRules)
+        assert(ruledProfile.sharedDigest != CloudConfiguration(config: source, deviceID: alice,
+                                                               deviceName: "Alice Mac").sharedDigest)
+        var receiver = SyncConfig()
+        receiver.oneDriveRoot = otherRoot
+        let received = try importing(ruledProfile, into: receiver)
+        assert(received.pairs.first { $0.id == pairID }?.excludeRules == ruled.pairs[0].excludeRules)
+        let rulelessJSON = #"{"id":"\#(UUID().uuidString)","name":"旧","localPath":"/a","cloudPath":"/b","scheduledDirection":"merge","enabled":true}"#
+        let ruleless = try JSONDecoder().decode(SyncPair.self, from: Data(rulelessJSON.utf8))
+        assert(ruleless.excludeRules.isEmpty && ruleless.excludePatterns.isEmpty)
+
         print("cloud configuration checks passed")
     }
 }

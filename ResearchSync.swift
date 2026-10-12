@@ -63,15 +63,25 @@ struct SyncPair: Codable, Identifiable, Equatable {
     var syncCodexFiles = true
     var syncClaudeFiles = true
     var syncTemporaryFiles = false
+    /// .gitignore-style rules, one per line; matching paths are never synced.
+    var excludeRules = ""
 
     enum CodingKeys: String, CodingKey {
         case id, name, localPath, cloudPath, scheduledDirection, enabled
-        case syncCodexFiles, syncClaudeFiles, syncTemporaryFiles
+        case syncCodexFiles, syncClaudeFiles, syncTemporaryFiles, excludeRules
+    }
+
+    /// The rule lines that sync_merge.py receives as --exclude.
+    var excludePatterns: [String] {
+        excludeRules.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 
     init(id: UUID = UUID(), name: String = "新路径", localPath: String = "", cloudPath: String = "",
          scheduledDirection: String = "merge", enabled: Bool = false,
-         syncCodexFiles: Bool = true, syncClaudeFiles: Bool = true, syncTemporaryFiles: Bool = false) {
+         syncCodexFiles: Bool = true, syncClaudeFiles: Bool = true, syncTemporaryFiles: Bool = false,
+         excludeRules: String = "") {
         self.id = id
         self.name = name
         self.localPath = localPath
@@ -81,6 +91,7 @@ struct SyncPair: Codable, Identifiable, Equatable {
         self.syncCodexFiles = syncCodexFiles
         self.syncClaudeFiles = syncClaudeFiles
         self.syncTemporaryFiles = syncTemporaryFiles
+        self.excludeRules = excludeRules
     }
 
     init(from decoder: Decoder) throws {
@@ -96,6 +107,7 @@ struct SyncPair: Codable, Identifiable, Equatable {
         // Existing copies are retained in the anchor; an omitted preference skips
         // build scratch directories without interpreting them as deletions.
         syncTemporaryFiles = try data.decodeIfPresent(Bool.self, forKey: .syncTemporaryFiles) ?? false
+        excludeRules = try data.decodeIfPresent(String.self, forKey: .excludeRules) ?? ""
     }
 
     var isUnusedDefaultPlaceholder: Bool {
@@ -490,6 +502,8 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     if !pair.syncCodexFiles { arguments.append("--skip-codex") }
     if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
     if pair.syncTemporaryFiles { arguments.append("--include-temp") }
+    // --exclude=VALUE keeps a rule that starts with "-" from reading as an option.
+    arguments += pair.excludePatterns.map { "--exclude=" + $0 }
     if dryRun { arguments.append("--dry-run") }
     if dryRun && plan { arguments.append("--plan-json") }
     arguments += backupArguments

@@ -350,6 +350,53 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.snapshot_everything(), before)
         self.assertEqual(list(drive.iterdir()), [])
 
+    def test_exclude_rules_follow_gitignore_subset(self):
+        rules = sync_merge.ExcludeRules([
+            '# comment', '', '*.pdf', 'data/raw/', '/build', 'figures/**/*.png',
+            'notes?.md', '!keep.pdf'])
+        self.assertTrue(rules.matches('paper.pdf'))
+        self.assertTrue(rules.matches('chapters/deep/fig.pdf'))
+        self.assertTrue(rules.matches('data/raw', directory=True))
+        self.assertTrue(rules.matches('data/raw/sample.csv'))
+        self.assertFalse(rules.matches('data/raw'), 'a trailing / matches folders only')
+        self.assertFalse(rules.matches('other/data/raw/x.csv'), 'a middle / anchors at the root')
+        self.assertTrue(rules.matches('build/out.txt'))
+        self.assertTrue(rules.matches('build', directory=True))
+        self.assertFalse(rules.matches('src/build/out.txt'), 'a leading / anchors at the root')
+        self.assertTrue(rules.matches('figures/a/b/plot.png'))
+        self.assertTrue(rules.matches('figures/plot.png'))
+        self.assertFalse(rules.matches('figures/plot.svg'))
+        self.assertTrue(rules.matches('notes1.md'))
+        self.assertFalse(rules.matches('notes12.md'))
+        self.assertTrue(rules.matches('keep.pdf'), 'negation is not supported, so *.pdf still applies')
+        self.assertFalse(sync_merge.ExcludeRules([]))
+
+    def test_excluded_paths_are_never_copied_overwritten_or_deleted(self):
+        (self.local / 'paper.tex').write_text('anchor')
+        (self.local / 'data' / 'raw').mkdir(parents=True)
+        (self.local / 'data' / 'raw' / 'big.csv').write_text('anchor data')
+        self.assertEqual(self.run_merge().returncode, 0)
+        self.assertTrue((self.cloud / 'data' / 'raw' / 'big.csv').exists())
+        rules = ['--exclude=data/raw/', '--exclude=*.pdf']
+        (self.local / 'data' / 'raw' / 'big.csv').unlink()
+        (self.cloud / 'data' / 'raw' / 'new.csv').write_text('cloud only')
+        (self.local / 'draft.pdf').write_text('local pdf')
+        (self.cloud / 'draft.pdf').write_text('different cloud pdf')
+        (self.local / 'paper.tex').write_text('local edit')
+        preview = self.run_merge('--dry-run', '--plan-json', *rules)
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual(self.plan(preview)['items'],
+                         [{'action': 'upload', 'name': 'paper.tex', 'size': len('local edit')}])
+        result = self.run_merge(*rules)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'local edit')
+        self.assertEqual((self.cloud / 'data' / 'raw' / 'big.csv').read_text(), 'anchor data')
+        self.assertFalse((self.local / 'data' / 'raw' / 'new.csv').exists())
+        self.assertEqual((self.cloud / 'draft.pdf').read_text(), 'different cloud pdf')
+        self.assertIn('data/raw/big.csv', json.loads(self.state.read_text())['files'],
+                      'the anchor of a newly excluded file is kept')
+        self.assertNotIn('DELETED', result.stdout)
+
     def test_unique_files_and_one_sided_updates(self):
         (self.local / 'paper.tex').write_text('local v1')
         (self.cloud / 'figure.pdf').write_text('cloud v1')
