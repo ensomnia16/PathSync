@@ -387,13 +387,15 @@ private struct ConflictState: Decodable {
 /// Moves aside a merge state left over from the pair's previous roots when it holds no conflicts,
 /// so editing a pair's paths starts a fresh baseline instead of failing the consistency check.
 /// States that still hold conflicts are kept and keep failing, so no conflict record is lost.
-func retireStaleMergeState(_ pair: SyncPair) throws {
+/// Whether the merge state belongs to the pair's previous roots and can be retired.
+/// Throws when it still holds conflicts. Reads only.
+func mergeStateIsStale(_ pair: SyncPair) throws -> Bool {
     let path = mergeStatePath(pair)
-    guard fm.fileExists(atPath: path) else { return }
+    guard fm.fileExists(atPath: path) else { return false }
     let state = try JSONDecoder().decode(ConflictState.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
     let local = URL(fileURLWithPath: pair.localPath).standardizedFileURL.resolvingSymlinksInPath().path
     let cloud = URL(fileURLWithPath: pair.cloudPath).standardizedFileURL.resolvingSymlinksInPath().path
-    guard state.local != local || state.cloud != cloud else { return }
+    guard state.local != local || state.cloud != cloud else { return false }
     var isDirectory: ObjCBool = false
     guard (state.conflicts ?? [:]).isEmpty,
           fm.fileExists(atPath: local, isDirectory: &isDirectory), isDirectory.boolValue,
@@ -401,14 +403,24 @@ func retireStaleMergeState(_ pair: SyncPair) throws {
         throw NSError(domain: appID, code: 10, userInfo: [NSLocalizedDescriptionKey:
             "「\(pair.name)」的路径与冲突记录不一致：记录对应 \(state.local)，当前为 \(local)。请先在原路径处理完冲突，或检查路径配置。"])
     }
+    return true
+}
+
+func retireStaleMergeState(_ pair: SyncPair) throws {
+    guard try mergeStateIsStale(pair) else { return }
+    let path = mergeStatePath(pair)
+    let local = URL(fileURLWithPath: pair.localPath).standardizedFileURL.resolvingSymlinksInPath().path
+    let previous = (try? JSONDecoder().decode(ConflictState.self,
+                                              from: Data(contentsOf: URL(fileURLWithPath: path))))?.local ?? ""
     let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
     let retired = URL(fileURLWithPath: path).deletingPathExtension().path + ".retired-\(stamp).json"
     try fm.moveItem(atPath: path, toPath: retired)
-    appendLog("「\(pair.name)」路径已从 \(state.local) 改为 \(local)，旧合并状态已移至 \(retired)")
+    appendLog("「\(pair.name)」路径已从 \(previous) 改为 \(local)，旧合并状态已移至 \(retired)")
 }
 
+/// Reads only: a stale state without conflicts lists nothing and is retired by the next real sync.
 func pendingConflicts(for pair: SyncPair) throws -> [PendingConflict] {
-    try retireStaleMergeState(pair)
+    if try mergeStateIsStale(pair) { return [] }
     let path = mergeStatePath(pair)
     guard fm.fileExists(atPath: path) else { return [] }
     let state = try JSONDecoder().decode(ConflictState.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
@@ -457,12 +469,21 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      plan: Bool = false, backupArguments: [String] = [], language: String,
                      progress: ((UUID, String) -> Void)?) throws -> String {
     let (local, cloud) = try validatedPaths(pair)
-    try retireStaleMergeState(pair)
+    // A preview never moves files: it plans against an empty baseline instead,
+    // which is what the real sync uses after retiring the stale state.
+    var statePath = mergeStatePath(pair)
+    if dryRun {
+        if try mergeStateIsStale(pair) {
+            statePath = supportDirectory + "/merge-state/preview-" + UUID().uuidString.lowercased() + ".json"
+        }
+    } else {
+        try retireStaleMergeState(pair)
+    }
     let (source, destination) = direction == .download ? (cloud, local) : (local, cloud)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
     let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
-    var arguments = [helper, local, cloud, mergeStatePath(pair), "--direction", direction.rawValue,
+    var arguments = [helper, local, cloud, statePath, "--direction", direction.rawValue,
                      "--conflict-policy", conflictPolicy,
                      "--backup-retention-days", String(backupRetentionDays)]
     if excludeLatex { arguments.append("--exclude-latex") }
