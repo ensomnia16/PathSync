@@ -59,7 +59,7 @@ struct SyncHistoryRecord: Identifiable {
             }
             let columns = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
             guard columns.count >= 2,
-                  ["FAILED", "CONFLICT", "KEPT_BOTH", "WOULD_KEEP_BOTH", "NEEDS_REVIEW",
+                  ["FAILED", "SKIPPED", "CONFLICT", "KEPT_BOTH", "WOULD_KEEP_BOTH", "NEEDS_REVIEW",
                    "BACKUP", "DELETED", "PENDING_DELETE", "WOULD_DELETE", "NEWEST", "WOULD_KEEP_NEWEST",
                    "RESTORED", "RESOLVED", "REVIEW_NEWEST", "ACKNOWLEDGED"].contains(columns[0]) else { continue }
             let copy = columns.first(where: { $0.hasPrefix("copy=") }).map { String($0.dropFirst(5)) }

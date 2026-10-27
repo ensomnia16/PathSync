@@ -37,6 +37,16 @@ struct HistoryChecks {
         assert(records[4].needsAttention)
         assert(records[4].events[0].path == "main.tex")
 
+        let skipped = parseSyncHistory("""
+        2026-10-27T16:20:00Z 开始 [研三] 双向合并：/local → /cloud
+        2026-10-27T16:20:31Z 结束 [研三]，退出码 0：SKIPPED\talias.md\t路径是符号链接，保留两端文件
+        uploaded=0 downloaded=0 unchanged=3 skipped=1 conflicts=0 failed=0
+        """)
+        assert(skipped.count == 1 && !skipped[0].hasFailures && !skipped[0].needsAttention)
+        assert(skipped[0].events.first?.kind == "SKIPPED")
+        assert(skipped[0].events.first?.path == "alias.md")
+        assert(skipped[0].counts["skipped"] == 1)
+
         let launchFailure = """
         2026-09-23T11:00:00Z 开始 [科研] 双向合并：/local → /cloud
         2026-09-23T11:00:01Z 失败 [科研]：无法启动同步程序

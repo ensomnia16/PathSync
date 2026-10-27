@@ -296,7 +296,7 @@ private struct PairPlanRows: View {
         ("delete", "trash", .red), ("newest", "clock.arrow.circlepath", .purple),
         ("keep_both", "doc.on.doc", .orange), ("conflict", "exclamationmark.triangle", .orange),
         ("review", "hourglass", .orange), ("online", "icloud.and.arrow.down", .teal),
-        ("failed", "xmark.octagon", .red)
+        ("skip", "arrow.right.circle", .secondary), ("failed", "xmark.octagon", .red)
     ]
 
     private func t(_ key: String) -> String { model.t(key) }

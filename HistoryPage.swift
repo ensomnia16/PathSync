@@ -295,6 +295,7 @@ struct HistoryPage: View {
 
     private func eventText(_ event: SyncHistoryEvent) -> String {
         switch event.kind {
+        case "SKIPPED": return t("historySkipped")
         case "KEPT_BOTH": return t("historyKeptBoth")
         case "WOULD_KEEP_BOTH": return t("historyWouldKeepBoth")
         case "NEEDS_REVIEW": return t("historyReview")

@@ -888,9 +888,81 @@ class MergeTests(unittest.TestCase):
         outside.mkdir()
         (self.cloud / 'chapter').symlink_to(outside, target_is_directory=True)
         result = self.run_merge()
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((outside / 'paper.tex').exists())
-        self.assertIn('FAILED\tchapter/paper.tex', result.stdout)
+        self.assertIn('SKIPPED\tchapter/paper.tex', result.stdout)
+        self.assertIn('failed=0', result.stdout)
+
+    def test_file_converted_to_symlink_keeps_peer_and_anchor_in_all_directions(self):
+        path = self.local / 'paper.tex'
+        peer = self.cloud / 'paper.tex'
+        path.write_text('original')
+        self.assertEqual(self.run_merge().returncode, 0)
+        anchor = json.loads(self.state.read_text())['files']['paper.tex']
+        target = self.root / 'outside.tex'
+        target.write_text('external content')
+        path.unlink()
+        path.symlink_to(target)
+        (self.local / 'unrelated.tex').write_text('still synchronizes')
+        for direction in ('merge', 'upload', 'download'):
+            with self.subTest(direction=direction):
+                result = self.run_merge('--direction', direction)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('SKIPPED\tpaper.tex', result.stdout)
+                self.assertIn('skipped=1', result.stdout)
+                self.assertIn('failed=0', result.stdout)
+                self.assertTrue(path.is_symlink())
+                self.assertEqual(peer.read_text(), 'original')
+                self.assertEqual(target.read_text(), 'external content')
+                self.assertEqual(json.loads(self.state.read_text())['files']['paper.tex'], anchor)
+        self.assertEqual((self.cloud / 'unrelated.tex').read_text(), 'still synchronizes')
+        # Restoring an ordinary file resumes sync against the preserved anchor.
+        path.unlink()
+        path.write_text('new ordinary file')
+        self.assertEqual(self.run_merge().returncode, 0)
+        self.assertEqual(peer.read_text(), 'new ordinary file')
+
+    def test_dangling_cloud_symlink_preserves_local_file_and_preview_is_read_only(self):
+        local_file = self.local / 'paper.tex'
+        cloud_file = self.cloud / 'paper.tex'
+        local_file.write_text('original')
+        self.assertEqual(self.run_merge().returncode, 0)
+        cloud_file.unlink()
+        cloud_file.symlink_to(self.root / 'missing.tex')
+        state_before = self.state.read_bytes()
+        local_before = local_file.stat()
+        result = self.run_merge('--dry-run', '--plan-json')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.plan(result)['items'][0]['action'], 'skip')
+        self.assertEqual(self.state.read_bytes(), state_before)
+        self.assertEqual(local_file.read_text(), 'original')
+        self.assertEqual(local_file.stat().st_mtime_ns, local_before.st_mtime_ns)
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(local_file.read_text(), 'original')
+        self.assertTrue(cloud_file.is_symlink())
+        self.assertEqual(json.loads(self.state.read_text()), json.loads(state_before))
+
+    def test_directory_converted_to_symlink_preserves_peer_subtree_and_anchor(self):
+        chapter = self.local / 'chapter'
+        chapter.mkdir()
+        (chapter / 'paper.tex').write_text('original')
+        self.assertEqual(self.run_merge().returncode, 0)
+        state_before = json.loads(self.state.read_text())
+        shutil.rmtree(chapter)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'paper.tex').write_text('external')
+        chapter.symlink_to(outside, target_is_directory=True)
+        # A changed peer must neither be deleted nor copied through the link.
+        (self.cloud / 'chapter' / 'paper.tex').write_text('cloud edit')
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('SKIPPED\tchapter/paper.tex', result.stdout)
+        self.assertTrue(chapter.is_symlink())
+        self.assertEqual((outside / 'paper.tex').read_text(), 'external')
+        self.assertEqual((self.cloud / 'chapter' / 'paper.tex').read_text(), 'cloud edit')
+        self.assertEqual(json.loads(self.state.read_text()), state_before)
 
     def test_first_run_does_not_choose_a_winner_for_divergent_file(self):
         left = self.local / 'same-name.tex'

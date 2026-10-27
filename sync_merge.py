@@ -158,7 +158,7 @@ def excluded_path(name, args, directory=False):
             or args.exclude_rules.matches(name, directory=directory))
 
 
-def scan(root, args, errors):
+def scan(root, args, errors, symlinks=None):
     found = set()
     scanned = 0
     side = 'local' if root == args.local else 'cloud'
@@ -170,6 +170,8 @@ def scan(root, args, errors):
             for entry in iterator:
                 relative = (current / entry.name).relative_to(root).as_posix()
                 if entry.is_symlink():
+                    if symlinks is not None and not excluded_path(relative, args):
+                        symlinks.add(relative)
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if not excluded_path(relative, args, directory=True):
@@ -753,8 +755,9 @@ def sync_files(args, local, cloud, files, conflicts):
                     if not excluded_path(name, args)}
     active_conflicts = {name: record for name, record in conflicts.items()
                         if not excluded_path(name, args, directory=record.get('kind') == 'tree')}
-    local_names = scan(local, args, errors)
-    cloud_names = scan(cloud, args, errors)
+    symlinks = set()
+    local_names = scan(local, args, errors, symlinks)
+    cloud_names = scan(cloud, args, errors, symlinks)
     names = local_names | cloud_names | set(active_files) | set(active_conflicts)
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
@@ -774,6 +777,25 @@ def sync_files(args, local, cloud, files, conflicts):
         # Only a preview reports individual planned actions; it never writes.
         if args.dry_run:
             plan.append({'action': action, 'name': name, **detail})
+
+    def linked(name):
+        return name in symlinks or any(parent in symlinks for parent in ancestor_directories(name))
+
+    # Scanning skips links, but a peer file or an old anchor can reintroduce
+    # the same path. Exclude it on BOTH sides before metadata checks, directory
+    # deletion detection and prefetch. Keep the peer and anchor untouched so a
+    # link conversion never looks like a deletion or follows an external target.
+    for name in sorted(name for name in names if linked(name)):
+        detail = '路径或上级目录是符号链接；保留两端文件及同步基线，不跟随链接'
+        print(f'SKIPPED\t{name}\t{detail}')
+        planned('skip', name, detail=detail)
+        counts['skipped'] += 1
+    names = {name for name in names if not linked(name)}
+    local_names &= names
+    cloud_names &= names
+    active_files = {name: record for name, record in active_files.items() if not linked(name)}
+    active_conflicts = {name: record for name, record in active_conflicts.items() if not linked(name)}
+    tree_record_names = {name for name in tree_record_names if not linked(name)}
 
     def blocked(name):
         return any(name == directory or within_directory(name, directory)
@@ -1142,6 +1164,8 @@ def sync_files(args, local, cloud, files, conflicts):
         planned('failed', path, detail=error)
         counts['failed'] += 1
     for name, record in sorted(next_conflicts.items()):
+        if linked(name):
+            continue
         if excluded_path(name, args, directory=record.get('kind') == 'tree'):
             continue
         if is_review(record):

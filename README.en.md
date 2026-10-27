@@ -1,5 +1,7 @@
 # PathSync
 
+Symbolic links are excluded from file sync. When a previously synced file or directory becomes a link, both sides of that path and its descendants are skipped, preserving existing copies and anchors without following the link or propagating deletion. Skipped paths appear in preview and history; restoring an ordinary file resumes comparison against the original anchor.
+
 A small macOS app for syncing local working folders with mounted cloud folders on a schedule. It is useful when local builds, such as LaTeX, create many short-lived files.
 
 ## Features
@@ -41,7 +43,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.1) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.2) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
