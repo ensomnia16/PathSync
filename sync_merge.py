@@ -18,7 +18,7 @@ import tempfile
 import time
 import uuid
 
-from sync_tree import ExcludeRules, excluded_relative
+from sync_tree import IGNORE_FILE, ExcludeRules, excluded_relative, load_exclude_rules
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
@@ -151,6 +151,8 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
 
 
 def excluded_path(name, args, directory=False):
+    if name == IGNORE_FILE and not directory:
+        return False
     return (excluded_relative(name, args.exclude_latex, args.skip_codex,
                               args.skip_claude, args.include_temp, directory=directory)
             or args.exclude_rules.matches(name, directory=directory))
@@ -1399,7 +1401,14 @@ def main():
     cloud = args.cloud.resolve()
     args.local, args.cloud = local, cloud
     args.backup_count = 0
-    args.exclude_rules = ExcludeRules(args.exclude)
+    cloud_ignore = cloud / IGNORE_FILE
+    if is_dataless(cloud_ignore):
+        if args.dry_run:
+            raise OSError(f'{cloud_ignore}: 规则文件仅在线，请先下载后再预览')
+        error = CloudPrefetch.hydrate(cloud_ignore)
+        if error:
+            raise OSError(f'{cloud_ignore}: {error}')
+    args.exclude_rules = load_exclude_rules(local, args.exclude, (cloud,))
     args.backups = BackupPlace(args)
     if args.migrate_backups:
         moved, failed = move_backups(args, only_pending=False)

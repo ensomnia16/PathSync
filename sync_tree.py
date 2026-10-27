@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
+
+IGNORE_FILE = '.pathsyncignore'
+MAX_IGNORE_BYTES = 1024 * 1024
 
 ALWAYS_EXCLUDE_DIRS = {'.venv', '__pycache__', 'pycache', 'node_modules', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
 ALWAYS_EXCLUDE_FILES = {'*.researchsync-partial', '*.pyc', '.DS_Store', '~$*'}
@@ -122,6 +126,40 @@ class ExcludeRules:
         return False
 
 
+def load_exclude_rules(root, lines=(), additional_roots=()):
+    """Read both roots' rules once per run and add explicit app/CLI rules.
+
+    An existing but unreadable/invalid rules file aborts before any sync writes;
+    silently falling back to fewer exclusions could otherwise propagate deletes.
+    """
+    rules = list(lines)
+    for directory in (root, *additional_roots):
+        rules.extend(read_ignore_lines(Path(directory) / IGNORE_FILE))
+    return ExcludeRules(dict.fromkeys(rules))
+
+
+def read_ignore_lines(path):
+    """Read one optional UTF-8 root file, rejecting unsafe or invalid files."""
+    if path.is_symlink():
+        raise OSError(f'{path}: 排除规则文件不能是符号链接')
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                             | getattr(os, 'O_NONBLOCK', 0))
+    except FileNotFoundError:
+        return []
+    with os.fdopen(descriptor, 'rb') as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise OSError(f'{path}: 排除规则必须是普通 UTF-8 文本文件')
+        data = source.read(MAX_IGNORE_BYTES + 1)
+    if len(data) > MAX_IGNORE_BYTES:
+        raise ValueError(f'{path}: 排除规则文件超过 1 MiB')
+    try:
+        text = data.decode('utf-8-sig')
+    except UnicodeError as error:
+        raise ValueError(f'{path}: 排除规则文件必须使用 UTF-8 编码') from error
+    return text.splitlines()
+
+
 def transfer(pair):
     source, destination, dry_run = pair
     temporary = destination.with_name(destination.name + '.researchsync-partial')
@@ -161,7 +199,12 @@ def main():
     parser.add_argument('--skip-claude', action='store_true')
     parser.add_argument('--include-temp', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--exclude', action='append', default=[], metavar='PATTERN')
     args = parser.parse_args()
+    try:
+        rules = load_exclude_rules(args.source, args.exclude, (args.destination,))
+    except (OSError, ValueError) as error:
+        parser.exit(2, f'FAILED\t{error}\n')
     counts = {'copied': 0, 'skipped': 0, 'failed': 0}
     errors = []
     pairs = []
@@ -169,13 +212,16 @@ def main():
         relative = Path(root).relative_to(args.source)
         dirs[:] = [name for name in dirs if not excluded_relative(
             (relative / name).as_posix(), args.exclude_latex,
-            args.skip_codex, args.skip_claude, args.include_temp, directory=True)]
+            args.skip_codex, args.skip_claude, args.include_temp, directory=True)
+            and not rules.matches((relative / name).as_posix(), directory=True)]
         target_root = args.destination / Path(root).relative_to(args.source)
         if not args.dry_run:
             target_root.mkdir(parents=True, exist_ok=True)
         for name in files:
             if not excluded_relative((relative / name).as_posix(), args.exclude_latex,
-                                     args.skip_codex, args.skip_claude, args.include_temp):
+                                     args.skip_codex, args.skip_claude, args.include_temp) \
+                    and ((relative / name).as_posix() == IGNORE_FILE
+                         or not rules.matches((relative / name).as_posix())):
                 pairs.append((Path(root) / name, target_root / name, args.dry_run))
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         for status, error in executor.map(transfer, pairs):

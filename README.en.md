@@ -10,6 +10,15 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - Set a shared default schedule: any daily time or an interval from 6 to 168 hours.
 - The menu bar panel shows overall status and each folder's state and last sync, and syncs all folders. When conflicts need attention it shows their count and opens the main window.
 - Each folder pair can list custom exclusion rules, one per line, in a .gitignore subset: `*`, `?`, and `**` globs; a trailing `/` matches folders only; a leading or middle `/` anchors the rule at the pair's root; `#` starts a comment; `!` is not supported. Matching files are never copied, overwritten, or deleted on either side, and adding a rule never deletes synced copies. Rules are shared through iCloud configuration and applied by preview.
+- A UTF-8 `.pathsyncignore` in each pair's root can hold the same rules. Each preview and sync rereads both local and cloud copies and combines them with the app's rules; no restart or Save is needed. Only root files are read, not nested files. The rule file itself always syncs, even if a glob matches it, using the pair's direction and existing conflict policy. It is shared as a synced file, independently of iCloud configuration. Cloud rules apply before the first download. Removing a rule fully takes effect once both copies agree. Invalid UTF-8, an unreadable file, a symlink, or a file larger than 1 MiB stops the pair before syncing. Preview never hydrates an online-only rules file and asks you to download it first. For example:
+
+  ```gitignore
+  # Reproducible files for this pair
+  python-deps/
+  .cache/
+  *.partial
+  /presentation-work/rendered/
+  ```
 - Cloud folder check (on by default in Settings): for folders in `~/Library/CloudStorage`, if OneDrive isn't running or the folder doesn't respond within 20 seconds, the pair is skipped this time with the reason in History, and unreadable files are never treated as deletions. Online-only placeholders whose content must be compared are downloaded first within the existing read limits; preview only counts them and never triggers downloads.
 - Preview a sync from the overview, the toolbar, or a folder's page. It lists planned uploads, downloads, deletions (backed up first), conflicts, and unreadable files per folder, without writing anything or downloading online-only OneDrive files. Confirm to run the same sync. Scheduled sync never waits for a preview.
 - Up to three folder pairs sync at once under the single sync lock. Conflict state and the log are read in the background, and the log incrementally.
@@ -32,7 +41,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.0) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.1) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 

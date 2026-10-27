@@ -399,6 +399,138 @@ class MergeTests(unittest.TestCase):
                       'the anchor of a newly excluded file is kept')
         self.assertNotIn('DELETED', result.stdout)
 
+    def test_root_ignore_file_protects_upload_download_overwrite_and_delete(self):
+        (self.local / 'private').mkdir()
+        (self.local / 'private' / 'anchor.txt').write_text('preserve cloud copy')
+        (self.local / 'cache.bin').write_text('local cache')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.local / 'private' / 'anchor.txt').unlink()
+        (self.cloud / 'private' / 'new.txt').write_text('cloud only')
+        (self.cloud / 'cache.bin').write_text('different cloud cache')
+        (self.local / '.pathsyncignore').write_bytes(
+            b'\xef\xbb\xbf# local root rules\r\nprivate/\r\n/cache.bin\r\n')
+        (self.local / 'app-only.txt').write_text('excluded by app setting')
+        (self.local / 'source.py').write_text('keep syncing source')
+        before = self.snapshot_everything()
+        preview = self.run_merge('--dry-run', '--plan-json', '--exclude=app-only.txt')
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual({item['name'] for item in self.plan(preview)['items']},
+                         {'.pathsyncignore', 'source.py'})
+        self.assertEqual(self.snapshot_everything(), before)
+        for direction in ('merge', 'upload', 'download'):
+            result = self.run_merge('--direction', direction, '--exclude=app-only.txt')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((self.cloud / 'private' / 'anchor.txt').read_text(),
+                             'preserve cloud copy')
+            self.assertFalse((self.local / 'private' / 'new.txt').exists())
+            self.assertEqual((self.local / 'cache.bin').read_text(), 'local cache')
+            self.assertEqual((self.cloud / 'cache.bin').read_text(), 'different cloud cache')
+        self.assertEqual((self.cloud / 'source.py').read_text(), 'keep syncing source')
+        self.assertEqual((self.cloud / '.pathsyncignore').read_bytes(),
+                         (self.local / '.pathsyncignore').read_bytes())
+        self.assertTrue((self.local / '.pathsyncignore').read_bytes().startswith(b'\xef\xbb\xbf'))
+        self.assertIn('.pathsyncignore', json.loads(self.state.read_text())['files'])
+
+    def test_root_ignore_rules_reload_and_do_not_apply_to_another_pair(self):
+        ignore = self.local / '.pathsyncignore'
+        ignore.write_text('first.bin\n')
+        (self.local / 'first.bin').write_text('first')
+        self.assertEqual(self.run_merge().returncode, 0)
+        self.assertFalse((self.cloud / 'first.bin').exists())
+        ignore.write_text('second.bin\n')
+        (self.local / 'second.bin').write_text('second')
+        self.assertEqual(self.run_merge().returncode, 0)
+        # Removing an exclusion becomes effective once both rule copies agree.
+        self.assertFalse((self.cloud / 'first.bin').exists())
+        self.assertEqual(self.run_merge().returncode, 0)
+        self.assertTrue((self.cloud / 'first.bin').exists())
+        self.assertFalse((self.cloud / 'second.bin').exists())
+        other_local, other_cloud = self.root / 'other-local', self.root / 'other-cloud'
+        other_local.mkdir()
+        other_cloud.mkdir()
+        (other_local / 'second.bin').write_text('another pair')
+        result = subprocess.run([sys.executable, str(HELPER), str(other_local),
+                                 str(other_cloud), str(self.root / 'other-state.json')],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((other_cloud / 'second.bin').read_text(), 'another pair')
+
+    def test_invalid_ignore_file_aborts_before_writing(self):
+        ignore = self.local / '.pathsyncignore'
+        (self.local / 'source.py').write_text('must not copy')
+        for content in (b'\xff\xfe', b'x' * (1024 * 1024 + 1)):
+            ignore.write_bytes(content)
+            before = self.snapshot_everything()
+            for flags in ((), ('--dry-run', '--plan-json')):
+                result = self.run_merge(*flags)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn('.pathsyncignore', result.stderr)
+                self.assertEqual(self.snapshot_everything(), before)
+        ignore.unlink()
+        external = self.root / 'external-ignore'
+        external.write_text('source.py\n')
+        ignore.symlink_to(external)
+        self.assertEqual(self.run_merge().returncode, 2)
+        self.assertFalse((self.cloud / 'source.py').exists())
+        ignore.unlink()
+        ignore.mkdir()
+        self.assertEqual(self.run_merge().returncode, 2)
+        self.assertFalse(self.state.exists())
+
+    def test_one_way_helper_reads_root_ignore_and_explicit_rules(self):
+        (self.local / '.pathsyncignore').write_text('hidden.bin\n')
+        for name in ('hidden.bin', 'app.bin', 'source.py'):
+            (self.local / name).write_text(name)
+        arguments = [sys.executable, str(HELPER.parent / 'sync_tree.py'),
+                     str(self.local), str(self.cloud), '--exclude=app.bin']
+        preview = subprocess.run([*arguments, '--dry-run'], capture_output=True,
+                                 text=True, timeout=15)
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertIn('copied=2', preview.stdout)
+        self.assertEqual(list(self.cloud.iterdir()), [])
+        result = subprocess.run(arguments, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({p.name for p in self.cloud.iterdir()},
+                         {'source.py', '.pathsyncignore'})
+
+    def test_cloud_rules_apply_before_first_download_even_when_they_ignore_themselves(self):
+        (self.cloud / '.pathsyncignore').write_text('private/\n.pathsyncignore\n')
+        (self.cloud / 'private').mkdir()
+        (self.cloud / 'private' / 'large.bin').write_text('cloud private file')
+        (self.cloud / 'source.py').write_text('source')
+        result = self.run_merge('--direction', 'download')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.local / '.pathsyncignore').exists())
+        self.assertTrue((self.local / 'source.py').exists())
+        self.assertFalse((self.local / 'private').exists())
+
+    def test_conflicting_ignore_files_filter_with_both_rule_sets_before_keep_both(self):
+        (self.local / '.pathsyncignore').write_text('local-private/\n')
+        (self.cloud / '.pathsyncignore').write_text('cloud-private/\n')
+        for root, name in ((self.local, 'local-private'), (self.cloud, 'cloud-private')):
+            (root / name).mkdir()
+            (root / name / 'data.bin').write_text('private')
+        result = self.run_merge(policy='keep-both')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.cloud / 'local-private').exists())
+        self.assertFalse((self.local / 'cloud-private').exists())
+        self.assertEqual((self.cloud / '.pathsyncignore').read_text(), 'local-private/\n')
+        copies = list(self.local.glob('.pathsyncignore (cloud conflict *)'))
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), 'cloud-private/\n')
+
+    def test_online_only_ignore_file_is_not_downloaded_by_preview(self):
+        (self.cloud / '.pathsyncignore').write_text('private/\n')
+        (self.cloud / 'source.py').write_text('source')
+        before = self.snapshot_everything()
+        with self.assertRaisesRegex(OSError, '规则文件仅在线'):
+            self.run_in_process('--dry-run', '--plan-json', online=['.pathsyncignore'])
+        self.assertEqual(self.snapshot_everything(), before)
+        code, output, hydrated = self.run_in_process(online=['.pathsyncignore'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual([Path(path).name for path in hydrated], ['.pathsyncignore'])
+        self.assertTrue((self.local / '.pathsyncignore').exists())
+
     def run_in_process(self, *extra, online=()):
         """Run main() here so is_dataless can mark chosen cloud files as online-only."""
         online_paths = {str((self.cloud / name).resolve()) for name in online}
