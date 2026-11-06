@@ -18,18 +18,21 @@ cp -R "$source_dir/en.lproj" "$source_dir/zh-Hans.lproj" "$app/Contents/Resource
 
 iconset="$output_dir/PathSync.iconset"
 mkdir -p "$iconset"
+legacy_icon="$output_dir/PathSync-legacy.png"
+swift "$source_dir/tools/package-legacy-icon.swift" "$source_dir/PathSyncIcon.png" "$legacy_icon"
 for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" "$source_dir/PathSyncIcon.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    sips -z "$size" "$size" "$legacy_icon" --out "$iconset/icon_${size}x${size}.png" >/dev/null
     double=$((size * 2))
-    sips -z "$double" "$double" "$source_dir/PathSyncIcon.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+    sips -z "$double" "$double" "$legacy_icon" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$iconset" -o "$app/Contents/Resources/ResearchSync.icns"
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/PathSyncDrawerCompact.icns"
 
 architecture="$(uname -m)"
 swiftc -target "$architecture-apple-macosx13.0" -parse-as-library -O \
-    -o "$app/Contents/MacOS/ResearchSync" "$source_dir/ResearchSync.swift" "$source_dir/SyncHistory.swift" "$source_dir/SyncPreview.swift" "$source_dir/Shortcuts.swift" "$source_dir/HistoryPage.swift" "$source_dir/SyncUI.swift" "$source_dir/NativeUI.swift" "$source_dir/SyncNotifications.swift" "$source_dir/UpdateChecker.swift" "$source_dir/UpdateInstaller.swift" "$source_dir/OneDriveRules.swift" "$source_dir/LatexDiff.swift" "$source_dir/CodexSummary.swift"
+    -o "$app/Contents/MacOS/PathSync" "$source_dir/ResearchSync.swift" "$source_dir/SyncHistory.swift" "$source_dir/SyncPreview.swift" "$source_dir/Shortcuts.swift" "$source_dir/ApplicationIdentity.swift" "$source_dir/MenuBarState.swift" "$source_dir/MenuBarController.swift" "$source_dir/HistoryPage.swift" "$source_dir/SyncUI.swift" "$source_dir/NativeUI.swift" "$source_dir/SyncNotifications.swift" "$source_dir/UpdateChecker.swift" "$source_dir/UpdateInstaller.swift" "$source_dir/OneDriveRules.swift" "$source_dir/LatexDiff.swift" "$source_dir/CodexSummary.swift"
 swiftc -target "$architecture-apple-macosx13.0" -O \
     -o "$app/Contents/Resources/UpdateApply" "$source_dir/UpdateApply.swift"
+ln -s PathSync "$app/Contents/MacOS/ResearchSync"
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 print "$app"

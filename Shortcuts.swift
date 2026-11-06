@@ -60,6 +60,43 @@ enum URLCommandRouter {
 }
 
 final class PathSyncAppDelegate: NSObject, NSApplicationDelegate {
+    private var closeObserver: NSObjectProtocol?
+    private var menuBarController: MenuBarController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        refreshApplicationIdentity()
+        if let model = URLCommandRouter.model {
+            menuBarController = MenuBarController(model: model)
+        }
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { notification in
+            // Only the main scene changes Dock visibility; closing a menu,
+            // preview or system panel must not change the app's presence.
+            guard let window = notification.object as? NSWindow,
+                  window.identifier?.rawValue == "main" else { return }
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        menuBarController?.stop()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NSApp.setActivationPolicy(.regular)
+        URLCommandRouter.openMainWindow?()
+        return true
+    }
+
+    deinit {
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach(URLCommandRouter.handle)
     }

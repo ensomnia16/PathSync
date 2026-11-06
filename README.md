@@ -4,7 +4,7 @@
 
 ## 下载
 
-[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.3)（macOS 13+）。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
+[下载 Apple Silicon 版应用](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.4)（macOS 13+）。下载包未经过 Apple 公证；也可按下文在本机从源码构建。
 
 ## 功能
 
@@ -16,7 +16,7 @@
 - 窗口顶部可立即同步全部路径或当前路径；也可手动执行双向合并、本地 → 目标、目标 → 本地。
 - “同步记录”页面按时间列出每组路径的方向、结果与文件数量；可筛选路径和需关注的记录，展开查看冲突及失败文件。记录中的文件和覆盖前备份可打开、在 Finder 定位；LaTeX 文本可查看统一差异及离线章节/行数摘要。覆盖前备份记录比较保存的旧版与当前对应文件；其他记录比较当前两侧或冲突副本。安装了 Codex CLI 时，可主动点击按钮，让 CLI 解读所选差异。原始日志只作为排查入口。
 - “默认计划”独立入口：可选择每天的任意同步时间，或设置 1–168 小时的间隔；所有已启用路径共用此计划，各路径可单独选择方向。
-- 应用启动时打开独立窗口，运行时在 Dock 显示图标。退出应用后，已安装的定时同步任务仍按计划运行。
+- 应用启动时打开独立窗口，并常驻菜单栏。关闭主窗口后保留菜单栏图标并从 Dock 隐藏；可从菜单栏重新打开主窗口、查看同步记录或立即同步。只有选择“退出路径同步”才退出常驻程序；已安装的定时同步任务仍按计划运行。
 - “设置 → 通用”可开启登录后启动，使用 macOS 登录项；如系统要求批准，应用会显示提示。定时同步任务与登录项分别控制。
 - 同步通知可选择关闭、仅在冲突或失败时提醒，或每次同步后提醒。默认关闭；主动开启时才请求 macOS 通知权限。通知不包含文件名或路径。
 - 界面支持简体中文、英文和跟随系统语言；应用名称也会随系统语言显示。
@@ -59,7 +59,7 @@
 
 生成的应用位于 `.build/路径同步.app`。复制到 `/Applications` 后打开，在应用中选择目录并点击“保存设置”。定时任务以当前登录用户身份通过 `launchd` 运行；无需管理员权限运行同步。
 
-当前图标源图是 `PathSyncIcon.png`，由选定的“轨道梭”方案直接生成；旧版 `GenerateIcon.swift` 仅保留作历史参考。应用内“关于”页面可以选择界面语言。
+当前图标源图是 `PathSyncIcon.png`，采用白底双层抽屉柜：蓝色抽屉、白色拉手，主体在底板内留出更多空间；`app-icon/provenance.json` 记录最终图标来源，`tools/package-legacy-icon.swift` 为现有 `.icns` 打包路径生成圆角及留白。原始方形源图保留；旧版 `GenerateIcon.swift` 仅保留作历史参考。应用内“关于”页面可以选择界面语言。
 
 ## 快捷指令
 
@@ -71,13 +71,13 @@ pathsync://sync?pair=ID或名称    只同步一组路径（路径组 ID，或�
 pathsync://open                 打开主窗口
 ```
 
-有未保存的设置或已有同步在运行时，同步请求会被忽略。获取同步状态可用“运行 Shell 脚本”动作执行 `/Applications/路径同步.app/Contents/MacOS/ResearchSync --status`，它以 JSON 输出每组路径的上次同步时间、结果和待处理冲突数，以及是否正在同步；该命令只读取，不同步。
+有未保存的设置或已有同步在运行时，同步请求会被忽略。获取同步状态可用“运行 Shell 脚本”动作执行 `/Applications/路径同步.app/Contents/MacOS/PathSync --status`，它以 JSON 输出每组路径的上次同步时间、结果和待处理冲突数，以及是否正在同步；该命令只读取，不同步。
 
 目前用 `build.sh`（只需命令行工具，不需要 Xcode）构建，无法生成 App Intents 所需的元数据，因此快捷指令里不会出现“同步全部路径”等原生动作；需要用 Xcode 工程构建时才能加入。
 
 ## 命令行
 
-应用包中的 `Contents/MacOS/ResearchSync` 支持：
+应用包中的 `Contents/MacOS/PathSync` 支持：
 
 ```text
 --sync                  按每组保存的方向同步所有已启用路径
@@ -99,7 +99,7 @@ pathsync://open                 打开主窗口
 --install               安装或更新当前用户的定时任务
 ```
 
-配置和日志保存在 `~/Library/Application Support/ResearchSync/`，定时任务位于 `~/Library/LaunchAgents/com.ensom.ResearchSync.plist`。应用保留内部标识 `ResearchSync`，以便从旧版本迁移配置。
+配置和日志保存在 `~/Library/Application Support/ResearchSync/`，定时任务位于 `~/Library/LaunchAgents/com.ensom.ResearchSync.plist`。可执行入口名为 `PathSync`；旧的 `ResearchSync` 命令别名、bundle identifier 和配置目录保留兼容。后台计划通过 `AssociatedBundleIdentifiers` 关联应用名称和图标；启动时迁移旧计划且不改变同步间隔。
 
 每次保存有变化的本机配置前，应用会保留一个旧版快照，最多保留 20 份。在“设置 → 配置回退”载入旧版后，可先检查草稿；保存前不能手动同步或恢复文件。跨组路径若相同或相互包含，保存和执行前会拒绝，以免同一目录被多个基线写入。
 
@@ -116,3 +116,5 @@ pathsync://open                 打开主窗口
 可恢复备份位于 `~/Library/Application Support/ResearchSync/merge-state/<路径组 ID>-backups/`，每个备份含校验信息。同步记录显示对应文件、打开/定位入口和恢复按钮；过期后恢复按钮消失。记录中的文件操作针对当前磁盘文件，旧记录本身不保存文件快照。此前版本创建的 `-conflict-backups/` 不会被新保留期自动清理。
 
 如果 OneDrive 等云盘文件提供程序返回 `Operation timed out`，表示本次未能读到该文件内容；检查云盘客户端下载状态后重试。日志会记录失败文件。
+
+菜单栏使用三态抽屉图标：斜杠表示定时同步关闭，循环箭头转动表示正在同步，勾表示已开启。状态依据已保存的计划和真实同步锁计算，约每 2 秒核对一次，因此也能发现独立的后台定时进程。面板提供状态、计划、各路径记录、同步、设置、记录和主窗口入口。应用图标在原白色底板内将柜体缩小 10%，外层底板保持原尺寸。

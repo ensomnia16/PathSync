@@ -1,0 +1,10 @@
+{
+  "design": "White two-drawer cabinet",
+  "source": "Original artwork generated with built-in Imagegen",
+  "source_sha256": "3e7f55b79dee27fb18b24e2c14dfd024b5259af32326b4b4572f9b4d076db407",
+  "packaging": "tools/package-legacy-icon.swift",
+  "canvas": 1024,
+  "tile_size": 832,
+  "subject_scale": 0.9,
+  "format": "Legacy macOS ICNS"
+}

@@ -2,24 +2,43 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>路径同步</string>
-    <key>CFBundleDisplayName</key><string>路径同步</string>
-    <key>CFBundleIdentifier</key><string>com.ensom.ResearchSync</string>
-    <key>CFBundleExecutable</key><string>ResearchSync</string>
-    <key>CFBundleIconFile</key><string>ResearchSync.icns</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>2.16.3</string>
-    <key>CFBundleVersion</key><string>30</string>
-    <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
-    <key>NSHumanReadableCopyright</key><string>© 2026 ensomnia16</string>
-    <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key><string>com.ensom.ResearchSync.shortcuts</string>
-            <key>CFBundleURLSchemes</key><array><string>pathsync</string></array>
-        </dict>
-    </array>
+	<key>CFBundleName</key>
+	<string>路径同步</string>
+	<key>CFBundleDisplayName</key>
+	<string>路径同步</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ensom.ResearchSync</string>
+	<key>CFBundleExecutable</key>
+	<string>PathSync</string>
+	<key>CFBundleIconFile</key>
+	<string>PathSyncDrawerCompact.icns</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.16.4</string>
+	<key>CFBundleVersion</key>
+	<string>39</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+	</array>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 ensomnia16</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ensom.ResearchSync.shortcuts</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pathsync</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -25,7 +25,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 - Preview a sync from the overview, the toolbar, or a folder's page. It lists planned uploads, downloads, deletions (backed up first), conflicts, and unreadable files per folder, without writing anything or downloading online-only OneDrive files. Confirm to run the same sync. Scheduled sync never waits for a preview.
 - Up to three folder pairs sync at once under the single sync lock. Conflict state and the log are read in the background, and the log incrementally.
 - Backups can stay on this Mac (default), go to iCloud Drive (`PathSync/Backups/<pair ID>`), or to a chosen folder such as OneDrive. Each backup is verified after writing. If the location is unavailable, the backup stays on this Mac and moves on a later sync. Restore and cleanup look in both places. The folder can't be inside or contain a sync folder. “Move existing backups” copies, verifies, then removes the local copies. Merge state always stays on this Mac.
-- The app opens in a standalone window and appears in the Dock. The installed sync schedule continues after quitting the app.
+- The app opens in a standalone window and stays in the menu bar. Closing the main window keeps the app running and hides it from the Dock. Use the menu bar to reopen the window, view history, sync now, or quit. The installed sync schedule continues after quitting the app.
 - Enable Launch at login in Settings → General to register a macOS login item. This is separate from the scheduled sync task.
 - Choose notifications for conflicts or failures, every completed run, or off. Notifications are off by default; enabling them requests macOS permission. Notification text contains no file names or paths.
 - Use the prominent Sync now button for all enabled folders or the selected pair; explicit merge, upload, and download actions remain available.
@@ -43,11 +43,11 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.3) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.4) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
-The interface uses native SwiftUI sidebar, form, and toolbar controls. Overview shows overall status, the last sync, the schedule interval or next fixed time, and a card per folder pair; each folder page edits its paths, direction, and conflicts; Settings groups schedule, conflicts and backups, filtering, notifications, and language. Unsaved changes are shown in the status bar. The selected blue icon uses a single-axis, two-way arrow. Its generated source image is `PathSyncIcon.png`.
+The interface uses native SwiftUI sidebar, form, and toolbar controls. Overview shows overall status, the last sync, the schedule interval or next fixed time, and a card per folder pair; each folder page edits its paths, direction, and conflicts; Settings groups schedule, conflicts and backups, filtering, notifications, and language. Unsaved changes are shown in the status bar. The icon is a white two-drawer cabinet with blue fronts and clear white handles. Its source image is `PathSyncIcon.png`.
 
 The [synchronization model](docs/synchronization-model.md) records the primary sources, state transitions, and current limits around directory conflicts and OneDrive availability.
 
@@ -69,6 +69,12 @@ pathsync://sync?pair=ID-or-name sync one folder pair (its ID or a unique name)
 pathsync://open                 open the main window
 ```
 
-A sync request is ignored while settings are unsaved or another sync is running. For status, use “Run Shell Script” with `/Applications/路径同步.app/Contents/MacOS/ResearchSync --status`. It prints each pair's last sync, result, and pending conflicts, plus whether a sync is running, as JSON, and only reads.
+A sync request is ignored while settings are unsaved or another sync is running. For status, use “Run Shell Script” with `/Applications/路径同步.app/Contents/MacOS/PathSync --status`. It prints each pair's last sync, result, and pending conflicts, plus whether a sync is running, as JSON, and only reads.
 
 `build.sh` builds with the Command Line Tools and cannot produce App Intents metadata, so native Shortcuts actions are not available in this build; adding them needs an Xcode project.
+
+The white two-drawer cabinet icon master is `PathSyncIcon.png`. The existing `.icns` build wraps it using `tools/package-legacy-icon.swift`; artwork provenance is recorded in `app-icon/provenance.json`.
+
+The menu bar drawer icon has three states: slash (scheduled sync off), rotating arrows (sync in progress), and check (enabled). A read-only sync-lock check runs about every two seconds, including for the external scheduled worker. Unsaved settings do not change the reported schedule state. The cabinet artwork is 10% smaller inside the existing white icon tile.
+
+The executable is named `PathSync`; a `ResearchSync` symlink preserves existing CLI scripts. The bundle identifier and data directory stay unchanged. LaunchAgents declare `AssociatedBundleIdentifiers`, and an existing schedule is migrated without changing its interval. Update backups are kept outside Applications as non-app folders to avoid duplicate app/notification registrations.

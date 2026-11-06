@@ -22,6 +22,43 @@ final class SyncNotificationDelegate: NSObject, UNUserNotificationCenterDelegate
 
 let syncNotificationDelegate = SyncNotificationDelegate()
 
+private final class NotificationTestOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failure: String?
+    func setFailure(_ text: String?) { lock.lock(); failure = text; lock.unlock() }
+    func errorMessage() -> String? { lock.lock(); defer { lock.unlock() }; return failure }
+}
+
+/// Diagnose app registration without performing a sync or requesting new permissions.
+func postIconTestNotification(language: String) throws {
+    let center = UNUserNotificationCenter.current()
+    let done = DispatchSemaphore(value: 0)
+    let outcome = NotificationTestOutcome()
+    center.getNotificationSettings { settings in
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+            outcome.setFailure(uiText("notificationDenied", language: language))
+            done.signal()
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = usesEnglish(language) ? "PathSync icon test" : "路径同步图标测试"
+        content.body = usesEnglish(language) ? "Test notification only. No files were synchronized." : "这是一条测试通知，没有执行文件同步。"
+        center.add(UNNotificationRequest(identifier: "pathsync.icon-test." + UUID().uuidString,
+                                         content: content, trigger: nil)) { error in
+            outcome.setFailure(error?.localizedDescription)
+            done.signal()
+        }
+    }
+    guard done.wait(timeout: .now() + 5) == .success else {
+        throw NSError(domain: "PathSync.NotificationTest", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "Notification submission timed out."])
+    }
+    if let message = outcome.errorMessage() {
+        throw NSError(domain: "PathSync.NotificationTest", code: 2,
+                      userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
 func syncHadNewIssue(_ output: String, failed: Bool) -> Bool {
     if failed { return true }
     for component in output.components(separatedBy: "kept_both=").dropFirst() {

@@ -123,7 +123,7 @@ extension SyncModel {
         return "\(direction) · \(t("lastSync")) \(shortDate(date))"
     }
 
-    var canRun: Bool { !busy && !hasUnsavedChanges }
+    var canRun: Bool { !isSyncActive && !hasUnsavedChanges }
 
     func canRun(_ pair: SyncPair) -> Bool {
         canRun && !pair.localPath.isEmpty && !pair.cloudPath.isEmpty
@@ -416,6 +416,195 @@ struct ConflictRow: View {
     }
 }
 
+struct MenuBarPanel: View {
+    @ObservedObject var model: SyncModel
+    var closeMenuBar: () -> Void = {}
+
+    private func t(_ key: String) -> String { model.t(key) }
+
+    private func showWindow(_ page: String, pair: SyncPair? = nil) {
+        if let pair { model.selectedID = pair.id }
+        model.page = page
+        closeMenuBar()
+        NSApp.setActivationPolicy(.regular)
+        URLCommandRouter.openMainWindow?()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private var statusColor: Color {
+        if model.isSyncActive { return .accentColor }
+        if model.statusKey == "error" { return .red }
+        if model.conflictCount > 0 { return .orange }
+        return model.menuBarState == .enabled ? .green : .secondary
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable().frame(width: 42, height: 42)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(t("appName")).font(.system(size: 15, weight: .semibold))
+                HStack(spacing: 5) {
+                    Circle().fill(statusColor).frame(width: 5, height: 5)
+                    Text(t(model.menuBarState.titleKey))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer()
+            Button { showWindow("settings") } label: {
+                Image(systemName: "gearshape").font(.system(size: 14))
+                    .frame(width: 28, height: 28)
+                    .background(Color.primary.opacity(0.05), in: Circle())
+            }
+            .buttonStyle(.plain).help(t("settings")).accessibilityLabel(t("settings"))
+        }
+    }
+
+    private func summaryItem(_ title: String, value: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: symbol).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 12, weight: .medium))
+                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, minHeight: 42, alignment: .topLeading)
+        .padding(10)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var primaryAction: some View {
+        Button { model.syncNow(all: true) } label: {
+            HStack(spacing: 7) {
+                if model.isSyncActive {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+                Text(t(model.isSyncActive ? "syncing" : "syncNow")).fontWeight(.medium)
+            }
+            .frame(maxWidth: .infinity, minHeight: 24)
+        }
+        .buttonStyle(.borderedProminent).controlSize(.large)
+        .disabled(!model.canRun || !model.hasEnabledPairs)
+        .help(t("syncAllHint"))
+    }
+
+    private func pairRow(_ pair: SyncPair) -> some View {
+        let status = model.pairStatus(pair)
+        return Button { showWindow("pair", pair: pair) } label: {
+            HStack(spacing: 9) {
+                Image(systemName: pair.enabled ? "folder.fill" : "folder")
+                    .font(.system(size: 15))
+                    .foregroundStyle(pair.enabled ? Color.accentColor : Color.secondary)
+                    .frame(width: 30, height: 30)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.displayName(pair)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    Text(t(pair.scheduledDirection)).font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(status.text).font(.system(size: 10, weight: .medium)).foregroundStyle(status.color)
+                    if pair.enabled, let date = model.lastSync(for: pair) {
+                        Text(model.shortDate(date)).font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                }
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10).frame(height: 53)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).foregroundStyle(.primary)
+        .accessibilityLabel(model.displayName(pair) + ", " + status.text)
+    }
+
+    private var folders: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(t("folders")).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Text(String(format: t("enabledCount"), model.enabledPairCount))
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            if model.config.pairs.isEmpty {
+                Text(t("menubarNoPairs")).font(.callout).foregroundStyle(.secondary).padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.config.pairs) { pair in
+                            pairRow(pair)
+                            if pair.id != model.config.pairs.last?.id { Divider().padding(.leading, 49) }
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .frame(height: CGFloat(min(model.config.pairs.count, 5)) * 54 - 1)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.65),
+                            in: RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Color.primary.opacity(0.06)))
+            }
+        }
+    }
+
+    @ViewBuilder private var notice: some View {
+        if model.hasUnsavedChanges {
+            Button { showWindow("overview") } label: {
+                Label(t("menubarSaveHint"), systemImage: "pencil.circle")
+            }.buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
+        } else if model.conflictCount > 0 {
+            Button { showWindow("overview") } label: {
+                Label(String(format: t("conflictCountShort"), model.conflictCount),
+                      systemImage: "exclamationmark.triangle.fill")
+            }.buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
+        } else if let detail = model.statusDetail, model.busy || model.statusKey == "error" {
+            Text(detail).font(.caption).foregroundStyle(model.statusKey == "error" ? Color.red : Color.secondary)
+                .lineLimit(2)
+        } else if let result = model.resultBanner {
+            Text(result).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            Button { showWindow("overview") } label: {
+                Label(t("openMainWindow"), systemImage: "macwindow")
+            }
+            Spacer(minLength: 0)
+            Button { showWindow("history") } label: {
+                Image(systemName: "clock.arrow.circlepath")
+            }.help(t("history")).accessibilityLabel(t("history"))
+            Button { NSApp.terminate(nil) } label: {
+                Image(systemName: "power")
+            }.help(t("menubarQuit")).accessibilityLabel(t("menubarQuit"))
+                .keyboardShortcut("q")
+        }
+        .font(.system(size: 11)).buttonStyle(.borderless).foregroundStyle(.secondary)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            HStack(alignment: .top, spacing: 8) {
+                summaryItem(t("lastSync"), value: model.lastSyncDate.map(model.shortDate) ?? t("never"), symbol: "clock")
+                summaryItem(t("nextSync"), value: model.nextRunValue, symbol: "calendar")
+            }
+            primaryAction
+            notice
+            folders
+            if let release = model.availableRelease {
+                Button(String(format: t("menubarUpdate"), release.version)) { showWindow("settings") }
+                    .buttonStyle(.link).font(.caption)
+            }
+            Divider()
+            footer
+        }
+        .padding(16).frame(width: 356)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .environment(\.locale, model.config.language == "system" ? .current : Locale(identifier: model.config.language))
+    }
+}
+
+
 struct ContentView: View {
     @ObservedObject var model: SyncModel
     @Environment(\.openWindow) private var openWindow
@@ -480,7 +669,10 @@ struct ContentView: View {
         }
         .onAppear {
             let action = openWindow
-            URLCommandRouter.openMainWindow = { action(id: "main") }
+            URLCommandRouter.openMainWindow = {
+                NSApp.setActivationPolicy(.regular)
+                action(id: "main")
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshState()
@@ -674,7 +866,7 @@ struct ContentView: View {
     private var overviewHeader: some View {
         HStack(alignment: .center, spacing: 14) {
             Group {
-                if model.busy {
+                if model.isSyncActive {
                     ProgressView()
                 } else if model.statusKey == "error" {
                     Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)

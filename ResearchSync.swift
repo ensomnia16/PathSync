@@ -530,8 +530,8 @@ func appendLog(_ message: String) {
 }
 
 /// True while another process or thread holds the sync lock. Takes nothing.
-func syncIsRunning() -> Bool {
-    let lockFD = open(supportDirectory + "/sync.lock", O_RDWR)
+func syncIsRunning(at path: String = supportDirectory + "/sync.lock") -> Bool {
+    let lockFD = open(path, O_RDWR)
     guard lockFD >= 0 else { return false }
     defer { close(lockFD) }
     guard flock(lockFD, LOCK_SH | LOCK_NB) == 0 else { return true }
@@ -963,6 +963,26 @@ func previewSync(_ config: SyncConfig, pairID: UUID? = nil,
     return SyncPreview(scope: pairID, createdAt: Date(), pairs: pairs, config: snapshot.config)
 }
 
+func schedulePropertyList(_ config: SyncConfig, binary: String) -> [String: Any] {
+    var plist: [String: Any] = [
+        "Label": appID, "ProgramArguments": [binary, "--sync"], "RunAtLoad": false,
+        "AssociatedBundleIdentifiers": [appID],
+        "StandardOutPath": supportDirectory + "/launchd.out.log",
+        "StandardErrorPath": supportDirectory + "/launchd.err.log"
+    ]
+    if config.scheduleMode == "daily" {
+        plist["StartCalendarInterval"] = ["Hour": min(23, max(0, config.dailyHour)),
+                                         "Minute": min(59, max(0, config.dailyMinute))]
+    } else { plist["StartInterval"] = config.boundedIntervalHours * 3600 }
+    return plist
+}
+
+func scheduleNeedsIdentityMigration(_ plist: [String: Any], binary: String) -> Bool {
+    let identifiers = plist["AssociatedBundleIdentifiers"] as? [String]
+        ?? (plist["AssociatedBundleIdentifiers"] as? String).map { [$0] } ?? []
+    return (plist["ProgramArguments"] as? [String])?.first != binary || !identifiers.contains(appID)
+}
+
 func installSchedule(_ config: SyncConfig) throws {
     try fm.createDirectory(atPath: home + "/Library/LaunchAgents", withIntermediateDirectories: true)
     let binary = Bundle.main.executablePath ?? CommandLine.arguments[0]
@@ -978,15 +998,7 @@ func installSchedule(_ config: SyncConfig) throws {
         try? fm.removeItem(atPath: agentPath)
         return
     }
-    var plist: [String: Any] = [
-        "Label": appID, "ProgramArguments": [binary, "--sync"], "RunAtLoad": false,
-        "StandardOutPath": supportDirectory + "/launchd.out.log",
-        "StandardErrorPath": supportDirectory + "/launchd.err.log"
-    ]
-    if config.scheduleMode == "daily" {
-        plist["StartCalendarInterval"] = ["Hour": min(23, max(0, config.dailyHour)),
-                                           "Minute": min(59, max(0, config.dailyMinute))]
-    } else { plist["StartInterval"] = config.boundedIntervalHours * 3600 }
+    let plist = schedulePropertyList(config, binary: binary)
     let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     try plistData.write(to: URL(fileURLWithPath: agentPath), options: .atomic)
     let start = Process()
@@ -1024,6 +1036,7 @@ final class SyncModel: ObservableObject {
     @Published var statusKey = "ready"
     @Published var statusDetail: String?
     @Published var busy = false
+    @Published private(set) var observedSyncRunning = false
     @Published var conflictsByPair: [UUID: [PendingConflict]] = [:]
     @Published var history: [SyncHistoryRecord] = []
     @Published var historyError: String?
@@ -1057,6 +1070,7 @@ final class SyncModel: ObservableObject {
     /// Touched only on refreshQueue: merge-state files are re-read only after they change.
     private var conflictCache: [UUID: (stamp: String, conflicts: [PendingConflict])] = [:]
     private var refreshTimer: Timer?
+    private var activityTimer: Timer?
     private var refreshingOneDriveRules = false
     private var lastUpdateAttempt = UserDefaults.standard.object(forKey: "lastUpdateAttempt") as? Date
     private var notificationRequestID = UUID()
@@ -1065,6 +1079,7 @@ final class SyncModel: ObservableObject {
         config = loaded
         savedConfig = loaded
         selectedID = loaded.pairs.first?.id
+        migrateScheduleIdentityIfNeeded()
         refreshConflicts()
         refreshHistory()
         if let cached = UserDefaults.standard.data(forKey: "cachedLatestRelease"),
@@ -1082,13 +1097,63 @@ final class SyncModel: ObservableObject {
             self?.refreshState()
             self?.refreshOneDriveRules()
             self?.checkForUpdates(automatic: true)
+            self?.migrateScheduleIdentityIfNeeded()
         }
         timer.tolerance = 10
         RunLoop.main.add(timer, forMode: .common)
         refreshTimer = timer
+        refreshSyncActivity()
+        let activity = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshSyncActivity()
+        }
+        activity.tolerance = 0.3
+        RunLoop.main.add(activity, forMode: .common)
+        activityTimer = activity
+    }
+
+    #if APP_TESTS
+    init(testConfig: SyncConfig, workerRunning: Bool = false) {
+        config = testConfig
+        savedConfig = testConfig
+        selectedID = testConfig.pairs.first?.id
+        observedSyncRunning = workerRunning
+    }
+    #endif
+
+    deinit {
+        refreshTimer?.invalidate()
+        activityTimer?.invalidate()
+    }
+
+    var isSyncActive: Bool { busy || observedSyncRunning }
+
+    var menuBarState: SyncMenuBarState {
+        .resolve(scheduleEnabled: savedConfig.enabled,
+                 hasEnabledPairs: savedConfig.pairs.contains { $0.enabled },
+                 uiBusy: busy, workerRunning: observedSyncRunning)
+    }
+
+    func refreshSyncActivity() {
+        // These in-process jobs also use the lock, but are not an external
+        // scheduled sync. Avoid probing while they hold it.
+        guard !busy, !refreshingOneDriveRules, !backupMoveBusy else { return }
+        let running = syncIsRunning()
+        guard observedSyncRunning != running else { return }
+        observedSyncRunning = running
+        if !running { refreshState() }
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
+
+    private func migrateScheduleIdentityIfNeeded() {
+        guard !isSyncActive, !syncIsRunning(), fm.fileExists(atPath: agentPath),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: agentPath)),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let binary = Bundle.main.executablePath,
+              scheduleNeedsIdentityMigration(plist, binary: binary) else { return }
+        do { try installSchedule(savedConfig) }
+        catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
+    }
 
     private func refreshOneDriveRules() {
         guard !refreshingOneDriveRules, !busy, !hasUnsavedChanges,
@@ -1107,6 +1172,10 @@ final class SyncModel: ObservableObject {
                     self.savedConfig = shared
                     self.preview = nil
                 case .failure(let error):
+                    let failure = error as NSError
+                    // A short contention is retried on the next refresh; it
+                    // must not leave a stale "sync is running" error behind.
+                    if failure.domain == appID && failure.code == 6 { return }
                     if syncIsRunning() { return }
                     self.statusKey = "error"
                     self.statusDetail = uiError(error, language: self.config.language)
@@ -1684,6 +1753,13 @@ struct ResearchSyncApp: App {
 
     init() {
         let args = CommandLine.arguments
+        if args.contains("--test-notification") {
+            do {
+                try postIconTestNotification(language: (try? loadConfig())?.language ?? "zh-Hans")
+                print("Test notification accepted; no files were synchronized.")
+                exit(0)
+            } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
+        }
         if args.contains("--install") {
             do {
                 let config = try loadConfig()
