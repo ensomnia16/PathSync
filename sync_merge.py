@@ -2,6 +2,7 @@
 """Anchor-based folder sync with recoverable overwrites and optional deletions."""
 
 import argparse
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeout, wait
 from datetime import datetime, timezone
 import hashlib
@@ -152,7 +153,7 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
 
 def excluded_path(name, args, directory=False):
     if name == IGNORE_FILE and not directory:
-        return False
+        return args.shared_excludes
     return (excluded_relative(name, args.exclude_latex, args.skip_codex,
                               args.skip_claude, args.include_temp, directory=directory)
             or args.exclude_rules.matches(name, directory=directory))
@@ -206,18 +207,28 @@ def scan(root, args, errors, symlinks=None):
 class CloudPrefetch:
     """Hydrate cloud-only files ahead of the merge without delaying its first copy."""
 
-    def __init__(self, root, names, online_only=()):
+    def __init__(self, root, names, online_only=(), order=None):
         # Many new files, or any online-only file the merge must read, are
         # downloaded ahead in parallel with a bounded wait for each.
-        self.names = list(names) if len(names) >= 100 else []
-        self.names += [name for name in online_only if name not in set(self.names)]
+        candidates = set(names if len(names) >= 100 else ()) | set(online_only)
+        self.names = [name for name in (order if order is not None else
+                                       list(dict.fromkeys(list(names) + list(online_only))))
+                      if name in candidates]
+        self.root = root
+        self.queue = deque(self.names)
         self.executor = ThreadPoolExecutor(max_workers=4) if self.names else None
         self.futures = {}
         self.completed = 0
         if self.executor:
             print(f'PROGRESS\tPREFETCH\t0\t{len(self.names)}', flush=True)
-            self.futures = {name: self.executor.submit(self.hydrate, root / name)
-                            for name in self.names}
+            self.fill()
+
+    def fill(self):
+        # Follow merge order and keep only four downloads queued. A file being
+        # processed must never sit behind thousands of unrelated placeholders.
+        while self.queue and len(self.futures) < 4:
+            name = self.queue.popleft()
+            self.futures[name] = self.executor.submit(self.hydrate, self.root / name)
 
     @staticmethod
     def hydrate(path):
@@ -249,7 +260,14 @@ class CloudPrefetch:
                 error = future.result(timeout=20)
                 break
             except FutureTimeout:
-                print(f'PROGRESS\tWAIT\t{name}\t{int(time.monotonic() - started)}', flush=True)
+                elapsed = int(time.monotonic() - started)
+                print(f'PROGRESS\tWAIT\t{name}\t{elapsed}', flush=True)
+                if elapsed >= 320:
+                    future.cancel()
+                    error = '云端文件等待超过 320 秒；保留两端文件与基线，下次重试'
+                    break
+        self.futures.pop(name)
+        self.fill()
         self.completed += 1
         if self.completed % 8 == 0 or self.completed == len(self.names):
             print(f'PROGRESS\tPREFETCH\t{self.completed}\t{len(self.names)}', flush=True)
@@ -912,8 +930,9 @@ def sync_files(args, local, cloud, files, conflicts):
             print(f'ONLINE_ONLY\t{len(online_only)}\t先从云端下载仅在线的文件')
         counts['online_only'] = len(online_only)
     # A preview never downloads placeholders; it reports them instead.
-    prefetch = CloudPrefetch(cloud, [] if args.dry_run else import_names, online_only)
     ordered_names = sorted(names - new_cloud_only) + import_names
+    prefetch = CloudPrefetch(cloud, [] if args.dry_run else import_names, online_only,
+                             order=ordered_names)
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
     for processed, name in enumerate(ordered_names, 1):
@@ -1386,6 +1405,8 @@ def main():
     parser.add_argument('--include-temp', action='store_true')
     parser.add_argument('--exclude', action='append', default=[], metavar='PATTERN',
                         help='custom exclusion rule; may be repeated')
+    parser.add_argument('--shared-excludes', action='store_true',
+                        help='use authoritative shared rules and skip retired root ignore files')
     parser.add_argument('--hydrate-online-only', action='store_true',
                         help='download online-only cloud files the merge must read before comparing')
     parser.add_argument('--dry-run', action='store_true')
@@ -1426,13 +1447,14 @@ def main():
     args.local, args.cloud = local, cloud
     args.backup_count = 0
     cloud_ignore = cloud / IGNORE_FILE
-    if is_dataless(cloud_ignore):
+    if not args.shared_excludes and is_dataless(cloud_ignore):
         if args.dry_run:
             raise OSError(f'{cloud_ignore}: 规则文件仅在线，请先下载后再预览')
         error = CloudPrefetch.hydrate(cloud_ignore)
         if error:
             raise OSError(f'{cloud_ignore}: {error}')
-    args.exclude_rules = load_exclude_rules(local, args.exclude, (cloud,))
+    args.exclude_rules = (ExcludeRules(args.exclude) if args.shared_excludes
+                          else load_exclude_rules(local, args.exclude, (cloud,)))
     args.backups = BackupPlace(args)
     if args.migrate_backups:
         moved, failed = move_backups(args, only_pending=False)

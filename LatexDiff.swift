@@ -10,10 +10,10 @@ struct LatexDiffResult: Identifiable {
 }
 
 func safeHistoryFile(root: String, relative: String) -> URL? {
-    guard let value = path(in: root, relative: relative) else { return nil }
-    let base = URL(fileURLWithPath: root).standardizedFileURL.resolvingSymlinksInPath().path
-    let file = URL(fileURLWithPath: value).standardizedFileURL.resolvingSymlinksInPath()
-    guard file.path.hasPrefix(base + "/") else { return nil }
+    guard !root.isEmpty, isSafeRelativePath(relative) else { return nil }
+    let base = URL(fileURLWithPath: root).standardizedFileURL
+    let file = base.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
+    guard file.path.hasPrefix(base.resolvingSymlinksInPath().path + "/") else { return nil }
     return file
 }
 

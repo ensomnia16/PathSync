@@ -477,6 +477,25 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 2)
         self.assertFalse(self.state.exists())
 
+    def test_shared_rules_replace_legacy_rules_without_resurrecting_rule_file(self):
+        ignore = self.local / '.pathsyncignore'
+        ignore.write_text('now-visible.bin\n')
+        self.assertEqual(self.run_merge().returncode, 0)
+        (self.cloud / ignore.name).unlink()
+        (self.local / 'now-visible.bin').write_text('old exclusion was removed')
+        (self.local / 'shared-private.bin').write_text('still excluded')
+        flags = ('--shared-excludes', '--exclude=shared-private.bin')
+        result = self.run_merge('--dry-run', '--plan-json', *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('now-visible.bin', result.stdout)
+        self.assertNotIn(ignore.name, result.stdout)
+        result = self.run_merge(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.cloud / 'now-visible.bin').is_file())
+        self.assertFalse((self.cloud / 'shared-private.bin').exists())
+        self.assertTrue(ignore.is_file())
+        self.assertFalse((self.cloud / ignore.name).exists())
+
     def test_one_way_helper_reads_root_ignore_and_explicit_rules(self):
         (self.local / '.pathsyncignore').write_text('hidden.bin\n')
         for name in ('hidden.bin', 'app.bin', 'source.py'):
@@ -681,6 +700,37 @@ class MergeTests(unittest.TestCase):
         prefetch.close()
         self.assertEqual(set(failures), {names[-1]})
         self.assertFalse((self.cloud / names[-1]).exists())
+
+    def test_prefetch_follows_merge_order_with_bounded_queue(self):
+        import threading
+        release = threading.Event()
+        names = [f'file-{index:03}.txt' for index in range(100)]
+        order = list(reversed(names))
+        def hydrate(path):
+            release.wait(3)
+        with mock.patch.object(sync_merge.CloudPrefetch, 'hydrate', side_effect=hydrate):
+            prefetch = sync_merge.CloudPrefetch(self.cloud, names, order=order)
+            try:
+                self.assertEqual(list(prefetch.futures), order[:4])
+                self.assertEqual(len(prefetch.queue), 96)
+                release.set()
+                for name in order:
+                    self.assertIsNone(prefetch.check(name))
+                    self.assertLessEqual(len(prefetch.futures), 4)
+                self.assertFalse(prefetch.queue)
+            finally:
+                release.set()
+                prefetch.close()
+
+    def test_prefetch_wait_has_absolute_deadline(self):
+        from concurrent.futures import Future, TimeoutError
+        prefetch = sync_merge.CloudPrefetch(self.cloud, [])
+        future = Future()
+        prefetch.futures['offline'] = future
+        with mock.patch.object(future, 'result', side_effect=TimeoutError), \
+                mock.patch.object(sync_merge.time, 'monotonic', side_effect=[0, 320]):
+            self.assertIn('320', prefetch.check('offline'))
+        self.assertTrue(future.cancelled())
 
     def test_large_cloud_placeholder_gets_longer_bounded_read(self):
         path = self.cloud / 'video.mp4'

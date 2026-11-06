@@ -1,127 +1,6 @@
 import AppKit
 import SwiftUI
 
-private struct CloudImportPreviewSheet: View {
-    let preview: CloudImportPreview
-    let language: String
-    let apply: () -> Void
-    let cancel: () -> Void
-    private func t(_ key: String) -> String { uiText(key, language: language) }
-
-    private func schedule(_ config: SyncConfig) -> String {
-        config.scheduleMode == "daily"
-            ? String(format: "%02d:%02d", config.dailyHour, config.dailyMinute)
-            : "\(config.intervalHours) \(t("hours"))"
-    }
-
-    private func ruleValue(_ key: String, config: SyncConfig) -> String {
-        switch key {
-        case "schedule": return schedule(config)
-        case "conflict": return t(config.conflictPolicy == "keep-both" ? "autoKeepBoth" :
-                                  config.conflictPolicy == "newest" ? "keepNewest" : "askForConflicts")
-        case "backup": return "\(config.backupRetentionDays) \(t("days"))"
-        default: return config.excludeLatexIntermediates ? t("enabled") : t("disabled")
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(t("cloudPreviewTitle")).font(.title2.bold())
-            Text(preview.profile.deviceName + " · " + String(preview.profile.effectivePairs.count) + " " + t("folders"))
-                .foregroundStyle(.secondary)
-            if preview.localEditsConflict {
-                Label(t(preview.bothChanged ? "cloudRulesConflict" : "cloudLocalEdits"),
-                      systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-            }
-            Text(t("cloudPreviewHint")).font(.callout)
-            if preview.changed.isEmpty && preview.ruleChanges.isEmpty && preview.preservedLocalPairs.isEmpty {
-                Label(t("cloudNoChanges"), systemImage: "checkmark.circle")
-                    .foregroundStyle(.secondary)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(preview.ruleChanges, id: \.self) { key in
-                        VStack(alignment: .leading) {
-                            Text(t(key == "schedule" ? "schedule" : key == "conflict" ? "conflictHandling" :
-                                   key == "backup" ? "backupRetention" : "latex")).font(.headline)
-                            Text(ruleValue(key, config: preview.current) + " → " + ruleValue(key, config: preview.proposed))
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Divider()
-                    }
-                    ForEach(preview.changed) { pair in
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(pair.name).font(.headline)
-                            if let before = preview.current.pairs.first(where: { $0.id == pair.id }),
-                               before.scheduledDirection != pair.scheduledDirection {
-                                Text(t("scheduledDirection") + ": " +
-                                     t(before.scheduledDirection) + " → " + t(pair.scheduledDirection))
-                            }
-                            Text("\(t("local")): \(pair.localPath.isEmpty ? t("cloudUnset") : pair.localPath)")
-                            Text("\(t("cloud")): \(pair.cloudPath.isEmpty ? t("cloudUnset") : pair.cloudPath)")
-                            Text("Codex \(t(pair.syncCodexFiles ? "enabled" : "disabled")) · " +
-                                 "Claude Code \(t(pair.syncClaudeFiles ? "enabled" : "disabled")) · " +
-                                 "tmp \(t(pair.syncTemporaryFiles ? "enabled" : "disabled"))")
-                            if !pair.enabled { Text(t("cloudPairDisabled")).foregroundStyle(.orange) }
-                        }
-                        .font(.caption)
-                        .textSelection(.enabled)
-                        Divider()
-                    }
-                    if !preview.preservedLocalPairs.isEmpty {
-                        Text(t("cloudPreservedLocal")).font(.headline)
-                        ForEach(preview.preservedLocalPairs) { pair in
-                            Text(pair.name).font(.caption)
-                        }
-                    }
-                    if !preview.localFoldersToCreate.isEmpty {
-                        Text(t("cloudFoldersToCreate")).font(.headline)
-                        ForEach(preview.localFoldersToCreate, id: \.self) {
-                            Text($0).font(.caption).textSelection(.enabled)
-                        }
-                    }
-                    if !preview.missingFolders.isEmpty {
-                        Text(t("cloudMissingFolders")).font(.headline)
-                        ForEach(preview.missingFolders, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
-                    }
-                }
-            }
-            HStack {
-                Spacer()
-                Button(t("cancel"), action: cancel)
-                Button(preview.localEditsConflict ? t("cloudUseRemoteRules") : t("cloudImport"), action: apply)
-                    .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(24)
-        .frame(width: 680, height: 500)
-    }
-}
-
-
-// Template glyph from the app icon: a pierced diamond.
-func menuBarIcon() -> NSImage {
-    let image = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in
-        NSColor.black.set()
-        let diamond = NSBezierPath()
-        diamond.move(to: NSPoint(x: 8, y: 1.5))
-        diamond.line(to: NSPoint(x: 14.5, y: 8))
-        diamond.line(to: NSPoint(x: 8, y: 14.5))
-        diamond.line(to: NSPoint(x: 1.5, y: 8))
-        diamond.close()
-        diamond.lineJoinStyle = .round
-        diamond.lineWidth = 1
-        diamond.fill()
-        diamond.stroke()
-        NSGraphicsContext.current?.compositingOperation = .destinationOut
-        NSBezierPath(ovalIn: NSRect(x: 5.8, y: 5.8, width: 4.4, height: 4.4)).fill()
-        return true
-    }
-    image.isTemplate = true
-    return image
-}
-
 private func directionIcon(_ direction: String) -> String {
     switch direction {
     case "upload": return "icloud.and.arrow.up"
@@ -537,148 +416,9 @@ struct ConflictRow: View {
     }
 }
 
-/// The menu bar panel: status at a glance and one action. Everything else opens the window.
-struct MenuBarPanel: View {
-    @ObservedObject var model: SyncModel
-    @Environment(\.openWindow) private var openWindow
-
-    private func t(_ key: String) -> String { model.t(key) }
-
-    private func showWindow(_ page: String) {
-        model.page = page
-        openWindow(id: "main")
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    /// A running sync, an error or the last result replaces the schedule lines.
-    private var statusMessage: String? {
-        if model.busy, let detail = model.statusDetail { return detail }
-        if model.statusKey == "error", let detail = model.statusDetail { return detail }
-        return model.resultBanner
-    }
-
-    private var headline: String {
-        if !model.busy && model.statusKey != "error" && model.conflictCount > 0 { return t("attentionNeeded") }
-        return model.statusHeadline
-    }
-
-    private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Group {
-                if model.busy {
-                    ProgressView().controlSize(.small)
-                } else if model.statusKey == "error" {
-                    Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-                } else if model.conflictCount > 0 {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                } else {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                }
-            }
-            .font(.title2)
-            .frame(width: 24)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(headline).font(.headline).lineLimit(1)
-                Group {
-                    if let message = statusMessage {
-                        Text(message).lineLimit(2)
-                    } else {
-                        Text("\(t("lastSync"))：\(model.lastSyncDate.map(model.shortDate) ?? t("never"))")
-                            .lineLimit(1)
-                        Text("\(t("nextSync"))：\(model.nextRunValue)")
-                            .lineLimit(1)
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            Button { model.syncNow(all: true) } label: {
-                Label(t("syncNow"), systemImage: "arrow.triangle.2.circlepath")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!model.canRun || !model.hasEnabledPairs)
-            .help(t("syncAllHint"))
-        }
-    }
-
-    private func pairRow(_ pair: SyncPair) -> some View {
-        let status = model.pairStatus(pair)
-        let detail: String = {
-            if model.busy, let progress = model.pairProgress[pair.id] { return progress }
-            if !pair.enabled { return status.text }
-            return model.lastSync(for: pair).map(model.shortDate) ?? t("never")
-        }()
-        return HStack(spacing: 8) {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 7))
-                .foregroundStyle(status.color)
-                .help(status.text)
-            Text(model.displayName(pair))
-                .foregroundStyle(pair.enabled ? .primary : .secondary)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            Text(detail)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
-    private func menuRow(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.primary)
-        .padding(.vertical, 2)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                if model.config.pairs.isEmpty {
-                    Text(t("menubarNoPairs")).foregroundStyle(.secondary)
-                }
-                ForEach(model.config.pairs) { pair in pairRow(pair) }
-            }
-            if model.conflictCount > 0 {
-                Button { showWindow("overview") } label: {
-                    HStack {
-                        Label(String(format: t("conflictCountShort"), model.conflictCount),
-                              systemImage: "exclamationmark.triangle")
-                        Spacer()
-                        Image(systemName: "chevron.right").font(.caption)
-                    }
-                    .foregroundStyle(.orange)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-            }
-            if let release = model.availableRelease {
-                Button(String(format: t("menubarUpdate"), release.version)) { showWindow("settings") }
-                    .buttonStyle(.link)
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 2) {
-                menuRow(t("openMainWindow"), systemImage: "macwindow") { showWindow("overview") }
-                menuRow(t("history"), systemImage: "clock.arrow.circlepath") { showWindow("history") }
-                menuRow(t("menubarQuit"), systemImage: "power") { NSApp.terminate(nil) }
-                    .keyboardShortcut("q")
-            }
-        }
-        .padding(14)
-        .frame(width: 320)
-    }
-}
-
 struct ContentView: View {
     @ObservedObject var model: SyncModel
+    @Environment(\.openWindow) private var openWindow
 
     private func t(_ key: String) -> String { model.t(key) }
 
@@ -695,11 +435,6 @@ struct ContentView: View {
                 model.page = route
             }
         })
-    }
-
-    private var windowPreview: Binding<SyncPreview?> {
-        Binding(get: { model.previewOrigin == "window" ? model.preview : nil },
-                set: { if $0 == nil && model.previewOrigin == "window" { model.preview = nil } })
     }
 
     private var pageTitle: String {
@@ -734,22 +469,21 @@ struct ContentView: View {
         } message: {
             Text(t("removeConfirmHint"))
         }
-        .sheet(item: $model.cloudImportPreview) { preview in
-            CloudImportPreviewSheet(preview: preview, language: model.config.language,
-                apply: { model.applyCloudImport(preview) }, cancel: { model.cloudImportPreview = nil })
-        }
         .background {
             // Separate anchors so the preview and diff sheets never replace each other.
-            Color.clear.sheet(item: windowPreview) { preview in
+            Color.clear.sheet(item: $model.preview) { preview in
                 SyncPreviewSheet(model: model, preview: preview)
             }
             Color.clear.sheet(item: $model.diffResult) { result in
                 LatexDiffSheet(result: result, language: model.config.language)
             }
         }
+        .onAppear {
+            let action = openWindow
+            URLCommandRouter.openMainWindow = { action(id: "main") }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             model.refreshState()
-            model.refreshCloudProfiles()
         }
     }
 
@@ -1271,7 +1005,7 @@ struct ContentView: View {
                         DatePicker(t("runTime"), selection: dailyTime, displayedComponents: .hourAndMinute)
                             .datePickerStyle(.field)
                     } else {
-                        Stepper(value: $model.config.intervalHours, in: 6...168) {
+                        Stepper(value: $model.config.intervalHours, in: SyncConfig.intervalHourRange) {
                             LabeledContent(t("intervalHours"), value: "\(model.config.intervalHours) \(t("hours"))")
                         }
                     }
@@ -1281,7 +1015,9 @@ struct ContentView: View {
                 Text(t("schedule"))
             } footer: {
                 Text(t("backgroundHint") + " "
-                     + (model.config.scheduleMode == "daily" ? t("dailyHint") : t("atLeastSix")))
+                     + (model.config.scheduleMode == "daily" ? t("dailyHint") : String(
+                         format: t("intervalRangeHint"), SyncConfig.intervalHourRange.lowerBound,
+                         SyncConfig.intervalHourRange.upperBound)))
             }
 
             Section {
@@ -1351,7 +1087,7 @@ struct ContentView: View {
             }
 
             updatesSection
-            cloudConfigSection
+            oneDriveRulesSection
             configRollbackSection
             aboutSection
         }
@@ -1547,65 +1283,21 @@ struct ContentView: View {
     }
 
 
-    private var cloudConfigSection: some View {
-            Section {
-                Toggle(t("cloudConfigEnable"), isOn: $model.config.cloudConfigEnabled)
-                if model.config.cloudConfigEnabled {
-                    LabeledContent(t("localRoot")) {
-                        Text(abbreviatedPath(model.config.localRoot))
-                            .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
-                            .help(model.config.localRoot)
-                        Button(t("chooseLocalRoot")) { model.chooseLocalRoot() }
-                    }
-                    LabeledContent(t("oneDriveRoot")) {
-                        Text(model.config.oneDriveRoot.isEmpty ? "—" : abbreviatedPath(model.config.oneDriveRoot))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(.secondary)
-                            .help(model.config.oneDriveRoot)
-                        Button(t("chooseOneDriveRoot")) { model.chooseOneDriveRoot() }
-                    }
-                    let count = model.config.pairs.filter {
-                        !$0.cloudPath.isEmpty &&
-                        relativePath($0.cloudPath, within: model.config.oneDriveRoot) == nil
-                    }.count
-                    if count > 0 {
-                        Label(String(format: t("cloudNoRelative"), count), systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                    }
-                    HStack {
-                        Text(t("cloudProfiles")).font(.headline)
-                        Spacer()
-                        if model.cloudBusy { ProgressView().controlSize(.small) }
-                        Button(t("cloudRefresh")) { model.refreshCloudProfiles() }
-                            .disabled(model.cloudBusy)
-                    }
-                    if let own = model.ownCloudProfile {
-                        LabeledContent(t("cloudThisDevice")) {
-                            Text(own.deviceName)
-                            Text(t("cloudTransfer_" + model.ownCloudTransferStatus))
-                                .foregroundStyle(model.ownCloudTransferStatus == "error" ? Color.orange : Color.secondary)
-                        }
-                    }
-                    if model.cloudProfiles.isEmpty && !model.cloudBusy {
-                        Text(t("cloudNone")).foregroundStyle(.secondary)
-                    }
-                    ForEach(model.cloudProfiles) { profile in cloudProfileRow(profile) }
-                    if let error = model.cloudError {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                    } else if model.lastCloudPublish != nil {
-                        Label(t("cloudPublished"), systemImage: "checkmark.icloud")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } header: {
-                Text(t("cloudConfig"))
-            } footer: {
-                Text(cloudConfigFooter)
+    private var oneDriveRulesSection: some View {
+        Section {
+            LabeledContent(t("oneDriveRoot")) {
+                Text(model.config.oneDriveRoot.isEmpty ? "—" : abbreviatedPath(model.config.oneDriveRoot))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                    .help(model.config.oneDriveRoot)
+                Button(t("chooseOneDriveRoot")) { model.chooseOneDriveRoot() }
             }
-
-
+        } header: {
+            Text(t("oneDriveRulesTitle"))
+        } footer: {
+            Text(t("oneDriveRootHint"))
+        }
     }
 
     private var configRollbackSection: some View {
@@ -1628,33 +1320,6 @@ struct ContentView: View {
             }
     }
 
-    private var cloudConfigFooter: String {
-        ["cloudConfigHint", "oneDriveRootHint", "cloudImportHint"].map(t).joined(separator: " ")
-    }
-
-    private func cloudProfileRow(_ profile: CloudConfiguration) -> some View {
-        let anchor = model.config.cloudImportAnchors[profile.deviceID.uuidString.lowercased()]
-        let applied = anchor?.revisionID == profile.revisionID
-        let peerImportedOwn = model.ownCloudProfile.flatMap { own in
-            profile.importedRevisions?[own.deviceID.uuidString.lowercased()] == own.revisionID
-        } ?? false
-        return HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(profile.deviceName)
-                Text(profile.modifiedAt, style: .relative).font(.caption).foregroundStyle(.secondary)
-                Text(anchor == nil ? t("cloudRevisionNever") :
-                     t(applied ? "cloudRevisionApplied" : "cloudRevisionNew"))
-                    .font(.caption)
-                    .foregroundStyle(applied || anchor == nil ? Color.secondary : Color.orange)
-                Text(peerImportedOwn ? t("cloudPeerImported") : t("cloudPeerUnconfirmed"))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            Text("\(profile.effectivePairs.count) \(t("folders"))").foregroundStyle(.secondary)
-            Button(t("cloudImport")) { model.importCloudProfile(profile) }
-                .disabled(model.hasUnsavedChanges || model.busy)
-        }
-    }
 }
 
 /// A small coloured dot before a status text.

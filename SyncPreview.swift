@@ -48,6 +48,7 @@ struct SyncPreview: Identifiable {
     let scope: UUID?
     let createdAt: Date
     let pairs: [PairPreview]
+    let config: SyncConfig
 
     var changeCount: Int { pairs.reduce(0) { $0 + $1.changeCount } }
     var hasErrors: Bool { pairs.contains { $0.error != nil } }

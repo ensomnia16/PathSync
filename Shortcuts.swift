@@ -37,6 +37,7 @@ func pairMatching(_ reference: String, in pairs: [SyncPair]) -> SyncPair? {
 /// Routes pathsync:// links to the running app's model.
 enum URLCommandRouter {
     static weak var model: SyncModel?
+    static var openMainWindow: (() -> Void)?
 
     static func handle(_ url: URL) {
         guard let action = PathSyncURLAction(url), let model else { return }
@@ -51,9 +52,9 @@ enum URLCommandRouter {
             }
             model.syncNow(pairID: pair.id)
         case .open:
-            model.page = "overview"
+            if model.page != "overview" { model.page = "overview" }
+            openMainWindow?()
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
         }
     }
 }

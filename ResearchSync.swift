@@ -117,8 +117,13 @@ struct SyncPair: Codable, Identifiable, Equatable {
 }
 
 struct SyncConfig: Codable, Equatable {
+    static let intervalHourRange = 1...168
+
     var pairs: [SyncPair] = []
     var intervalHours = 24
+    var boundedIntervalHours: Int {
+        min(Self.intervalHourRange.upperBound, max(Self.intervalHourRange.lowerBound, intervalHours))
+    }
     var scheduleMode = "daily"
     var dailyHour = 23
     var dailyMinute = 0
@@ -130,10 +135,8 @@ struct SyncConfig: Codable, Equatable {
     var notificationMode = "off"
     var checkForUpdates = true
     var autoInstallUpdates = false
-    var cloudConfigEnabled = false
     var oneDriveRoot = ""
-    var localRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
-    var cloudImportAnchors: [String: CloudImportAnchor] = [:]
+    var oneDriveRulesManagedPaths: Set<String> = []
     /// "local" (beside the merge state), "icloud" or "folder" (backupFolder).
     var backupLocation = "local"
     var backupFolder = ""
@@ -143,7 +146,8 @@ struct SyncConfig: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case pairs, intervalHours, nightlyAt23, scheduleMode, dailyHour, dailyMinute
         case excludeLatexIntermediates, conflictPolicy, backupRetentionDays, enabled, language, notificationMode
-        case checkForUpdates, autoInstallUpdates, cloudConfigEnabled, oneDriveRoot, localRoot, cloudImportAnchors
+        case checkForUpdates, autoInstallUpdates, oneDriveRoot
+        case oneDriveRulesManagedPaths
         case backupLocation, backupFolder, checkCloudBeforeSync
         case source, destination, scheduledDirection
     }
@@ -165,11 +169,8 @@ struct SyncConfig: Codable, Equatable {
         notificationMode = try data.decodeIfPresent(String.self, forKey: .notificationMode) ?? "off"
         checkForUpdates = try data.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
         autoInstallUpdates = try data.decodeIfPresent(Bool.self, forKey: .autoInstallUpdates) ?? false
-        cloudConfigEnabled = try data.decodeIfPresent(Bool.self, forKey: .cloudConfigEnabled) ?? false
         oneDriveRoot = try data.decodeIfPresent(String.self, forKey: .oneDriveRoot) ?? ""
-        localRoot = try data.decodeIfPresent(String.self, forKey: .localRoot)
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents").path
-        cloudImportAnchors = try data.decodeIfPresent([String: CloudImportAnchor].self, forKey: .cloudImportAnchors) ?? [:]
+        oneDriveRulesManagedPaths = Set(try data.decodeIfPresent([String].self, forKey: .oneDriveRulesManagedPaths) ?? [])
         backupLocation = try data.decodeIfPresent(String.self, forKey: .backupLocation) ?? "local"
         backupFolder = try data.decodeIfPresent(String.self, forKey: .backupFolder) ?? ""
         checkCloudBeforeSync = try data.decodeIfPresent(Bool.self, forKey: .checkCloudBeforeSync) ?? true
@@ -182,10 +183,13 @@ struct SyncConfig: Codable, Equatable {
             pairs = [SyncPair(name: "已导入路径", localPath: local, cloudPath: cloud,
                               scheduledDirection: direction, enabled: !local.isEmpty && !cloud.isEmpty)]
         }
-        if oneDriveRoot.isEmpty {
-            let roots = Set(pairs.compactMap { inferredOneDriveRoot($0.cloudPath) })
-            if roots.count == 1 { oneDriveRoot = roots.first ?? "" }
-        }
+        inferOneDriveRootIfNeeded()
+    }
+
+    mutating func inferOneDriveRootIfNeeded() {
+        guard oneDriveRoot.isEmpty else { return }
+        let roots = Set(pairs.compactMap { inferredOneDriveRoot($0.cloudPath) })
+        if roots.count == 1 { oneDriveRoot = roots.first ?? "" }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -203,10 +207,10 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(notificationMode, forKey: .notificationMode)
         try data.encode(checkForUpdates, forKey: .checkForUpdates)
         try data.encode(autoInstallUpdates, forKey: .autoInstallUpdates)
-        try data.encode(cloudConfigEnabled, forKey: .cloudConfigEnabled)
         try data.encode(oneDriveRoot, forKey: .oneDriveRoot)
-        try data.encode(localRoot, forKey: .localRoot)
-        try data.encode(cloudImportAnchors, forKey: .cloudImportAnchors)
+        if !oneDriveRulesManagedPaths.isEmpty {
+            try data.encode(oneDriveRulesManagedPaths.sorted(), forKey: .oneDriveRulesManagedPaths)
+        }
         try data.encode(backupLocation, forKey: .backupLocation)
         try data.encode(backupFolder, forKey: .backupFolder)
         try data.encode(checkCloudBeforeSync, forKey: .checkCloudBeforeSync)
@@ -217,7 +221,9 @@ extension SyncConfig {
     /// The existing folder that receives backups, or nil to keep them on this Mac.
     var backupBaseFolder: String? {
         switch backupLocation {
-        case "icloud": return CloudConfigStore.iCloudDrive.path
+        case "icloud":
+            return fm.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true).path
         case "folder": return backupFolder.isEmpty ? nil : backupFolder
         default: return nil
         }
@@ -262,6 +268,13 @@ func validatedBackupLocation(_ config: SyncConfig) throws {
             }
         }
     }
+}
+
+func isSafeRelativePath(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 4_096 && !value.hasPrefix("/") &&
+    !value.split(separator: "/", omittingEmptySubsequences: false).contains(where: {
+        $0.isEmpty || $0 == "." || $0 == ".."
+    }) && !value.contains("\0")
 }
 
 func inferredOneDriveRoot(_ path: String) -> String? {
@@ -567,9 +580,18 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
     return try body()
 }
 
+private func refreshSavedOneDriveRules(at path: String = defaultConfigPath) throws -> SyncConfig {
+    try withSyncLock {
+        let current = try loadConfig(path)
+        let shared = try OneDriveRules.update(current).config
+        try saveConfig(shared, at: path)
+        return shared
+    }
+}
+
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
-                     plan: Bool = false, backupArguments: [String] = [], language: String,
+                     plan: Bool = false, sharedExcludes: Bool, backupArguments: [String] = [], language: String,
                      checkCloud: Bool = false,
                      progress: ((UUID, String) -> Void)?) throws -> String {
     if checkCloud, let problem = cloudPrecheckProblem(pair, language: language) {
@@ -599,6 +621,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     if !pair.syncCodexFiles { arguments.append("--skip-codex") }
     if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
     if pair.syncTemporaryFiles { arguments.append("--include-temp") }
+    if sharedExcludes { arguments.append("--shared-excludes") }
     // --exclude=VALUE keeps a rule that starts with "-" from reading as an option.
     arguments += pair.excludePatterns.map { "--exclude=" + $0 }
     if checkCloud && cloudStorageProvider(pair.cloudPath) != nil { arguments.append("--hydrate-online-only") }
@@ -842,13 +865,26 @@ func selectedPairs(_ config: SyncConfig, pairID: UUID?) -> [SyncPair] {
 
 private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirection?,
                       dryRun: Bool, plan: Bool,
-                      progress: ((UUID, String) -> Void)?) throws -> [(SyncPair, Result<String, Error>)] {
-    let selected = selectedPairs(config, pairID: pairID)
-    guard !selected.isEmpty else {
+                      confirmed: SyncConfig? = nil, cacheAt: String? = nil,
+                      progress: ((UUID, String) -> Void)?) throws
+    -> (config: SyncConfig, results: [(SyncPair, Result<String, Error>)]) {
+    guard !selectedPairs(config, pairID: pairID).isEmpty else {
         throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "没有可同步的路径。"])
     }
     return try withSyncLock {
         try validatedPairSet(config.pairs, including: pairID)
+        let shared = try dryRun ? OneDriveRules.read(config) : OneDriveRules.update(config)
+        let effective = shared.config
+        let selected = selectedPairs(effective, pairID: pairID)
+        if let confirmed, selected != selectedPairs(confirmed, pairID: pairID) ||
+            effective.excludeLatexIntermediates != confirmed.excludeLatexIntermediates ||
+            effective.oneDriveRulesManagedPaths != confirmed.oneDriveRulesManagedPaths {
+            throw NSError(domain: appID, code: 20, userInfo: [NSLocalizedDescriptionKey:
+                uiText("oneDriveRulesPreviewChanged", language: config.language)])
+        }
+        if let cacheAt, !dryRun, effective != config, try loadConfig(cacheAt) == config {
+            try saveConfig(effective, at: cacheAt)
+        }
         var results = [Result<String, Error>?](repeating: nil, count: selected.count)
         let resultsLock = NSLock()
         let slots = DispatchSemaphore(value: maxParallelPairs)
@@ -864,10 +900,10 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
                 let chosen = direction ?? SyncDirection(rawValue: pair.scheduledDirection) ?? .upload
                 let result = Result {
                     try syncOne(pair, direction: chosen,
-                                excludeLatex: config.excludeLatexIntermediates,
+                                excludeLatex: effective.excludeLatexIntermediates,
                                 conflictPolicy: config.conflictPolicy,
                                 backupRetentionDays: config.backupRetentionDays,
-                                dryRun: dryRun, plan: plan,
+                                dryRun: dryRun, plan: plan, sharedExcludes: shared.managed.contains(pair.id),
                                 backupArguments: config.backupArguments(pair), language: config.language,
                                 checkCloud: config.checkCloudBeforeSync,
                                 progress: progress)
@@ -881,15 +917,17 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
             }
         }
         group.wait()
-        return zip(selected, results.compactMap { $0 }).map { ($0, $1) }
+        return (effective, zip(selected, results.compactMap { $0 }).map { ($0, $1) })
     }
 }
 
 @discardableResult
 func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection? = nil,
-             dryRun: Bool = false, progress: ((UUID, String) -> Void)? = nil) throws -> String {
+             dryRun: Bool = false, confirmed: SyncConfig? = nil, cacheAt: String? = nil,
+             progress: ((UUID, String) -> Void)? = nil) throws -> String {
     let results = try runPairs(config, pairID: pairID, direction: direction,
-                               dryRun: dryRun, plan: false, progress: progress)
+                               dryRun: dryRun, plan: false, confirmed: confirmed, cacheAt: cacheAt,
+                               progress: progress).results
     var outputs: [String] = []
     var errors: [String] = []
     for (pair, result) in results {
@@ -907,10 +945,10 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
 /// Runs each selected pair with --dry-run --plan-json. Nothing in either folder
 /// or in the merge state is written; only the sync log records the preview.
 func previewSync(_ config: SyncConfig, pairID: UUID? = nil,
-                 progress: ((UUID, String) -> Void)? = nil) throws -> [PairPreview] {
-    let results = try runPairs(config, pairID: pairID, direction: nil,
-                               dryRun: true, plan: true, progress: progress)
-    return results.map { pair, result in
+                 progress: ((UUID, String) -> Void)? = nil) throws -> SyncPreview {
+    let snapshot = try runPairs(config, pairID: pairID, direction: nil,
+                                dryRun: true, plan: true, progress: progress)
+    let pairs = snapshot.results.map { pair, result in
         let direction = SyncDirection(rawValue: pair.scheduledDirection) ?? .upload
         switch result {
         case .success(let output):
@@ -922,6 +960,7 @@ func previewSync(_ config: SyncConfig, pairID: UUID? = nil,
                                plan: nil, error: uiError(error, language: config.language))
         }
     }
+    return SyncPreview(scope: pairID, createdAt: Date(), pairs: pairs, config: snapshot.config)
 }
 
 func installSchedule(_ config: SyncConfig) throws {
@@ -947,7 +986,7 @@ func installSchedule(_ config: SyncConfig) throws {
     if config.scheduleMode == "daily" {
         plist["StartCalendarInterval"] = ["Hour": min(23, max(0, config.dailyHour)),
                                            "Minute": min(59, max(0, config.dailyMinute))]
-    } else { plist["StartInterval"] = min(168, max(6, config.intervalHours)) * 3600 }
+    } else { plist["StartInterval"] = config.boundedIntervalHours * 3600 }
     let plistData = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
     try plistData.write(to: URL(fileURLWithPath: agentPath), options: .atomic)
     let start = Process()
@@ -994,13 +1033,6 @@ final class SyncModel: ObservableObject {
     @Published var launchAtLoginStatus: SMAppService.Status = SMAppService.mainApp.status
     @Published var launchAtLoginError: String?
     @Published var lastUpdateCheck: Date?
-    @Published var cloudProfiles: [CloudConfiguration] = []
-    @Published var cloudError: String?
-    @Published var cloudBusy = false
-    @Published var lastCloudPublish: Date?
-    @Published var ownCloudProfile: CloudConfiguration?
-    @Published var ownCloudTransferStatus = "unknown"
-    @Published var cloudImportPreview: CloudImportPreview?
     @Published var configBackups: [ConfigSnapshot] = configSnapshots()
     /// The latest dry-run plan; confirming it runs the real sync for the same scope.
     @Published var preview: SyncPreview? {
@@ -1012,8 +1044,6 @@ final class SyncModel: ObservableObject {
             }
         }
     }
-    /// "window" shows the preview as a sheet; "menu" shows it inside the menu bar panel.
-    @Published var previewOrigin = "window"
     @Published var syncingPairIDs: Set<UUID> = []
     @Published var pairProgress: [UUID: String] = [:]
     /// Summed counts of the last finished sync, for the result banner.
@@ -1027,16 +1057,9 @@ final class SyncModel: ObservableObject {
     /// Touched only on refreshQueue: merge-state files are re-read only after they change.
     private var conflictCache: [UUID: (stamp: String, conflicts: [PendingConflict])] = [:]
     private var refreshTimer: Timer?
+    private var refreshingOneDriveRules = false
     private var lastUpdateAttempt = UserDefaults.standard.object(forKey: "lastUpdateAttempt") as? Date
     private var notificationRequestID = UUID()
-    private let cloudDeviceID: UUID = {
-        if let value = UserDefaults.standard.string(forKey: "cloudConfigDeviceID"),
-           let id = UUID(uuidString: value) { return id }
-        let id = UUID()
-        UserDefaults.standard.set(id.uuidString, forKey: "cloudConfigDeviceID")
-        return id
-    }()
-
     init() {
         let loaded = (try? loadConfig()) ?? SyncConfig()
         config = loaded
@@ -1054,14 +1077,11 @@ final class SyncModel: ObservableObject {
             updateInstallPhase = .failed(message)
         }
         DispatchQueue.main.async { self.checkForUpdates(automatic: true) }
-        if loaded.cloudConfigEnabled {
-            DispatchQueue.main.async { self.refreshCloudProfiles() }
-        }
-        // One timer for the whole app: the window and the menu bar panel share it.
+        DispatchQueue.main.async { self.refreshOneDriveRules() }
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshState()
+            self?.refreshOneDriveRules()
             self?.checkForUpdates(automatic: true)
-            self?.refreshCloudProfiles()
         }
         timer.tolerance = 10
         RunLoop.main.add(timer, forMode: .common)
@@ -1069,6 +1089,31 @@ final class SyncModel: ObservableObject {
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
+
+    private func refreshOneDriveRules() {
+        guard !refreshingOneDriveRules, !busy, !hasUnsavedChanges,
+              OneDriveRules.configured(config) else { return }
+        let current = config
+        refreshingOneDriveRules = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try refreshSavedOneDriveRules() }
+            DispatchQueue.main.async {
+                self.refreshingOneDriveRules = false
+                guard !self.busy, self.config == current else { return }
+                switch result {
+                case .success(let shared):
+                    guard shared != current else { return }
+                    self.config = shared
+                    self.savedConfig = shared
+                    self.preview = nil
+                case .failure(let error):
+                    if syncIsRunning() { return }
+                    self.statusKey = "error"
+                    self.statusDetail = uiError(error, language: self.config.language)
+                }
+            }
+        }
+    }
     func refreshLaunchAtLogin() {
         launchAtLoginStatus = SMAppService.mainApp.status
     }
@@ -1344,115 +1389,25 @@ final class SyncModel: ObservableObject {
         panel.directoryURL = URL(fileURLWithPath: config.oneDriveRoot.isEmpty
             ? FileManager.default.homeDirectoryForCurrentUser.path + "/Library/CloudStorage"
             : config.oneDriveRoot)
-        if panel.runModal() == .OK, let root = panel.url?.standardizedFileURL.path {
+        if panel.runModal() == .OK, let selection = panel.url?.standardizedFileURL.path {
+            let root = inferredOneDriveRoot(selection) ?? selection
+            if config.oneDriveRoot != root { config.oneDriveRulesManagedPaths.removeAll() }
             config.oneDriveRoot = root
-        }
-    }
-
-    func chooseLocalRoot() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: config.localRoot)
-        if panel.runModal() == .OK, let root = panel.url?.standardizedFileURL.path {
-            config.localRoot = root
-        }
-    }
-
-    func refreshCloudProfiles() {
-        guard config.cloudConfigEnabled, !cloudBusy else { return }
-        cloudBusy = true
-        let ownID = cloudDeviceID
-        DispatchQueue.global(qos: .utility).async {
-            let result = Result { () throws -> ([CloudConfiguration], CloudConfiguration?, String) in
-                let store = CloudConfigStore(root: CloudConfigStore.iCloudRoot)
-                let all = try store.readOthers(excluding: UUID())
-                return (all.filter { $0.deviceID != ownID }, all.first { $0.deviceID == ownID },
-                        store.transferStatus(for: ownID))
-            }
-            DispatchQueue.main.async {
-                self.cloudBusy = false
-                switch result {
-                case .success(let (profiles, own, status)):
-                    self.cloudProfiles = profiles
-                    self.ownCloudProfile = own
-                    self.ownCloudTransferStatus = status
-                    self.cloudError = nil
-                case .failure(let error):
-                    self.cloudError = cloudConfigErrorText(error, language: self.config.language)
-                }
-            }
-        }
-    }
-
-    func importCloudProfile(_ profile: CloudConfiguration) {
-        guard !busy, !hasUnsavedChanges else { return }
-        do {
-            cloudImportPreview = try CloudImportPreview(profile: profile, current: config)
-            cloudError = nil
-        } catch {
-            cloudError = cloudConfigErrorText(error, language: config.language)
-        }
-    }
-
-    func applyCloudImport(_ preview: CloudImportPreview) {
-        do {
-            try createImportedLocalFolders(preview)
-            config = preview.proposed
-            selectedID = config.pairs.first?.id
-            cloudImportPreview = nil
-            cloudError = nil
-            statusKey = "cloudImported"
-            statusDetail = nil
-            refreshConflicts()
-        } catch {
-            let message = cloudConfigErrorText(error, language: config.language)
-            cloudError = message
-            cloudImportPreview = nil
         }
     }
 
     func restoreConfigSnapshot(_ snapshot: ConfigSnapshot) {
         do {
-            let restored = try loadConfig(snapshot.url.path)
+            var restored = try loadConfig(snapshot.url.path)
+            if restored.oneDriveRoot == config.oneDriveRoot {
+                restored.oneDriveRulesManagedPaths.formUnion(config.oneDriveRulesManagedPaths)
+            }
             config = restored
             selectedID = restored.pairs.first?.id
-            statusKey = "cloudImported"
+            statusKey = "configBackupLoaded"
             statusDetail = nil
             refreshConflicts()
         } catch { statusKey = "error"; statusDetail = error.localizedDescription }
-    }
-
-    private func publishCloudConfig(_ saved: SyncConfig) {
-        let ownID = cloudDeviceID
-        let deviceName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
-        let profile = CloudConfiguration(config: saved, deviceID: ownID, deviceName: deviceName)
-        if let ownCloudProfile,
-           ownCloudProfile.sharedDigest == profile.sharedDigest,
-           ownCloudProfile.importedRevisions == profile.importedRevisions {
-            return
-        }
-        cloudBusy = true
-        DispatchQueue.global(qos: .utility).async {
-            let result = Result {
-                try CloudConfigStore(root: CloudConfigStore.iCloudRoot).write(profile)
-            }
-            DispatchQueue.main.async {
-                self.cloudBusy = false
-                switch result {
-                case .success:
-                    self.lastCloudPublish = Date()
-                    self.ownCloudProfile = profile
-                    self.ownCloudTransferStatus = CloudConfigStore(root: CloudConfigStore.iCloudRoot)
-                        .transferStatus(for: ownID)
-                    self.cloudError = nil
-                    self.refreshCloudProfiles()
-                case .failure(let error):
-                    self.cloudError = cloudConfigErrorText(error, language: self.config.language)
-                }
-            }
-        }
     }
 
     func chooseNotificationMode(_ mode: String) {
@@ -1475,9 +1430,7 @@ final class SyncModel: ObservableObject {
 
     func save() {
         do {
-            if config.cloudConfigEnabled && !config.pairs.contains(where: { $0.enabled }) {
-                config.enabled = false
-            }
+            config.inferOneDriveRootIfNeeded()
             if config.enabled && !config.pairs.contains(where: { $0.enabled }) {
                 throw NSError(domain: appID, code: 9, userInfo: [NSLocalizedDescriptionKey: "启用后台同步前，请至少启用一组路径。"])
             }
@@ -1486,7 +1439,7 @@ final class SyncModel: ObservableObject {
             for pair in config.pairs where pair.enabled {
                 _ = try pendingConflicts(for: pair)
             }
-            config.intervalHours = min(168, max(6, config.intervalHours))
+            config.intervalHours = config.boundedIntervalHours
             config.dailyHour = min(23, max(0, config.dailyHour))
             config.dailyMinute = min(59, max(0, config.dailyMinute))
             if !["keep-both", "ask", "newest"].contains(config.conflictPolicy) {
@@ -1496,7 +1449,11 @@ final class SyncModel: ObservableObject {
             if !["off", "issues", "all"].contains(config.notificationMode) {
                 config.notificationMode = "off"
             }
-            try saveConfig(config)
+            config = try withSyncLock {
+                let shared = try OneDriveRules.update(config, replacing: savedConfig).config
+                try saveConfig(shared)
+                return shared
+            }
             configBackups = configSnapshots()
             savedConfig = config
             // A plan made with other folders, directions or rules no longer applies.
@@ -1505,12 +1462,12 @@ final class SyncModel: ObservableObject {
             statusKey = config.enabled ? "savedEnabled" : "savedDisabled"
             statusDetail = nil
             refreshConflicts()
-            if config.cloudConfigEnabled { publishCloudConfig(config) }
             if config.autoInstallUpdates { installAvailableUpdate() }
         } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
     }
 
-    func syncNow(_ direction: SyncDirection? = nil, all: Bool = false, pairID: UUID? = nil) {
+    func syncNow(_ direction: SyncDirection? = nil, all: Bool = false, pairID: UUID? = nil,
+                 confirmed: SyncConfig? = nil) {
         let id = all ? nil : (pairID ?? selectedID)
         guard !busy, !hasUnsavedChanges, all || id != nil else { return }
         busy = true
@@ -1526,7 +1483,8 @@ final class SyncModel: ObservableObject {
             let resultDetail: String?
             var counts: [String: Int]?
             do {
-                let output = try runSync(current, pairID: id, direction: direction) { pairID, message in
+                let output = try runSync(current, pairID: id, direction: direction,
+                                         confirmed: confirmed, cacheAt: defaultConfigPath) { pairID, message in
                     DispatchQueue.main.async {
                         self.pairProgress[pairID] = message
                         self.statusDetail = message
@@ -1552,17 +1510,17 @@ final class SyncModel: ObservableObject {
                 self.syncingPairIDs = []
                 self.pairProgress = [:]
                 self.refreshState()
+                self.refreshOneDriveRules()
                 if self.config.autoInstallUpdates { self.installAvailableUpdate() }
             }
         }
     }
 
     /// Builds a dry-run plan for one pair or every enabled pair. Nothing is written.
-    func previewNow(pairID: UUID? = nil, origin: String = "window") {
+    func previewNow(pairID: UUID? = nil) {
         guard !busy, !hasUnsavedChanges, pairID != nil || hasEnabledPairs else { return }
         busy = true
         preview = nil
-        previewOrigin = origin
         statusKey = "previewing"
         statusDetail = nil
         let current = config
@@ -1582,8 +1540,8 @@ final class SyncModel: ObservableObject {
                 self.syncingPairIDs = []
                 self.pairProgress = [:]
                 switch outcome {
-                case .success(let pairs):
-                    self.preview = SyncPreview(scope: pairID, createdAt: Date(), pairs: pairs)
+                case .success(let plan):
+                    self.preview = plan
                     self.statusKey = "previewReady"
                     self.statusDetail = nil
                 case .failure(let error):
@@ -1597,7 +1555,7 @@ final class SyncModel: ObservableObject {
 
     func confirmPreview() {
         guard let preview, !busy else { return }
-        syncNow(all: preview.scope == nil, pairID: preview.scope)
+        syncNow(all: preview.scope == nil, pairID: preview.scope, confirmed: preview.config)
     }
 
     func resolveConflict(_ name: String, choice: String, in target: SyncPair? = nil) {
@@ -1718,7 +1676,7 @@ final class SyncModel: ObservableObject {
     }
 }
 
-#if !CLOUD_CONFIG_TESTS
+#if !APP_TESTS
 @main
 struct ResearchSyncApp: App {
     @StateObject private var model: SyncModel
@@ -1821,12 +1779,13 @@ struct ResearchSyncApp: App {
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
-        if args.contains("--status") {
+        if args.contains("--status") || args.contains("--refresh-onedrive-rules") {
             let configPath: String
             if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) { configPath = args[index + 1] }
             else { configPath = defaultConfigPath }
             do {
-                print(syncStatusJSON(try loadConfig(configPath)))
+                let config = try args.contains("--status") ? loadConfig(configPath) : refreshSavedOneDriveRules(at: configPath)
+                print(syncStatusJSON(config))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
@@ -1843,7 +1802,7 @@ struct ResearchSyncApp: App {
                 else { id = nil }
                 let dryRun = args.contains("--dry-run")
                 let output = try runSync(config, pairID: id, direction: direction,
-                                         dryRun: dryRun) { _, message in
+                                         dryRun: dryRun, cacheAt: configPath) { _, message in
                     fputs(message + "\n", stderr)
                 }
                 if !dryRun { postSyncNotification(config: config, output: output, failed: false) }
@@ -1866,15 +1825,8 @@ struct ResearchSyncApp: App {
     var body: some Scene {
         Window("路径同步", id: "main") { ContentView(model: model) }
             .windowStyle(.titleBar)
+            .windowResizability(.contentMinSize)
             .defaultSize(width: 980, height: 680)
-        MenuBarExtra {
-            MenuBarPanel(model: model)
-                .onAppear { model.refreshState() }
-        } label: {
-            Image(nsImage: menuBarIcon())
-                .accessibilityLabel(uiText("appName", language: model.config.language))
-        }
-        .menuBarExtraStyle(.window)
     }
 }
 #endif
