@@ -27,19 +27,19 @@ struct OneDriveRulesChecks {
         func writePolicy(_ rules: String) throws {
             let document: [String: Any] = ["version": 1, "excludeLatexIntermediates": false,
                 "pairs": ["Documents/Research": ["excludeRules": rules, "syncCodexFiles": true,
-                          "syncClaudeFiles": false, "syncTemporaryFiles": true]]]
+                          "syncClaudeFiles": true, "syncTemporaryFiles": true]]]
             try JSONSerialization.data(withJSONObject: document).write(to: policy)
         }
         try writePolicy("central-only/\n# comment")
         let before = try Data(contentsOf: policy)
         let received = try OneDriveRules.read(config)
         assert(received.config.pairs[0].excludePatterns == ["central-only/"])
-        assert(received.config.pairs[0].syncCodexFiles && !received.config.pairs[0].syncClaudeFiles)
+        assert(received.config.pairs[0].syncCodexFiles && received.config.pairs[0].syncClaudeFiles)
         assert(received.config.pairs[0].syncTemporaryFiles && !received.config.excludeLatexIntermediates)
         assert(received.managed == [config.pairs[0].id])
         let arguments = syncFilterArguments(received.config.pairs[0], excludeLatex: received.config.excludeLatexIntermediates)
-        assert(arguments.contains("--shared-excludes") && arguments.contains("--include-temp"))
-        assert(arguments.contains("--skip-claude") && !arguments.contains("--skip-codex"))
+        assert(arguments.contains("--shared-excludes") && !arguments.contains("--include-temp"))
+        assert(!arguments.contains("--skip-claude") && !arguments.contains("--skip-codex"))
         assert(arguments.contains("--exclude=central-only/") && !arguments.contains("--exclude=local-only/"))
         let afterRead = try Data(contentsOf: policy)
         assert(afterRead == before, "loading/saving settings must not edit central rules")
@@ -72,6 +72,20 @@ struct OneDriveRulesChecks {
         var outside = config
         outside.pairs[0].cloudPath = temporary.appendingPathComponent("outside").path
         rejects(outside)
+        var oldPolicy = try JSONSerialization.jsonObject(with: Data(contentsOf: policy)) as! [String: Any]
+        oldPolicy["excludeLatexIntermediates"] = true
+        try JSONSerialization.data(withJSONObject: oldPolicy).write(to: policy)
+        rejects(config)
+        let model = SyncModel(testConfig: received.config)
+        let transient = NSError(domain: "RulesFixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "fixture rule conflict"])
+        model.acceptRulesRefresh(.failure(transient))
+        assert(model.statusKey == "error")
+        model.acceptRulesRefresh(.success(received.config))
+        assert(model.statusKey == "ready" && model.statusDetail == nil)
+        model.statusKey = "error"
+        model.statusDetail = "Unrelated sync error"
+        model.acceptRulesRefresh(.success(received.config))
+        assert(model.statusDetail == "Unrelated sync error")
         try Data("{}".utf8).write(to: policy)
         rejects(config)
         try Data(repeating: 0x20, count: 1_000_001).write(to: policy)

@@ -16,14 +16,15 @@ struct OneDriveRules {
     private static let maximumBytes = 1_000_000
 
     private enum Failure: LocalizedError {
-        case rootUnavailable, invalidDocument, oversized, unresolvedVersion, missingPolicy, missingPair(String)
+        case rootUnavailable, invalidDocument, oversized, unresolvedVersion([String]), legacyFilters, missingPolicy, missingPair(String)
 
         var errorDescription: String? {
             switch self {
             case .rootUnavailable: return "OneDrive 规则目录不可用，已暂停读取同步规则。"
             case .invalidDocument: return "OneDrive 排除规则文件格式无效，已暂停使用。"
             case .oversized: return "OneDrive 排除规则过大，无法安全读取或传递。"
-            case .unresolvedVersion: return "OneDrive 排除规则存在冲突副本，请在 Finder 中核对后重试。"
+            case .unresolvedVersion(let files): return "OneDrive 排除配置存在多个版本：" + files.joined(separator: "、") + "。请核对这些配置文件后重试。"
+            case .legacyFilters: return "根配置仍启用了旧的批量过滤开关。请关闭 excludeLatexIntermediates，并将三个 sync…Files 开关设为 true，改用 excludeRules 显式列出排除项。"
             case .missingPolicy: return "OneDrive 根目录缺少 PathSync-Exclusions.json，已暂停同步；不会改用本地排除规则。"
             case .missingPair(let name): return "OneDrive 根目录配置中缺少「\(name)」的排除规则，或目标不在所选 OneDrive 根目录内，已暂停同步。"
             }
@@ -52,6 +53,10 @@ struct OneDriveRules {
         func validate() throws {
             guard version == 1, pairs.keys.allSatisfy(isSafeRelativePath) else {
                 throw Failure.invalidDocument
+            }
+            guard !excludeLatexIntermediates,
+                  pairs.values.allSatisfy({ $0.syncCodexFiles && $0.syncClaudeFiles && $0.syncTemporaryFiles }) else {
+                throw Failure.legacyFilters
             }
             for entry in pairs.values {
                 guard !entry.excludeRules.contains("\0") else { throw Failure.invalidDocument }
@@ -143,7 +148,7 @@ struct OneDriveRules {
 
     private static func checkVersions(at url: URL) throws {
         guard (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).isEmpty else {
-            throw Failure.unresolvedVersion
+            throw Failure.unresolvedVersion([url.lastPathComponent, "macOS 未解决版本"])
         }
         // OneDrive can materialize a conflicted copy as another ordinary file.
         let prefix = url.deletingPathExtension().lastPathComponent.lowercased()
@@ -151,14 +156,15 @@ struct OneDriveRules {
             at: url.deletingLastPathComponent(), includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         )
-        if siblings.contains(where: { item in
+        let conflicts = siblings.filter { item in
             let name = item.lastPathComponent.lowercased()
             guard item.lastPathComponent != url.lastPathComponent,
                   item.pathExtension.lowercased() == "json" else { return false }
             return name == url.lastPathComponent.lowercased() ||
                 ["-", " ", "(", "_"].contains(where: { name.hasPrefix(prefix + $0) })
-        }) {
-            throw Failure.unresolvedVersion
+        }
+        if !conflicts.isEmpty {
+            throw Failure.unresolvedVersion([url.lastPathComponent] + conflicts.map(\.lastPathComponent).sorted())
         }
     }
 

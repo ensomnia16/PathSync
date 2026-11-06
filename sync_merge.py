@@ -154,6 +154,12 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
 def excluded_path(name, args, directory=False):
     if name == IGNORE_FILE and not directory:
         return args.shared_excludes
+    if args.shared_excludes:
+        # Shared configuration supplies every data filter. Keep only our own
+        # in-progress transfer files out of the protocol; legacy presets and
+        # flags must not silently hide logs, source, settings or whole folders.
+        return ((not directory and Path(name).name.endswith('.researchsync-partial'))
+                or args.exclude_rules.matches(name, directory=directory))
     return (excluded_relative(name, args.exclude_latex, args.skip_codex,
                               args.skip_claude, args.include_temp, directory=directory)
             or args.exclude_rules.matches(name, directory=directory))

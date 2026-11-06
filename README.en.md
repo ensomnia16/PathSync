@@ -7,9 +7,9 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 ## Features
 
 - Manage multiple folder pairs. Each pair has its own sync direction: two-way merge, local to cloud, or cloud to local.
-- The root rules file controls inclusion of Codex project files (`AGENTS.md`, `.codex/`, `.agents/`), Claude Code project files (`CLAUDE.md`, `.claude/`, `.mcp.json`), and temporary files such as `tmp`, `.tmp`, `.log`, and generated working directories. Machine-local `.claude/settings.local.json` and `.DS_Store` are always skipped. Pairs with temporary-file filtering enabled skip those files; existing copies and anchors remain and are never treated as deletions.
+- Shared mode uses only explicit `excludeRules` from the root configuration. Logs, LaTeX outputs, temporary folders, skills, and project configuration have no hidden filtering. Transfer work files, retired root-rule files, and symlink safety remain protocol protections.
 - Set a shared default schedule: any daily time or an interval from 1 to 168 hours.
-- Exclusions come only from `PathSync-Exclusions.json` in the selected OneDrive root. Each destination's path relative to that root identifies its rules and Codex, Claude, and temporary-file filters; LaTeX filtering is also read from this file.
+- Exclusions come only from `PathSync-Exclusions.json` in the selected OneDrive root. Each destination's path relative to that root identifies its rules. Set legacy flags to `excludeLatexIntermediates: false` and all three `sync…Files: true`; enabled legacy presets are rejected rather than silently hiding files.
 - Every preview and sync rereads the root configuration. Local settings, saved snapshots, and `.pathsyncignore` files are not exclusion sources. The app never creates, merges, or writes back the rules file. Save settings stores this Mac's paths, directions, and schedule. A missing/invalid file or missing entry for the selected pair stops the operation.
 - Folder pages show the root rules file and loaded rule count, with Show in Finder. Choose the OneDrive root in Settings. See the [configuration example](docs/exclusions.example.json). Rules support `*`, `?`, and `**`; a trailing `/` matches directories, and a leading or middle `/` anchors to the pair root. Exclusions preserve existing copies and anchors.
 - Cloud folder check (on by default in Settings): for folders in `~/Library/CloudStorage`, if OneDrive isn't running or the folder doesn't respond within 20 seconds, the pair is skipped this time with the reason in History, and unreadable files are never treated as deletions. Online-only placeholders whose content must be compared are downloaded first within the existing read limits; preview only counts them and never triggers downloads.
@@ -34,7 +34,7 @@ A small macOS app for syncing local working folders with mounted cloud folders o
 
 ## Download and build
 
-[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.5) for macOS 13 or later. The app is not notarized by Apple.
+[Download the Apple Silicon app](https://github.com/ensomnia16/PathSync/releases/tag/v2.16.6) for macOS 13 or later. The app is not notarized by Apple.
 
 To build locally, install Xcode Command Line Tools and run `./build.sh`. Copy the resulting `.build/路径同步.app` into `/Applications`, select folders, and save settings. The saved schedule runs through a per-user macOS LaunchAgent while you are signed in.
 
@@ -69,3 +69,5 @@ The white two-drawer cabinet icon master is `PathSyncIcon.png`. The existing `.i
 The menu bar drawer icon has three states: slash (scheduled sync off), rotating arrows (sync in progress), and check (enabled). A read-only sync-lock check runs about every two seconds, including for the external scheduled worker. Unsaved settings do not change the reported schedule state. The cabinet artwork is 10% smaller inside the existing white icon tile.
 
 The executable is named `PathSync`; a `ResearchSync` symlink preserves existing CLI scripts. The bundle identifier and data directory stay unchanged. LaunchAgents declare `AssociatedBundleIdentifiers`, and an existing schedule is migrated without changing its interval. Update backups are kept outside Applications as non-app folders to avoid duplicate app/notification registrations.
+
+The minimal example has 11 rebuildable environment/cache rules. Do not exclude unique research material because a folder contains many small files; package and verify it first.

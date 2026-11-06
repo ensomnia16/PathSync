@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "excludeLatexIntermediates": true,
+  "excludeLatexIntermediates": false,
   "pairs": {
     "Documents/Research": {
-      "excludeRules": "# Relative to this folder pair\n.cache/\npython-deps/\n*.partial",
+      "excludeRules": ".venv/\n.tox/\n.nox/\n__pycache__/\n.pytest_cache/\n.mypy_cache/\n.ruff_cache/\nnode_modules/\n.DS_Store\n*.pyc\n*.pyo",
       "syncCodexFiles": true,
       "syncClaudeFiles": true,
-      "syncTemporaryFiles": false
+      "syncTemporaryFiles": true
     }
   }
 }

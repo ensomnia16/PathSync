@@ -496,6 +496,105 @@ class MergeTests(unittest.TestCase):
         self.assertTrue(ignore.is_file())
         self.assertFalse((self.cloud / ignore.name).exists())
 
+    def test_shared_empty_rules_preserve_files_hidden_by_legacy_presets_and_flags(self):
+        names = (
+            'source.py', 'experiment/run.log', 'experiment/solver.out',
+            'tmp/results.json', 'temp/data.csv', '.tmp/evidence.png', '.temp/check.json',
+            '.codex/config.toml', '.agents/skills/example/SKILL.md', 'AGENTS.md',
+            '.claude/project.json', '.claude/settings.local.json', 'CLAUDE.md', '.mcp.json',
+            '.venv/pyvenv.cfg', 'venv/pyvenv.cfg', 'node_modules/example/index.js',
+            '__pycache__/source.cpython-313.pyc', 'pycache/source.py',
+            '.pytest_cache/lastfailed', '.mypy_cache/index.json', '.ruff_cache/cache',
+            'compiled.pyc', '.DS_Store', '~$draft.docx',
+            '.pptx-task/final.png', '.codex-wa-task/input.json', '.claude-task/input.json',
+            'build/paper.aux', '_minted-paper/result.pyg',
+        )
+        for name in names:
+            path = self.local / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture ' + name)
+        # Retired rules are not read, even if they cannot be decoded. Transfer
+        # scratch files remain local and never enter the shared anchor.
+        (self.local / '.pathsyncignore').write_bytes(b'\xff')
+        (self.local / 'upload.researchsync-partial').write_text('unfinished upload')
+        flags = ('--shared-excludes', '--skip-codex', '--skip-claude')
+        before = self.snapshot_everything()
+        preview = self.run_merge('--dry-run', '--plan-json', *flags)
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual({item['name'] for item in self.plan(preview)['items']}, set(names))
+        self.assertEqual(self.snapshot_everything(), before)
+        result = self.run_merge(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in names:
+            self.assertEqual((self.cloud / name).read_text(), 'fixture ' + name)
+        self.assertFalse((self.cloud / '.pathsyncignore').exists())
+        self.assertFalse((self.cloud / 'upload.researchsync-partial').exists())
+        self.assertEqual(set(json.loads(self.state.read_text())['files']), set(names))
+
+    def test_shared_minimal_rules_skip_only_explicit_environment_and_cache_patterns(self):
+        rules = ('.venv/', '.tox/', '.nox/', '__pycache__/',
+                 '.pytest_cache/', '.mypy_cache/', '.ruff_cache/', 'node_modules/',
+                 '.DS_Store', '*.pyc', '*.pyo')
+        excluded = (
+            'project/.venv/pyvenv.cfg',
+            '.tox/py313/bin/python', '.nox/tests/bin/python',
+            '__pycache__/module.pyc', '.pytest_cache/lastfailed',
+            '.mypy_cache/index.json', '.ruff_cache/index',
+            'web/node_modules/example/index.js', 'nested/.DS_Store',
+            'nested/compiled.pyc', 'nested/optimized.pyo',
+        )
+        kept = (
+            'venv/pyvenv.cfg', 'Lib/venv/__init__.py',
+            'env/scenario.yaml', 'pycache/source.py', 'tmp/results.json',
+            'experiments/run.log', 'experiments/solver.out',
+            'vqgan_mac_demo/results/titok_higher_rate/vqgan/vq-f4/204.vq',
+            '.codex/config.toml', '.agents/skills/example/SKILL.md',
+            'CLAUDE.md', '.mcp.json', 'paper/compiled.aux',
+            '.pptx-draft/final-verify/slide-1.png',
+        )
+        for name in (*excluded, *kept):
+            path = self.local / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture ' + name)
+        flags = ('--shared-excludes', *(f'--exclude={rule}' for rule in rules))
+        preview = self.run_merge('--dry-run', '--plan-json', *flags)
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual({item['name'] for item in self.plan(preview)['items']}, set(kept))
+        result = self.run_merge(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in kept:
+            self.assertEqual((self.cloud / name).read_text(), 'fixture ' + name)
+        for name in excluded:
+            self.assertFalse((self.cloud / name).exists())
+
+    def test_new_shared_exclusion_keeps_existing_copies_and_anchor(self):
+        cache_name = '.venv/lib/site-packages/example.py'
+        cache = self.local / cache_name
+        cache.parent.mkdir(parents=True)
+        cache.write_text('original environment')
+        (self.local / 'report.tex').write_text('original report')
+        result = self.run_merge('--shared-excludes')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        original_anchor = json.loads(self.state.read_text())['files'][cache_name]
+        cache.unlink()
+        (self.cloud / cache_name).write_text('retain existing cloud environment')
+        (self.cloud / '.venv' / 'new.py').write_text('cloud only environment file')
+        (self.local / 'report.tex').write_text('revised report')
+        flags = ('--shared-excludes', '--exclude=.venv/')
+        before = self.snapshot_everything()
+        preview = self.run_merge('--dry-run', '--plan-json', *flags)
+        self.assertEqual(preview.returncode, 0, preview.stdout + preview.stderr)
+        self.assertEqual({item['name'] for item in self.plan(preview)['items']}, {'report.tex'})
+        self.assertEqual(self.snapshot_everything(), before)
+        result = self.run_merge(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.cloud / cache_name).read_text(), 'retain existing cloud environment')
+        self.assertFalse(cache.exists())
+        self.assertFalse((self.local / '.venv' / 'new.py').exists())
+        self.assertEqual((self.cloud / 'report.tex').read_text(), 'revised report')
+        self.assertEqual(json.loads(self.state.read_text())['files'][cache_name], original_anchor)
+        self.assertNotIn('DELETED', result.stdout)
+
     def test_one_way_helper_reads_root_ignore_and_explicit_rules(self):
         (self.local / '.pathsyncignore').write_text('hidden.bin\n')
         for name in ('hidden.bin', 'app.bin', 'source.py'):

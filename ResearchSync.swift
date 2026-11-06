@@ -595,10 +595,8 @@ private func refreshSavedOneDriveRules(at path: String = defaultConfigPath) thro
 
 func syncFilterArguments(_ pair: SyncPair, excludeLatex: Bool) -> [String] {
     var arguments = ["--shared-excludes"]
-    if excludeLatex { arguments.append("--exclude-latex") }
-    if !pair.syncCodexFiles { arguments.append("--skip-codex") }
-    if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
-    if pair.syncTemporaryFiles { arguments.append("--include-temp") }
+    // All user exclusions are explicit patterns from the root policy. Legacy
+    // switches are rejected while loading, rather than silently hiding files.
     // Keep rules starting with '-' from being interpreted as command options.
     arguments += pair.excludePatterns.map { "--exclude=" + $0 }
     return arguments
@@ -1093,6 +1091,7 @@ final class SyncModel: ObservableObject {
     private var refreshTimer: Timer?
     private var activityTimer: Timer?
     private var refreshingOneDriveRules = false
+    private var rulesRefreshError: String?
     private var lastUpdateAttempt = UserDefaults.standard.object(forKey: "lastUpdateAttempt") as? Date
     private var notificationRequestID = UUID()
     init() {
@@ -1186,24 +1185,34 @@ final class SyncModel: ObservableObject {
             DispatchQueue.main.async {
                 self.refreshingOneDriveRules = false
                 guard !self.busy, self.config == current else { return }
-                switch result {
-                case .success(let shared):
-                    guard shared != current else { return }
-                    self.config = shared
-                    self.savedConfig = shared
-                    self.preview = nil
-                case .failure(let error):
-                    let failure = error as NSError
-                    // A short contention is retried on the next refresh; it
-                    // must not leave a stale "sync is running" error behind.
-                    if failure.domain == appID && failure.code == 6 { return }
-                    if syncIsRunning() { return }
-                    self.statusKey = "error"
-                    self.statusDetail = uiError(error, language: self.config.language)
-                }
+                self.acceptRulesRefresh(result)
             }
         }
     }
+
+    func acceptRulesRefresh(_ result: Result<SyncConfig, Error>) {
+        switch result {
+        case .success(let shared):
+            if let previous = rulesRefreshError, statusKey == "error", statusDetail == previous {
+                statusKey = "ready"
+                statusDetail = nil
+            }
+            rulesRefreshError = nil
+            guard shared != config else { return }
+            config = shared
+            savedConfig = shared
+            preview = nil
+        case .failure(let error):
+            let failure = error as NSError
+            if failure.domain == appID && failure.code == 6 { return }
+            if isSyncActive { return }
+            let detail = uiError(error, language: config.language)
+            rulesRefreshError = detail
+            statusKey = "error"
+            statusDetail = detail
+        }
+    }
+
     func refreshLaunchAtLogin() {
         launchAtLoginStatus = SMAppService.mainApp.status
     }
