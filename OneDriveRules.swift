@@ -16,7 +16,7 @@ struct OneDriveRules {
     private static let maximumBytes = 1_000_000
 
     private enum Failure: LocalizedError {
-        case rootUnavailable, invalidDocument, oversized, unresolvedVersion, staleEdit(String), missingPolicy, writeVerification
+        case rootUnavailable, invalidDocument, oversized, unresolvedVersion, missingPolicy, missingPair(String)
 
         var errorDescription: String? {
             switch self {
@@ -24,9 +24,8 @@ struct OneDriveRules {
             case .invalidDocument: return "OneDrive 排除规则文件格式无效，已暂停使用。"
             case .oversized: return "OneDrive 排除规则过大，无法安全读取或传递。"
             case .unresolvedVersion: return "OneDrive 排除规则存在冲突副本，请在 Finder 中核对后重试。"
-            case .staleEdit(let scope): return "OneDrive 上的「\(scope)」规则已更新，请重新打开设置后再编辑。"
-            case .missingPolicy: return "OneDrive 上先前已启用的排除规则缺失，已暂停同步以保留现有文件。"
-            case .writeVerification: return "OneDrive 排除规则写入后校验失败，请重新打开设置核对当前版本。"
+            case .missingPolicy: return "OneDrive 根目录缺少 PathSync-Exclusions.json，已暂停同步；不会改用本地排除规则。"
+            case .missingPair(let name): return "OneDrive 根目录配置中缺少「\(name)」的排除规则，或目标不在所选 OneDrive 根目录内，已暂停同步。"
             }
         }
     }
@@ -36,13 +35,6 @@ struct OneDriveRules {
         let syncCodexFiles: Bool
         let syncClaudeFiles: Bool
         let syncTemporaryFiles: Bool
-
-        init(_ pair: SyncPair) {
-            excludeRules = pair.excludeRules
-            syncCodexFiles = pair.syncCodexFiles
-            syncClaudeFiles = pair.syncClaudeFiles
-            syncTemporaryFiles = pair.syncTemporaryFiles
-        }
 
         func apply(to pair: inout SyncPair) {
             pair.excludeRules = excludeRules
@@ -112,8 +104,8 @@ struct OneDriveRules {
         return root.appendingPathComponent(filename, isDirectory: false)
     }
 
-    /// Only a missing file permits legacy fallback. Symlinks, non-regular files,
-    /// read failures and malformed data all fail closed.
+    /// Only regular, bounded root configuration files are accepted. A missing
+    /// document is reported to the caller, never replaced from local rules.
     private static func boundedData(at url: URL) throws -> Data? {
         // Check File Provider metadata before opening. This limits content reads
         // (including any provider hydration) to small rule documents.
@@ -129,8 +121,7 @@ struct OneDriveRules {
         guard info.st_size <= maximumBytes else { throw Failure.oversized }
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else {
-            // A file observed above is not a first-use fallback if it becomes
-            // inaccessible before open.
+            // A file observed above must not disappear or change type before open.
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
         let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
@@ -181,37 +172,37 @@ struct OneDriveRules {
         return document
     }
 
-    private static func checkManaged(_ config: SyncConfig, pairs: [BoundPair],
-                                     document: Document?) throws {
-        if !config.oneDriveRulesManagedPaths.isEmpty && document == nil {
-            throw Failure.missingPolicy
-        }
-        for pair in pairs where config.oneDriveRulesManagedPaths.contains(pair.key) {
-            guard document?.pairs[pair.key] != nil else { throw Failure.missingPolicy }
-        }
+    static func configurationURL(_ config: SyncConfig) -> URL? {
+        guard isOneDriveRoot(config.oneDriveRoot) else { return nil }
+        return URL(fileURLWithPath: config.oneDriveRoot, isDirectory: true)
+            .appendingPathComponent(filename)
     }
 
-    private static func resolved(_ config: SyncConfig, pairs: [BoundPair],
-                                 document: Document?) -> (config: SyncConfig, managed: Set<UUID>) {
-        guard let document else { return (config, []) }
-        var config = config
-        var managed = Set<UUID>()
-        for pair in pairs {
-            guard let entry = document.pairs[pair.key] else { continue }
-            entry.apply(to: &config.pairs[pair.index])
-            config.oneDriveRulesManagedPaths.insert(pair.key)
-            managed.insert(config.pairs[pair.index].id)
+    /// Every preview and sync reads this one document. Local cached fields,
+    /// .pathsyncignore files and previous configuration snapshots are not inputs.
+    static func read(_ original: SyncConfig, requiring pairIDs: Set<UUID>? = nil) throws
+        -> (config: SyncConfig, managed: Set<UUID>) {
+        let required = pairIDs ?? Set(original.pairs.filter { $0.enabled }.map(\.id))
+        guard required.isSubset(of: Set(original.pairs.map(\.id))) else { throw Failure.missingPolicy }
+        var config = original
+        config.oneDriveRulesManagedPaths = []
+        config.excludeLatexIntermediates = true
+        for index in config.pairs.indices {
+            config.pairs[index].excludeRules = ""
+            config.pairs[index].syncCodexFiles = true
+            config.pairs[index].syncClaudeFiles = true
+            config.pairs[index].syncTemporaryFiles = false
         }
-        if !managed.isEmpty { config.excludeLatexIntermediates = document.excludeLatexIntermediates }
-        return (config, managed)
-    }
-
-    static func read(_ config: SyncConfig) throws -> (config: SyncConfig, managed: Set<UUID>) {
-        if !config.oneDriveRulesManagedPaths.isEmpty && !isOneDriveRoot(config.oneDriveRoot) {
+        guard isOneDriveRoot(config.oneDriveRoot) else {
+            if required.isEmpty { return (config, []) }
             throw Failure.rootUnavailable
         }
         let pairs = boundPairs(config)
-        guard !pairs.isEmpty else { return (config, []) }
+        for pair in config.pairs where required.contains(pair.id) {
+            guard pairs.contains(where: { config.pairs[$0.index].id == pair.id }) else {
+                throw Failure.missingPair(pair.name)
+            }
+        }
         let url = try sharedURL(config)
         let coordinator = NSFileCoordinator(filePresenter: nil)
         var coordinatorError: NSError?
@@ -221,96 +212,20 @@ struct OneDriveRules {
         }
         if let coordinatorError { throw coordinatorError }
         guard let result else { throw Failure.rootUnavailable }
-        let document = try result.get()
-        try checkManaged(config, pairs: pairs, document: document)
-        return resolved(config, pairs: pairs, document: document)
-    }
-
-    private static func bootstrap(_ pair: SyncPair) throws -> Entry? {
-        let roots = [pair.localPath, pair.cloudPath].map {
-            URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
-        }
-        guard !pair.localPath.isEmpty, !pair.cloudPath.isEmpty,
-              try roots.allSatisfy(directoryExists) else { return nil }
-        var sources = [pair.excludeRules]
-        for root in roots {
-            guard let data = try boundedData(at: root.appendingPathComponent(".pathsyncignore")) else {
-                continue
-            }
-            guard var text = String(data: data, encoding: .utf8) else { throw Failure.invalidDocument }
-            if text.first == "\u{FEFF}" { text.removeFirst() }
-            sources.append(text)
-        }
-        var seen = Set<String>()
-        let lines = sources.flatMap { $0.components(separatedBy: .newlines) }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && seen.insert($0).inserted }
-        var entry = Entry(pair)
-        entry.excludeRules = lines.joined(separator: "\n")
-        return entry
-    }
-
-    static func update(_ config: SyncConfig, replacing previous: SyncConfig? = nil,
-                       migrate: Bool = true) throws -> (config: SyncConfig, managed: Set<UUID>) {
-        if !config.oneDriveRulesManagedPaths.isEmpty && !isOneDriveRoot(config.oneDriveRoot) {
-            throw Failure.rootUnavailable
-        }
-        let pairs = boundPairs(config)
-        guard !pairs.isEmpty else { return (config, []) }
-        let url = try sharedURL(config)
-        let previous = previous.flatMap { saved in
-            URL(fileURLWithPath: saved.oneDriveRoot).standardizedFileURL.path ==
-                URL(fileURLWithPath: config.oneDriveRoot).standardizedFileURL.path ? saved : nil
-        }
-        var previousEntries = [String: Entry]()
-        if let previous {
-            for bound in boundPairs(previous) {
-                previousEntries[bound.key] = Entry(previous.pairs[bound.index])
+        guard let document = try result.get() else { throw Failure.missingPolicy }
+        for pair in pairs where required.contains(config.pairs[pair.index].id) {
+            guard document.pairs[pair.key] != nil else {
+                throw Failure.missingPair(config.pairs[pair.index].name)
             }
         }
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        var coordinatorError: NSError?
-        var result: Result<Document?, Error>?
-        coordinator.coordinate(writingItemAt: url, options: [], error: &coordinatorError) { location in
-            result = Result {
-                let existing = try load(at: location)
-                try checkManaged(config, pairs: pairs, document: existing)
-                if let previous { try checkManaged(previous, pairs: pairs, document: existing) }
-                var document = existing ?? Document(excludeLatexIntermediates: config.excludeLatexIntermediates)
-                for bound in pairs {
-                    let pair = config.pairs[bound.index]
-                    if let current = document.pairs[bound.key] {
-                        let desired = Entry(pair)
-                        guard let original = previousEntries[bound.key], original != desired else { continue }
-                        guard current == original || current == desired else { throw Failure.staleEdit(pair.name) }
-                        document.pairs[bound.key] = desired
-                    } else if migrate {
-                        document.pairs[bound.key] = try bootstrap(pair)
-                    }
-                }
-                if pairs.contains(where: { document.pairs[$0.key] != nil }), let previous,
-                   config.excludeLatexIntermediates != previous.excludeLatexIntermediates {
-                    let desired = config.excludeLatexIntermediates
-                    let current = document.excludeLatexIntermediates
-                    guard current == previous.excludeLatexIntermediates || current == desired else {
-                        throw Failure.staleEdit("LaTeX 中间文件")
-                    }
-                    document.excludeLatexIntermediates = desired
-                }
-                guard !document.pairs.isEmpty else { return existing }
-                guard document != existing else { return existing }
-                try document.validate()
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                let data = try encoder.encode(document)
-                guard data.count <= maximumBytes else { throw Failure.oversized }
-                try data.write(to: location, options: .atomic)
-                guard try boundedData(at: location) == data else { throw Failure.writeVerification }
-                return document
-            }
+        var managed = Set<UUID>()
+        for pair in pairs {
+            guard let entry = document.pairs[pair.key] else { continue }
+            entry.apply(to: &config.pairs[pair.index])
+            config.oneDriveRulesManagedPaths.insert(pair.key)
+            managed.insert(config.pairs[pair.index].id)
         }
-        if let coordinatorError { throw coordinatorError }
-        guard let result else { throw Failure.rootUnavailable }
-        return resolved(config, pairs: pairs, document: try result.get())
+        config.excludeLatexIntermediates = document.excludeLatexIntermediates
+        return (config, managed)
     }
 }

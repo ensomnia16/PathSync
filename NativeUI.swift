@@ -1089,24 +1089,12 @@ struct ContentView: View {
             }
 
             Section {
-                Toggle(t("syncCodexFiles"), isOn: $model.config.pairs[index].syncCodexFiles)
-                Toggle(t("syncClaudeFiles"), isOn: $model.config.pairs[index].syncClaudeFiles)
-                Toggle(t("syncTemporaryFiles"), isOn: $model.config.pairs[index].syncTemporaryFiles)
+                rulesFileLocation
+                LabeledContent(t("sharedRuleCount"), value: String(pair.excludePatterns.count))
             } header: {
-                Text(t("pairFilters"))
+                Text(t("oneDriveRulesTitle"))
             } footer: {
-                Text(t("pairFiltersHint"))
-            }
-
-            Section {
-                TextEditor(text: $model.config.pairs[index].excludeRules)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 80)
-                    .accessibilityLabel(t("excludeRules"))
-            } header: {
-                Text(t("excludeRules"))
-            } footer: {
-                Text(t("excludeRulesHint"))
+                Text(t("oneDriveOnlyHint"))
             }
 
             Section {
@@ -1234,14 +1222,6 @@ struct ContentView: View {
                 Text(t("conflictsAndBackups"))
             } footer: {
                 Text(t("conflictPolicyHint") + " " + t("backupHint"))
-            }
-
-            Section {
-                Toggle(t("latex"), isOn: $model.config.excludeLatexIntermediates)
-            } header: {
-                Text(t("filterTitle"))
-            } footer: {
-                Text(t("filterHint"))
             }
 
             Section {
@@ -1475,6 +1455,19 @@ struct ContentView: View {
     }
 
 
+    private var rulesFileLocation: some View {
+        LabeledContent(t("rulesFile")) {
+            Text(OneDriveRules.filename)
+                .foregroundStyle(.secondary).textSelection(.enabled)
+            Button(t("revealRulesFile")) {
+                if let url = OneDriveRules.configurationURL(model.config) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            }
+            .disabled(OneDriveRules.configurationURL(model.config) == nil)
+        }
+    }
+
     private var oneDriveRulesSection: some View {
         Section {
             LabeledContent(t("oneDriveRoot")) {
@@ -1485,6 +1478,7 @@ struct ContentView: View {
                     .help(model.config.oneDriveRoot)
                 Button(t("chooseOneDriveRoot")) { model.chooseOneDriveRoot() }
             }
+            rulesFileLocation
         } header: {
             Text(t("oneDriveRulesTitle"))
         } footer: {

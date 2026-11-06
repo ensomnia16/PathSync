@@ -9,47 +9,78 @@ struct OneDriveRulesChecks {
         let root = temporary.appendingPathComponent("Library/CloudStorage/OneDrive-Fixture")
         let cloud = root.appendingPathComponent("Documents/Research")
         let local = temporary.appendingPathComponent("first")
-        let otherLocal = temporary.appendingPathComponent("second")
-        for folder in [cloud, local, otherLocal] {
-            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        for folder in [cloud, local] { try fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        // Neither local rule text nor malformed legacy files may become inputs.
+        try Data([0xFF]).write(to: local.appendingPathComponent(".pathsyncignore"))
+        try fm.createDirectory(at: cloud.appendingPathComponent(".pathsyncignore"), withIntermediateDirectories: true)
+        var config = SyncConfig()
+        config.pairs = [SyncPair(name: "Research", localPath: local.path, cloudPath: cloud.path,
+                                  enabled: true, syncCodexFiles: false, excludeRules: "local-only/")]
+        config.inferOneDriveRootIfNeeded()
+        let policy = root.appendingPathComponent(OneDriveRules.filename)
+        func rejects(_ candidate: SyncConfig, requiring ids: Set<UUID>? = nil) {
+            do { _ = try OneDriveRules.read(candidate, requiring: ids); preconditionFailure("Missing/invalid central policy must stop this run") }
+            catch { }
         }
-        try "local/\n".write(to: local.appendingPathComponent(".pathsyncignore"), atomically: true, encoding: .utf8)
-        try "cloud/\n".write(to: cloud.appendingPathComponent(".pathsyncignore"), atomically: true, encoding: .utf8)
-        var first = SyncConfig()
-        first.pairs = [SyncPair(name: "Research", localPath: local.path, cloudPath: cloud.path,
-                                enabled: true, excludeRules: "app/")]
-        first.inferOneDriveRootIfNeeded()
-        assert(first.oneDriveRoot == root.path)
-        let migrated = try OneDriveRules.update(first)
-        let combined = migrated.config.pairs[0].excludeRules
-        assert(Set(combined.split(separator: "\n")) == ["app/", "local/", "cloud/"])
-
-        var second = first
-        second.pairs[0] = SyncPair(name: "Other Mac", localPath: otherLocal.path,
-                                   cloudPath: cloud.path, excludeRules: "stale/")
-        let received = try OneDriveRules.update(second)
-        assert(received.managed == [second.pairs[0].id])
-        assert(received.config.pairs[0].excludeRules == combined)
-
-        var edited = migrated.config
-        edited.pairs[0].excludeRules = "new/"
-        let updated = try OneDriveRules.update(edited, replacing: migrated.config)
-        let remoteRules = try OneDriveRules.read(received.config)
-        assert(remoteRules.config.pairs[0].excludeRules == "new/")
-        try fm.removeItem(at: root.appendingPathComponent(OneDriveRules.filename))
-        do {
-            _ = try OneDriveRules.read(updated.config)
-            preconditionFailure("Previously managed rules must not silently fall back")
-        } catch {
-            // A missing shared policy stops sync before project file operations.
+        rejects(config)
+        assert(!fm.fileExists(atPath: policy.path), "read must never bootstrap the central file")
+        func writePolicy(_ rules: String) throws {
+            let document: [String: Any] = ["version": 1, "excludeLatexIntermediates": false,
+                "pairs": ["Documents/Research": ["excludeRules": rules, "syncCodexFiles": true,
+                          "syncClaudeFiles": false, "syncTemporaryFiles": true]]]
+            try JSONSerialization.data(withJSONObject: document).write(to: policy)
         }
-
-        var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(first)) as! [String: Any]
-        old["cloudConfigEnabled"] = true
-        old["cloudImportAnchors"] = ["old": ["unused": "legacy"]]
-        let decoded = try JSONDecoder().decode(SyncConfig.self, from: JSONSerialization.data(withJSONObject: old))
-        let current = try JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as! [String: Any]
-        assert(current["cloudConfigEnabled"] == nil && current["cloudImportAnchors"] == nil)
-        assert(decoded.pairs == first.pairs)
+        try writePolicy("central-only/\n# comment")
+        let before = try Data(contentsOf: policy)
+        let received = try OneDriveRules.read(config)
+        assert(received.config.pairs[0].excludePatterns == ["central-only/"])
+        assert(received.config.pairs[0].syncCodexFiles && !received.config.pairs[0].syncClaudeFiles)
+        assert(received.config.pairs[0].syncTemporaryFiles && !received.config.excludeLatexIntermediates)
+        assert(received.managed == [config.pairs[0].id])
+        let arguments = syncFilterArguments(received.config.pairs[0], excludeLatex: received.config.excludeLatexIntermediates)
+        assert(arguments.contains("--shared-excludes") && arguments.contains("--include-temp"))
+        assert(arguments.contains("--skip-claude") && !arguments.contains("--skip-codex"))
+        assert(arguments.contains("--exclude=central-only/") && !arguments.contains("--exclude=local-only/"))
+        let afterRead = try Data(contentsOf: policy)
+        assert(afterRead == before, "loading/saving settings must not edit central rules")
+        var stale = received.config
+        stale.pairs[0].excludeRules = "stale-local/"
+        try writePolicy("updated-central/")
+        let updated = try OneDriveRules.read(stale)
+        assert(updated.config.pairs[0].excludePatterns == ["updated-central/"])
+        let bytes = try JSONEncoder().encode(stale)
+        let saved = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+        let pair = (saved["pairs"] as! [[String: Any]])[0]
+        for field in ["excludeRules", "syncCodexFiles", "syncClaudeFiles", "syncTemporaryFiles"] {
+            assert(pair[field] == nil, "local config must not persist a second policy")
+        }
+        assert(saved["excludeLatexIntermediates"] == nil)
+        var legacy = saved
+        var legacyPair = pair
+        legacyPair["excludeRules"] = "legacy/"
+        legacyPair["syncCodexFiles"] = false
+        legacy["pairs"] = [legacyPair]
+        let decoded = try JSONDecoder().decode(SyncConfig.self, from: JSONSerialization.data(withJSONObject: legacy))
+        assert(decoded.pairs[0].excludeRules.isEmpty && decoded.pairs[0].syncCodexFiles)
+        var missing = config
+        missing.pairs[0].cloudPath = root.appendingPathComponent("Documents/Missing").path
+        rejects(missing)
+        missing.pairs[0].enabled = false
+        let disabled = try OneDriveRules.read(missing)
+        assert(disabled.managed.isEmpty)
+        rejects(missing, requiring: [missing.pairs[0].id])
+        var outside = config
+        outside.pairs[0].cloudPath = temporary.appendingPathComponent("outside").path
+        rejects(outside)
+        try Data("{}".utf8).write(to: policy)
+        rejects(config)
+        try Data(repeating: 0x20, count: 1_000_001).write(to: policy)
+        rejects(config)
+        try fm.removeItem(at: policy)
+        try fm.createSymbolicLink(at: policy, withDestinationURL: local.appendingPathComponent(".pathsyncignore"))
+        rejects(config)
+        try fm.removeItem(at: policy)
+        rejects(received.config)
+        print("Central-only rules: no bootstrap/write-back, legacy fields ignored, live reread, missing/unsafe policy blocks sync.")
     }
 }

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "excludeLatexIntermediates": true,
+  "pairs": {
+    "Documents/Research": {
+      "excludeRules": "# Relative to this folder pair\n.cache/\npython-deps/\n*.partial",
+      "syncCodexFiles": true,
+      "syncClaudeFiles": true,
+      "syncTemporaryFiles": false
+    }
+  }
+}

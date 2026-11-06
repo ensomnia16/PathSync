@@ -63,7 +63,7 @@ struct SyncPair: Codable, Identifiable, Equatable {
     var syncCodexFiles = true
     var syncClaudeFiles = true
     var syncTemporaryFiles = false
-    /// .gitignore-style rules, one per line; matching paths are never synced.
+    /// Transient filters resolved from the OneDrive root document, never saved locally.
     var excludeRules = ""
 
     enum CodingKeys: String, CodingKey {
@@ -102,12 +102,17 @@ struct SyncPair: Codable, Identifiable, Equatable {
         cloudPath = try data.decode(String.self, forKey: .cloudPath)
         scheduledDirection = try data.decode(String.self, forKey: .scheduledDirection)
         enabled = try data.decode(Bool.self, forKey: .enabled)
-        syncCodexFiles = try data.decodeIfPresent(Bool.self, forKey: .syncCodexFiles) ?? true
-        syncClaudeFiles = try data.decodeIfPresent(Bool.self, forKey: .syncClaudeFiles) ?? true
-        // Existing copies are retained in the anchor; an omitted preference skips
-        // build scratch directories without interpreting them as deletions.
-        syncTemporaryFiles = try data.decodeIfPresent(Bool.self, forKey: .syncTemporaryFiles) ?? false
-        excludeRules = try data.decodeIfPresent(String.self, forKey: .excludeRules) ?? ""
+        // Legacy filter fields are ignored. OneDriveRules.read supplies them.
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var data = encoder.container(keyedBy: CodingKeys.self)
+        try data.encode(id, forKey: .id)
+        try data.encode(name, forKey: .name)
+        try data.encode(localPath, forKey: .localPath)
+        try data.encode(cloudPath, forKey: .cloudPath)
+        try data.encode(scheduledDirection, forKey: .scheduledDirection)
+        try data.encode(enabled, forKey: .enabled)
     }
 
     var isUnusedDefaultPlaceholder: Bool {
@@ -161,7 +166,7 @@ struct SyncConfig: Codable, Equatable {
         scheduleMode = try data.decodeIfPresent(String.self, forKey: .scheduleMode) ?? (oldNightly ? "daily" : "interval")
         dailyHour = try data.decodeIfPresent(Int.self, forKey: .dailyHour) ?? 23
         dailyMinute = try data.decodeIfPresent(Int.self, forKey: .dailyMinute) ?? 0
-        excludeLatexIntermediates = try data.decodeIfPresent(Bool.self, forKey: .excludeLatexIntermediates) ?? true
+        // LaTeX filtering is resolved only from the OneDrive root document.
         conflictPolicy = try data.decodeIfPresent(String.self, forKey: .conflictPolicy) ?? "keep-both"
         backupRetentionDays = try data.decodeIfPresent(Int.self, forKey: .backupRetentionDays) ?? 15
         enabled = try data.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
@@ -199,7 +204,6 @@ struct SyncConfig: Codable, Equatable {
         try data.encode(scheduleMode, forKey: .scheduleMode)
         try data.encode(dailyHour, forKey: .dailyHour)
         try data.encode(dailyMinute, forKey: .dailyMinute)
-        try data.encode(excludeLatexIntermediates, forKey: .excludeLatexIntermediates)
         try data.encode(conflictPolicy, forKey: .conflictPolicy)
         try data.encode(backupRetentionDays, forKey: .backupRetentionDays)
         try data.encode(enabled, forKey: .enabled)
@@ -583,15 +587,34 @@ private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
 private func refreshSavedOneDriveRules(at path: String = defaultConfigPath) throws -> SyncConfig {
     try withSyncLock {
         let current = try loadConfig(path)
-        let shared = try OneDriveRules.update(current).config
+        let shared = try OneDriveRules.read(current).config
         try saveConfig(shared, at: path)
         return shared
     }
 }
 
+func syncFilterArguments(_ pair: SyncPair, excludeLatex: Bool) -> [String] {
+    var arguments = ["--shared-excludes"]
+    if excludeLatex { arguments.append("--exclude-latex") }
+    if !pair.syncCodexFiles { arguments.append("--skip-codex") }
+    if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
+    if pair.syncTemporaryFiles { arguments.append("--include-temp") }
+    // Keep rules starting with '-' from being interpreted as command options.
+    arguments += pair.excludePatterns.map { "--exclude=" + $0 }
+    return arguments
+}
+
+private func centralFilterArguments(_ pair: SyncPair, config: SyncConfig) throws -> [String] {
+    let effective = try OneDriveRules.read(config, requiring: [pair.id]).config
+    guard let resolved = effective.pairs.first(where: { $0.id == pair.id }) else {
+        throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
+    }
+    return syncFilterArguments(resolved, excludeLatex: effective.excludeLatexIntermediates)
+}
+
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
-                     plan: Bool = false, sharedExcludes: Bool, backupArguments: [String] = [], language: String,
+                     plan: Bool = false, backupArguments: [String] = [], language: String,
                      checkCloud: Bool = false,
                      progress: ((UUID, String) -> Void)?) throws -> String {
     if checkCloud, let problem = cloudPrecheckProblem(pair, language: language) {
@@ -617,13 +640,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     var arguments = [helper, local, cloud, statePath, "--direction", direction.rawValue,
                      "--conflict-policy", conflictPolicy,
                      "--backup-retention-days", String(backupRetentionDays)]
-    if excludeLatex { arguments.append("--exclude-latex") }
-    if !pair.syncCodexFiles { arguments.append("--skip-codex") }
-    if !pair.syncClaudeFiles { arguments.append("--skip-claude") }
-    if pair.syncTemporaryFiles { arguments.append("--include-temp") }
-    if sharedExcludes { arguments.append("--shared-excludes") }
-    // --exclude=VALUE keeps a rule that starts with "-" from reading as an option.
-    arguments += pair.excludePatterns.map { "--exclude=" + $0 }
+    arguments += syncFilterArguments(pair, excludeLatex: excludeLatex)
     if checkCloud && cloudStorageProvider(pair.cloudPath) != nil { arguments.append("--hydrate-online-only") }
     if dryRun { arguments.append("--dry-run") }
     if dryRun && plan { arguments.append("--plan-json") }
@@ -705,19 +722,20 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     return result
 }
 
-func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
+func resolvePendingConflict(_ pair: SyncPair, config: SyncConfig, name: String, choice: String,
                             retentionDays: Int = 15, backupArguments: [String] = []) throws -> String {
     guard ["local", "cloud", "both", "newest"].contains(choice) else {
         throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "无效的冲突处理方式。"])
     }
     return try withSyncLock {
+        let filters = try centralFilterArguments(pair, config: config)
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--resolve", name,
                              "--choice", choice, "--backup-retention-days", String(retentionDays)]
-            + backupArguments
+            + backupArguments + filters
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -733,15 +751,16 @@ func resolvePendingConflict(_ pair: SyncPair, name: String, choice: String,
     }
 }
 
-func acknowledgePreservedConflict(_ pair: SyncPair, name: String,
+func acknowledgePreservedConflict(_ pair: SyncPair, config: SyncConfig, name: String,
                                   backupArguments: [String] = []) throws -> String {
     try withSyncLock {
+        let filters = try centralFilterArguments(pair, config: config)
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--acknowledge", name]
-            + backupArguments
+            + backupArguments + filters
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -757,15 +776,16 @@ func acknowledgePreservedConflict(_ pair: SyncPair, name: String,
     }
 }
 
-func resolvePreservedNewest(_ pair: SyncPair, name: String, retentionDays: Int,
+func resolvePreservedNewest(_ pair: SyncPair, config: SyncConfig, name: String, retentionDays: Int,
                             backupArguments: [String] = []) throws -> String {
     try withSyncLock {
+        let filters = try centralFilterArguments(pair, config: config)
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--review-newest", name,
-                             "--backup-retention-days", String(retentionDays)] + backupArguments
+                             "--backup-retention-days", String(retentionDays)] + backupArguments + filters
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -781,15 +801,16 @@ func resolvePreservedNewest(_ pair: SyncPair, name: String, retentionDays: Int,
     }
 }
 
-func restoreSavedBackup(_ pair: SyncPair, id: String, retentionDays: Int,
+func restoreSavedBackup(_ pair: SyncPair, config: SyncConfig, id: String, retentionDays: Int,
                         backupArguments: [String] = []) throws -> String {
     try withSyncLock {
+        let filters = try centralFilterArguments(pair, config: config)
         let (local, cloud) = try validatedPaths(pair)
         let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [helper, local, cloud, mergeStatePath(pair), "--restore", id,
-                             "--backup-retention-days", String(retentionDays)] + backupArguments
+                             "--backup-retention-days", String(retentionDays)] + backupArguments + filters
         let output = Pipe()
         process.standardOutput = output
         process.standardError = output
@@ -832,7 +853,7 @@ func moveLocalBackups(_ config: SyncConfig) throws -> (moved: Int, remaining: In
             let helper = (Bundle.main.resourceURL ?? URL(fileURLWithPath: supportDirectory)).appendingPathComponent("sync_merge.py").path
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            process.arguments = [helper, pair.localPath, pair.cloudPath, mergeStatePath(pair),
+            process.arguments = [helper, pair.localPath, pair.cloudPath, mergeStatePath(pair), "--shared-excludes",
                                  "--migrate-backups"] + config.backupArguments(pair)
             let output = Pipe()
             process.standardOutput = output
@@ -873,7 +894,7 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
     }
     return try withSyncLock {
         try validatedPairSet(config.pairs, including: pairID)
-        let shared = try dryRun ? OneDriveRules.read(config) : OneDriveRules.update(config)
+        let shared = try OneDriveRules.read(config, requiring: Set(selectedPairs(config, pairID: pairID).map(\.id)))
         let effective = shared.config
         let selected = selectedPairs(effective, pairID: pairID)
         if let confirmed, selected != selectedPairs(confirmed, pairID: pairID) ||
@@ -903,7 +924,7 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
                                 excludeLatex: effective.excludeLatexIntermediates,
                                 conflictPolicy: config.conflictPolicy,
                                 backupRetentionDays: config.backupRetentionDays,
-                                dryRun: dryRun, plan: plan, sharedExcludes: shared.managed.contains(pair.id),
+                                dryRun: dryRun, plan: plan,
                                 backupArguments: config.backupArguments(pair), language: config.language,
                                 checkCloud: config.checkCloudBeforeSync,
                                 progress: progress)
@@ -1519,7 +1540,8 @@ final class SyncModel: ObservableObject {
                 config.notificationMode = "off"
             }
             config = try withSyncLock {
-                let shared = try OneDriveRules.update(config, replacing: savedConfig).config
+                // Stopping the schedule must remain possible while its rules file is unavailable.
+                let shared = try config.enabled ? OneDriveRules.read(config).config : config
                 try saveConfig(shared)
                 return shared
             }
@@ -1629,6 +1651,7 @@ final class SyncModel: ObservableObject {
 
     func resolveConflict(_ name: String, choice: String, in target: SyncPair? = nil) {
         guard let pair = target ?? selectedPair, !busy, !hasUnsavedChanges else { return }
+        let current = config
         let language = config.language
         let retentionDays = config.backupRetentionDays
         let backupArguments = config.backupArguments(pair)
@@ -1639,7 +1662,7 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try resolvePendingConflict(pair, name: name, choice: choice,
+                _ = try resolvePendingConflict(pair, config: current, name: name, choice: choice,
                                                retentionDays: retentionDays,
                                                backupArguments: backupArguments)
                 resultKey = choice == "both" ? "preservedReview" : "resolved"
@@ -1659,6 +1682,7 @@ final class SyncModel: ObservableObject {
 
     func acknowledgeConflict(_ name: String, in target: SyncPair? = nil) {
         guard let pair = target ?? selectedPair, !busy else { return }
+        let current = config
         let language = config.language
         let backupArguments = config.backupArguments(pair)
         busy = true
@@ -1668,7 +1692,7 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try acknowledgePreservedConflict(pair, name: name, backupArguments: backupArguments)
+                _ = try acknowledgePreservedConflict(pair, config: current, name: name, backupArguments: backupArguments)
                 resultKey = "reviewAcknowledged"
                 resultDetail = nil
             } catch {
@@ -1686,6 +1710,7 @@ final class SyncModel: ObservableObject {
 
     func chooseNewestForReview(_ name: String, in target: SyncPair? = nil) {
         guard let pair = target ?? selectedPair, !busy else { return }
+        let current = config
         let language = config.language
         let retentionDays = config.backupRetentionDays
         let backupArguments = config.backupArguments(pair)
@@ -1696,7 +1721,7 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try resolvePreservedNewest(pair, name: name, retentionDays: retentionDays,
+                _ = try resolvePreservedNewest(pair, config: current, name: name, retentionDays: retentionDays,
                                                backupArguments: backupArguments)
                 resultKey = "newestResolved"
                 resultDetail = nil
@@ -1716,6 +1741,7 @@ final class SyncModel: ObservableObject {
 
     func restoreBackup(pair: SyncPair, id: String) {
         guard !busy, !hasUnsavedChanges else { return }
+        let current = config
         let language = config.language
         let retentionDays = config.backupRetentionDays
         let backupArguments = config.backupArguments(pair)
@@ -1726,7 +1752,7 @@ final class SyncModel: ObservableObject {
             let resultKey: String
             let resultDetail: String?
             do {
-                _ = try restoreSavedBackup(pair, id: id, retentionDays: retentionDays,
+                _ = try restoreSavedBackup(pair, config: current, id: id, retentionDays: retentionDays,
                                            backupArguments: backupArguments)
                 resultKey = "backupRestored"
                 resultDetail = nil
@@ -1789,7 +1815,7 @@ struct ResearchSyncApp: App {
                 guard let pair = config.pairs.first(where: { $0.id == id }) else {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
-                print(try resolvePendingConflict(pair, name: args[resolution + 1],
+                print(try resolvePendingConflict(pair, config: config, name: args[resolution + 1],
                                                  choice: args[choiceIndex + 1],
                                                  retentionDays: config.backupRetentionDays,
                                                  backupArguments: config.backupArguments(pair)))
@@ -1810,7 +1836,7 @@ struct ResearchSyncApp: App {
                 guard let pair = config.pairs.first(where: { $0.id == id }) else {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
-                print(try acknowledgePreservedConflict(pair, name: args[review + 1],
+                print(try acknowledgePreservedConflict(pair, config: config, name: args[review + 1],
                                                        backupArguments: config.backupArguments(pair)))
                 exit(0)
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
@@ -1829,7 +1855,7 @@ struct ResearchSyncApp: App {
                 guard let pair = config.pairs.first(where: { $0.id == id }) else {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
-                print(try resolvePreservedNewest(pair, name: args[selection + 1],
+                print(try resolvePreservedNewest(pair, config: config, name: args[selection + 1],
                                                  retentionDays: config.backupRetentionDays,
                                                  backupArguments: config.backupArguments(pair)))
                 exit(0)
@@ -1849,7 +1875,7 @@ struct ResearchSyncApp: App {
                 guard let pair = config.pairs.first(where: { $0.id == id }) else {
                     throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
                 }
-                print(try restoreSavedBackup(pair, id: args[restoration + 1],
+                print(try restoreSavedBackup(pair, config: config, id: args[restoration + 1],
                                              retentionDays: config.backupRetentionDays,
                                              backupArguments: config.backupArguments(pair)))
                 exit(0)
