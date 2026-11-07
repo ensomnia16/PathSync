@@ -5,6 +5,7 @@ import argparse
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeout, wait
 from datetime import datetime, timezone
+import ctypes
 import hashlib
 import json
 import os
@@ -26,6 +27,26 @@ import cloud_only
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
 FILE_READ_TIMEOUT_SECONDS = 60
+
+
+def enable_cloud_materialization():
+    """Opt this real sync process into reading macOS File Provider placeholders.
+
+    launchd jobs inherit the system default (off), unlike GUI-launched jobs.
+    Child readers and worker threads inherit this process policy. This changes
+    download behavior, not filesystem access permissions; previews never opt in.
+    Constants are from Darwin sys/resource.h and setiopolicy_np(3).
+    """
+    if sys.platform != 'darwin':
+        return
+    library = ctypes.CDLL(None, use_errno=True)
+    set_policy = library.setiopolicy_np
+    set_policy.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_int)
+    set_policy.restype = ctypes.c_int
+    # IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, ON
+    if set_policy(3, 0, 2) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, '无法启用云端仅在线文件的按需下载：' + os.strerror(error))
 
 
 def is_review(record):
@@ -243,8 +264,12 @@ class CloudPrefetch:
     @staticmethod
     def hydrate(path):
         script = ('import sys\n'
-                  'with open(sys.argv[1], "rb") as source:\n'
-                  '    while source.read(1024 * 1024): pass\n')
+                  'try:\n'
+                  '    with open(sys.argv[1], "rb") as source:\n'
+                  '        while source.read(1024 * 1024): pass\n'
+                  'except OSError as error:\n'
+                  '    print("云端文件暂不可读：" + str(error), file=sys.stderr)\n'
+                  '    sys.exit(1)\n')
         try:
             # The provider may need to download the complete placeholder. Give
             # large media more time without allowing one file to wait forever.
@@ -1682,6 +1707,8 @@ def main():
         print('RETIRED_CLOUD_ONLY\tpaths=' + str(len(args.cloud_only)) +
               '\treceipt=' + (str(receipt) if receipt else 'none'))
         return 0
+    if not args.dry_run:
+        enable_cloud_materialization()
     local = args.local.resolve()
     cloud = args.cloud.resolve()
     args.cloud_only = cloud_only.validate_paths(local, cloud, args.cloud_only)

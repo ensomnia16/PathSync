@@ -55,6 +55,19 @@ struct HistoryChecks {
         assert(failed.count == 1 && failed[0].needsAttention)
         assert(failed[0].events.first?.detail == "无法启动同步程序")
 
+        let traceback = """
+        2026-11-07T09:47:00Z 开始 [科研] 双向合并：/local → /cloud
+        2026-11-07T09:47:01Z 结束 [科研]，退出码 2：FAILED\tfile.pdf\tTraceback (most recent call last):
+          File "<string>", line 3, in <module>
+        OSError: [Errno 11] Resource deadlock avoided
+        FAILED\tmissing.txt\tFile does not exist
+        uploaded=0 downloaded=0 failed=2
+        """
+        let traced = parseSyncHistory(traceback)
+        assert(traced[0].events[0].detail == "OSError: [Errno 11] Resource deadlock avoided")
+        assert(traced[0].events[1].detail == "File does not exist")
+        assert(traced[0].counts["failed"] == 2)
+
         let legacy = """
         2026-09-23T03:31:28Z 开始 [旧路径] 本地 → 云端：/old-local → /old-cloud
         2026-09-23T03:31:29Z 结束 [旧路径]，退出码 0：Number of files: 3

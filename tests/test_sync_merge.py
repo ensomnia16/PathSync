@@ -789,6 +789,56 @@ class MergeTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 sync_merge.digest(pipe)
 
+    def test_only_real_sync_opts_into_cloud_materialization(self):
+        (self.local / 'paper.tex').write_text('research')
+        with mock.patch.object(sync_merge, 'enable_cloud_materialization') as enable:
+            self.run_in_process('--dry-run', '--plan-json')
+            enable.assert_not_called()
+            code, output, _ = self.run_in_process()
+            self.assertEqual(code, 0, output)
+            enable.assert_called_once_with()
+
+    def test_materialization_policy_failure_leaves_files_and_state_untouched(self):
+        (self.local / 'paper.tex').write_text('research')
+        before = self.snapshot_everything()
+        with mock.patch.object(sync_merge, 'enable_cloud_materialization',
+                               side_effect=OSError('cannot enable cloud downloads')):
+            with self.assertRaisesRegex(OSError, 'cannot enable cloud downloads'):
+                self.run_in_process()
+        self.assertEqual(self.snapshot_everything(), before)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin File Provider process policy')
+    def test_background_policy_is_enabled_and_inherited_by_reader_only_for_real_sync(self):
+        script = '''import ctypes,sys,subprocess
+sys.path.insert(0,sys.argv.pop(1))
+import sync_merge
+library=ctypes.CDLL(None,use_errno=True)
+assert library.setiopolicy_np(3,0,1)==0
+sys.argv[0]='sync_merge.py'
+assert sync_merge.main()==0
+expected=1 if '--dry-run' in sys.argv else 2
+assert library.getiopolicy_np(3,0)==expected
+reader='import ctypes; print(ctypes.CDLL(None).getiopolicy_np(3,0))'
+assert subprocess.check_output([sys.executable,'-c',reader],text=True).strip()==str(expected)
+print('POLICY_AND_CHILD_OK')
+'''
+        for preview in (True, False):
+            with self.subTest(preview=preview):
+                args = [sys.executable, '-c', script, str(HELPER.parent), str(self.local),
+                        str(self.cloud), str(self.state), '--shared-excludes']
+                if preview:
+                    args.append('--dry-run')
+                result = subprocess.run(args, text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('POLICY_AND_CHILD_OK', result.stdout)
+
+    def test_cloud_read_error_is_concise_without_a_python_traceback(self):
+        path = self.cloud / 'not-a-file.pdf'
+        path.mkdir()
+        error = sync_merge.CloudPrefetch.hydrate(path)
+        self.assertIn('云端文件暂不可读', error)
+        self.assertNotIn('Traceback', error)
+
     def test_parallel_prefetch_reports_missing_file_without_writing(self):
         names = [f'file-{index}.txt' for index in range(100)]
         for name in names[:-1]:

@@ -58,6 +58,15 @@ struct SyncHistoryRecord: Identifiable {
                 }
             }
             let columns = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            // Old readers emitted a multiline Python traceback. Keep its final
+            // exception visible instead of only the uninformative first line.
+            if columns.count == 1, let last = events.last,
+               last.kind == "FAILED", last.detail == "Traceback (most recent call last):",
+               line.range(of: #"^[A-Za-z_][A-Za-z_0-9.]*(Error|Exception):"#, options: .regularExpression) != nil {
+                events[events.count - 1] = SyncHistoryEvent(id: last.id, kind: last.kind,
+                    path: last.path, detail: String(line), copyPath: last.copyPath,
+                    backupID: last.backupID, side: last.side, reason: last.reason)
+            }
             guard columns.count >= 2,
                   ["FAILED", "SKIPPED", "CONFLICT", "KEPT_BOTH", "WOULD_KEEP_BOTH", "NEEDS_REVIEW",
                    "BACKUP", "DELETED", "PENDING_DELETE", "WOULD_DELETE", "NEWEST", "WOULD_KEEP_NEWEST",
