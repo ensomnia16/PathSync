@@ -1583,6 +1583,128 @@ class MergeTests(unittest.TestCase):
         self.assertIn('目录级冲突', result.stderr)
         self.assertEqual((self.cloud / 'chapter' / 'edited.tex').read_text(), 'cloud edit')
 
+    def make_tree_conflict(self, deleted_side='local'):
+        chapter = self.local / 'chapter'
+        chapter.mkdir(exist_ok=True)
+        (chapter / 'edited.tex').write_text('base')
+        (chapter / 'sibling.tex').write_text('sibling')
+        self.assertEqual(self.run_merge().returncode, 0)
+        deleted = self.local if deleted_side == 'local' else self.cloud
+        survivor = self.cloud if deleted_side == 'local' else self.local
+        shutil.rmtree(deleted / 'chapter')
+        (survivor / 'chapter/edited.tex').write_text('edited content')
+        self.assertEqual(self.run_merge().returncode, 2)
+        return deleted, survivor
+
+    def test_directory_conflict_restore_both_deletion_sides(self):
+        for deleted_side in ('local', 'cloud'):
+            with self.subTest(deleted_side=deleted_side):
+                deleted, survivor = self.make_tree_conflict(deleted_side)
+                (survivor / 'chapter/empty').mkdir(exist_ok=True)
+                self.assertEqual(self.run_merge().returncode, 2)
+                result = self.run_merge('--resolve', 'chapter', '--choice', 'restore-tree')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((deleted / 'chapter/edited.tex').read_text(), 'edited content')
+                self.assertTrue((deleted / 'chapter/empty').is_dir())
+                self.assertNotIn('chapter', json.loads(self.state.read_text())['conflicts'])
+                self.assertEqual(self.run_merge().returncode, 0)
+
+    def test_directory_conflict_delete_backup_and_restore(self):
+        deleted, survivor = self.make_tree_conflict()
+        # Ignored files must also be protected when deleting the entire folder.
+        (survivor / 'chapter/kept.log').write_text('ignored log')
+        (survivor / 'chapter/empty').mkdir(exist_ok=True)
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'delete-tree')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((survivor / 'chapter').exists())
+        self.assertFalse((deleted / 'chapter').exists())
+        backup_id = re.search(r'id=([a-f0-9]{32})', result.stdout).group(1)
+        restored = self.run_merge('--restore', backup_id)
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual((survivor / 'chapter/edited.tex').read_text(), 'edited content')
+        self.assertEqual((survivor / 'chapter/kept.log').read_text(), 'ignored log')
+        self.assertTrue((survivor / 'chapter/empty').is_dir())
+
+    def test_directory_conflict_tree_backup_moves_and_restores(self):
+        _, survivor = self.make_tree_conflict()
+        (survivor / 'chapter/empty').mkdir()
+        self.assertEqual(self.run_merge().returncode, 2)
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'delete-tree')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        backup_id = re.search(r'id=([a-f0-9]{32})', result.stdout).group(1)
+        source = sync_merge.backup_root(self.state) / backup_id
+        base = self.root / 'remote-backup'
+        base.mkdir()
+        target = base / 'pair/backups' / backup_id
+        sync_merge.move_verified(source, target)
+        self.assertFalse(source.exists())
+        self.assertTrue((target / 'content/empty').is_dir())
+        restored = self.run_merge('--restore', backup_id, '--backup-root', str(base),
+                                  '--backup-subpath', 'pair')
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual((survivor / 'chapter/edited.tex').read_text(), 'edited content')
+        self.assertTrue((survivor / 'chapter/empty').is_dir())
+
+    def test_recreated_folder_returns_to_file_level_conflict_choices(self):
+        deleted, survivor = self.make_tree_conflict()
+        (deleted / 'chapter').mkdir()
+        (deleted / 'chapter/edited.tex').write_text('different restored edit')
+        result = self.run_merge()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        conflicts = json.loads(self.state.read_text())['conflicts']
+        self.assertNotIn('chapter', conflicts)
+        self.assertIn('chapter/edited.tex', conflicts)
+        self.assertNotEqual(conflicts['chapter/edited.tex'].get('kind'), 'tree')
+        result = self.run_merge('--resolve', 'chapter/edited.tex', '--choice', 'cloud')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((deleted / 'chapter/edited.tex').read_text(), 'edited content')
+
+    def test_directory_conflict_child_resolution_stays_blocked(self):
+        _, survivor = self.make_tree_conflict()
+        result = self.run_merge('--resolve', 'chapter/edited.tex', '--choice', 'cloud')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('上级目录', result.stderr)
+        self.assertEqual((survivor / 'chapter/edited.tex').read_text(), 'edited content')
+
+    def test_directory_conflict_with_cloud_only_child_refuses_deletion(self):
+        _, survivor = self.make_tree_conflict()
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'delete-tree',
+                                '--cloud-only', 'chapter/private')
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue((survivor / 'chapter').is_dir())
+        self.assertIn('仅云端', result.stderr)
+
+    def test_directory_conflict_changed_since_detection_remains_untouched(self):
+        deleted, survivor = self.make_tree_conflict()
+        (survivor / 'chapter/edited.tex').write_text('later change')
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'delete-tree')
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((deleted / 'chapter').exists())
+        self.assertEqual((survivor / 'chapter/edited.tex').read_text(), 'later change')
+        self.assertIn('chapter', json.loads(self.state.read_text())['conflicts'])
+
+    def test_directory_conflict_legacy_record_can_be_resolved(self):
+        deleted, _ = self.make_tree_conflict()
+        state = json.loads(self.state.read_text())
+        for key in ('localTree', 'cloudTree'):
+            state['conflicts']['chapter'].pop(key)
+        self.state.write_text(json.dumps(state))
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'restore-tree')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((deleted / 'chapter/edited.tex').read_text(), 'edited content')
+
+    def test_directory_conflict_does_not_remove_symlinks(self):
+        deleted, survivor = self.make_tree_conflict()
+        outside = self.root / 'important'
+        outside.write_text('untouched')
+        (survivor / 'chapter/link').symlink_to(outside)
+        result = self.run_merge('--resolve', 'chapter', '--choice', 'delete-tree')
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue((survivor / 'chapter/link').is_symlink())
+        self.assertEqual(outside.read_text(), 'untouched')
+        self.assertFalse((deleted / 'chapter').exists())
+
     def test_cloud_directory_delete_and_local_new_child_blocks_subtree(self):
         chapter = self.local / 'chapter'
         chapter.mkdir()

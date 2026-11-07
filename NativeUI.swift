@@ -299,6 +299,10 @@ struct SyncPreviewSheet: View {
     }
 }
 
+private final class ConflictActionState: ObservableObject {
+    @Published var confirmsTreeDeletion = false
+}
+
 /// One pending conflict with the quick actions that fit it.
 struct ConflictRow: View {
     @ObservedObject var model: SyncModel
@@ -306,6 +310,7 @@ struct ConflictRow: View {
     let conflict: PendingConflict
     let compact: Bool
     var showsPairName = true
+    @StateObject private var actionState = ConflictActionState()
 
     private func t(_ key: String) -> String { model.t(key) }
 
@@ -347,6 +352,15 @@ struct ConflictRow: View {
     @ViewBuilder
     private var actions: some View {
         if conflict.isTree {
+            Menu(t("resolve")) {
+                Button(t("restoreConflictFolder")) {
+                    model.resolveConflict(conflict.name, choice: "restore-tree", in: pair)
+                }
+                Button(t("deleteConflictFolder"), role: .destructive) {
+                    actionState.confirmsTreeDeletion = true
+                }
+            }
+            .disabled(!model.canRun || blocked)
             locateMenu
         } else if conflict.isReview {
             if model.canDiff(conflict) {
@@ -366,10 +380,10 @@ struct ConflictRow: View {
                 Button(t("viewDiff")) { model.showDiff(conflict, in: pair) }
             }
             Menu(t("resolve")) {
-                Button(conflict.localMissing ? t("keepDeletion") : t("useLocal")) {
+                Button(conflict.localMissing ? t("keepDeletion") : (conflict.cloudMissing ? t("restoreConflictFile") : t("useLocal"))) {
                     model.resolveConflict(conflict.name, choice: "local", in: pair)
                 }
-                Button(conflict.cloudMissing ? t("keepDeletion") : t("useCloud")) {
+                Button(conflict.cloudMissing ? t("keepDeletion") : (conflict.localMissing ? t("restoreConflictFile") : t("useCloud"))) {
                     model.resolveConflict(conflict.name, choice: "cloud", in: pair)
                 }
                 if !conflict.localMissing && !conflict.cloudMissing {
@@ -412,6 +426,15 @@ struct ConflictRow: View {
                 HStack(spacing: 6) { actions }
                     .controlSize(.small)
             }
+        }
+        .confirmationDialog(t("deleteConflictFolder"), isPresented: $actionState.confirmsTreeDeletion,
+                            titleVisibility: .visible) {
+            Button(t("deleteConflictFolder"), role: .destructive) {
+                model.resolveConflict(conflict.name, choice: "delete-tree", in: pair)
+            }
+            Button(t("cancel"), role: .cancel) {}
+        } message: {
+            Text(conflict.name + "\n" + t("deleteConflictFolderHint"))
         }
     }
 }
@@ -1576,6 +1599,7 @@ private func cloudOnlyReleaseRecoveries(at index: URL) -> (items: [CloudOnlyRele
 }
 
 private final class CloudOnlySectionState: ObservableObject {
+    @Published var showsStorageAnalysis = false
     @Published var newPath = ""
     @Published var releaseTarget: CloudOnlyReleaseTarget?
     @Published var showsReleaseStatus = false
@@ -1639,6 +1663,13 @@ private struct CloudOnlySection: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Button {
+                state.showsStorageAnalysis = true
+            } label: {
+                Label(model.config.language == "en" ? "Browse and Analyze Storage" : "浏览目录与分析空间",
+                      systemImage: "internaldrive")
+            }
+            .disabled(pair.localPath.isEmpty || pair.cloudPath.isEmpty)
             HStack(spacing: 8) {
                 TextField(t("cloudOnlyPathLabel"), text: $state.newPath,
                           prompt: Text(t("cloudOnlyPathPlaceholder")))
@@ -1705,6 +1736,9 @@ private struct CloudOnlySection: View {
             }
         } footer: {
             Text(t("cloudOnlyRestoreHint"))
+        }
+        .sheet(isPresented: $state.showsStorageAnalysis) {
+            StorageAnalysisView(model: model, pairID: pair.id)
         }
         .sheet(item: $state.releaseTarget) { target in
             releaseConfirmation(target.path)

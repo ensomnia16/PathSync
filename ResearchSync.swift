@@ -728,7 +728,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
 
 func resolvePendingConflict(_ pair: SyncPair, config: SyncConfig, name: String, choice: String,
                             retentionDays: Int = 15, backupArguments: [String] = []) throws -> String {
-    guard ["local", "cloud", "both", "newest"].contains(choice) else {
+    guard ["local", "cloud", "both", "newest", "restore-tree", "delete-tree"].contains(choice) else {
         throw NSError(domain: appID, code: 11, userInfo: [NSLocalizedDescriptionKey: "无效的冲突处理方式。"])
     }
     return try withSyncLock {
@@ -1672,9 +1672,13 @@ final class SyncModel: ObservableObject {
     }
 
     func addCloudOnlyPath(_ text: String, pairID: UUID) {
-        guard !isSyncActive, let index = config.pairs.firstIndex(where: { $0.id == pairID }) else { return }
+        addCloudOnlyPaths([text], pairID: pairID)
+    }
+
+    func addCloudOnlyPaths(_ paths: [String], pairID: UUID) {
+        guard !paths.isEmpty, !isSyncActive, let index = config.pairs.firstIndex(where: { $0.id == pairID }) else { return }
         do {
-            config.pairs[index].cloudOnlyPaths = try validatedCloudOnlyPaths(config.pairs[index].cloudOnlyPaths + [normalizeCloudOnlyPath(text)])
+            config.pairs[index].cloudOnlyPaths = try validatedCloudOnlyPaths(config.pairs[index].cloudOnlyPaths + paths)
             preview = nil
             statusKey = "cloudOnlyAdded"
             statusDetail = nil

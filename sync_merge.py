@@ -529,6 +529,23 @@ def move_verified(source, target):
     """Copy one backup directory, verify every byte, and only then remove the source."""
     members = sorted(item for item in source.rglob('*')
                      if item.is_file() and not item.is_symlink() and item.name != PENDING_MOVE)
+    manifest_path = source / 'manifest.json'
+    tree_metadata = (json.loads(manifest_path.read_text(encoding='utf-8'))
+                     if manifest_path.is_file() else {})
+    if tree_metadata.get('kind') == 'tree':
+        checked_tree_backup(source, tree_metadata)
+        if target.exists():
+            if json.loads((target / 'manifest.json').read_text(encoding='utf-8')) != tree_metadata:
+                raise OSError('目标位置已有不同的同名目录备份')
+            checked_tree_backup(target, tree_metadata)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = target.with_name(target.name + '.partial-' + uuid.uuid4().hex)
+            copy_tree_verified(source.parent, source.name, staging)
+            checked_tree_backup(staging, tree_metadata)
+            os.rename(staging, target)
+        shutil.rmtree(source)
+        return
     if target.exists():
         for item in members:
             existing = target / item.relative_to(source)
@@ -659,6 +676,13 @@ def restore_backup(args, local, cloud):
     ensure_not_cloud_only(args, name)
     destination = safe_path(root, name)
     payload = directory / 'content'
+    if metadata.get('kind') == 'tree':
+        if any(cloud_only.overlaps(path, name) for path in args.cloud_only):
+            raise ValueError('恢复目标包含仅云端路径，请先调整仅云端设置')
+        checked_tree_backup(directory, metadata)
+        install_tree(directory, 'content', root, name)
+        print(f'RESTORED\t{name}\tside={metadata["side"]}\tfrom={backup_id}')
+        return 0
     if payload.is_symlink() or digest(payload) != metadata['sha256']:
         raise OSError('备份内容校验失败，已取消恢复')
     existing = signature(destination)
@@ -856,10 +880,13 @@ def sync_files(args, local, cloud, files, conflicts):
                               and record.get('deletedSide') == 'local') or
                              (right is None and left == anchor_tree
                               and record.get('deletedSide') == 'cloud'))
-            if left == right or reverted_edit:
+            if left == right or reverted_edit or (left is not None and right is not None):
                 if not args.dry_run:
                     next_conflicts.pop(directory, None)
                 continue
+            if not args.dry_run:
+                next_conflicts[directory] = {**record, 'localTree': serialized_tree(left),
+                                             'cloudTree': serialized_tree(right)}
             blocked_directories.add(directory)
             print(f'CONFLICT\t{directory}\t目录删除与内部修改尚未解决，已暂停整个目录')
             planned('conflict', directory, kind='tree')
@@ -906,6 +933,8 @@ def sync_files(args, local, cloud, files, conflicts):
                 next_conflicts[directory] = {
                     'kind': 'tree', 'reason': 'directory_delete_edit',
                     'deletedSide': deleted_side,
+                    'localTree': serialized_tree(surviving if left_exists else None),
+                    'cloudTree': serialized_tree(None if left_exists else surviving),
                     'local': None, 'cloud': None,
                     'detectedAt': datetime.now(timezone.utc).isoformat()}
             print(f'CONFLICT\t{directory}\t目录删除与内部修改冲突，已暂停整个目录')
@@ -1235,6 +1264,147 @@ def sync_files(args, local, cloud, files, conflicts):
     return 2 if counts['conflicts'] or counts['failed'] else 0
 
 
+def serialized_tree(snapshot):
+    if snapshot is None:
+        return None
+    return {'files': snapshot['files'], 'dirs': sorted(snapshot['dirs'])}
+
+
+def copy_tree_verified(source_root, relative, destination):
+    """Copy a complete folder, including excluded entries and native metadata."""
+    source = safe_path(source_root, relative)
+    cloud_only.inventory(source_root, relative)
+    if destination.exists() or destination.is_symlink():
+        raise OSError('目录暂存目标已存在')
+    if sys.platform == 'darwin':
+        subprocess.run(['/usr/bin/ditto', '--rsrc', '--extattr', '--acl',
+                        str(source), str(destination)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    else:
+        shutil.copytree(source, destination)
+    return cloud_only.verify_copies(source_root, relative, destination.parent, destination.name)
+
+
+def backup_tree(args, root, name, side):
+    backup_id = uuid.uuid4().hex
+    created = datetime.now(timezone.utc)
+    for target_root, remote in args.backups.targets('backups'):
+        directory = target_root / backup_id
+        directory.mkdir(parents=True, exist_ok=False)
+        try:
+            verified = copy_tree_verified(root, name, directory / 'content')
+            metadata = {'id': backup_id, 'name': name, 'side': side, 'reason': 'delete',
+                        'kind': 'tree', 'root': str(root), 'createdAt': created.isoformat(),
+                        'createdAtEpoch': created.timestamp(), 'retentionDays': args.backup_retention_days,
+                        'treeEntries': {p: [entry['kind'], entry['size']]
+                                        for p, entry in verified['inventory'].items()},
+                        'treeHashes': verified['hashes'], 'treeMetadata': verified['metadata']}
+            cloud_only.atomic_json(directory / 'manifest.json', metadata)
+            if not remote and args.backups.pending():
+                (directory / PENDING_MOVE).touch()
+        except (OSError, subprocess.SubprocessError) as error:
+            # Incomplete copies remain outside the data trees for inspection.
+            if not remote:
+                raise
+            args.backups.failed(error)
+            continue
+        args.backups.written[backup_id] = directory
+        args.backup_count += 1
+        print(f'BACKUP\t{name}\tside={side}\tid={backup_id}\treason=delete')
+        return directory, verified
+    raise OSError('无法保存目录备份')
+
+
+def checked_tree_backup(directory, metadata):
+    entries = cloud_only.inventory(directory, 'content')
+    if {p: [entry['kind'], entry['size']] for p, entry in entries.items()} != metadata['treeEntries']:
+        raise OSError('目录备份结构已变化，已取消恢复')
+    for name, entry in entries.items():
+        path = 'content/' + name if name else 'content'
+        if cloud_only.preserved_metadata(directory, path, entry) != metadata['treeMetadata'][name]:
+            raise OSError('目录备份元数据已变化，已取消恢复')
+        if entry['kind'] == 'file' and cloud_only.secure_digest(directory, path, entry) != metadata['treeHashes'][name]:
+            raise OSError('目录备份内容校验失败，已取消恢复')
+
+
+def install_tree(source_root, relative, root, name):
+    destination = safe_path(root, name)
+    if destination.exists() or destination.is_symlink():
+        raise OSError('恢复目标已存在，请先刷新目录冲突')
+    # Staging is on the destination filesystem. Rename must never replace a
+    # folder created by another application while the copy was being verified.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix='.pathsync-tree-', dir=root.parent))
+    try:
+        copy_tree_verified(source_root, relative, staging / 'payload')
+        cloud_only.restore_target(staging, root, name)
+    finally:
+        if not (staging / 'payload').exists():
+            staging.rmdir()
+
+
+def resolve_tree_conflict(args, local, cloud, files, conflicts):
+    name = args.resolve
+    record = conflicts[name]
+    if args.choice not in ('restore-tree', 'delete-tree'):
+        raise ValueError('目录级冲突请选择恢复整个目录，或确认删除并备份')
+    if any(cloud_only.overlaps(path, name) for path in args.cloud_only):
+        raise ValueError('目录包含仅云端路径，请先调整仅云端设置')
+    left = directory_snapshot(local, name, args)
+    right = directory_snapshot(cloud, name, args)
+    current = {'localTree': serialized_tree(left), 'cloudTree': serialized_tree(right)}
+    if 'localTree' in record and any(current[key] != record.get(key) for key in current):
+        raise OSError('目录在检测后发生变化，请重新预览或同步以刷新冲突，再选择处理方式')
+    if (left is None) == (right is None):
+        raise OSError('目录状态已变化，请重新预览或同步以刷新冲突')
+    root, other, side = (cloud, local, 'cloud') if left is None else (local, cloud, 'local')
+    # All members, including ignored files, are included in the recoverable copy.
+    directory, verified = backup_tree(args, root, name, side)
+    if args.choice == 'restore-tree':
+        if directory_snapshot(root, name, args) != (right if left is None else left):
+            raise OSError('备份后目录已变化，请刷新后重试')
+        install_tree(directory, 'content', other, name)
+        resulting = directory_snapshot(root, name, args)
+        if resulting != directory_snapshot(other, name, args):
+            raise OSError('恢复后目录又发生变化，已保留备份与冲突记录')
+    else:
+        source = safe_path(root, name)
+        cloud_only.ensure_not_in_use(source)
+        if cloud_only.inventory(root, name) != verified['inventory']:
+            raise OSError('目录在备份后发生变化，已取消删除')
+        staging = Path(tempfile.mkdtemp(prefix='.pathsync-tree-', dir=root.parent))
+        try:
+            cloud_only.stage_target(root, name, staging, verified['inventory'][''])
+            try:
+                cloud_only.ensure_not_in_use(staging / 'payload')
+                cloud_only.verify_copies(staging, 'payload', directory, 'content', verified)
+                if os.path.lexists(source):
+                    raise OSError('原目录已被其他程序重新创建，保留备份及暂存目录')
+                shutil.rmtree(staging / 'payload')
+            except BaseException:
+                # A failed cleanup may be partial. Restore from the complete
+                # verified backup, never from a partially removed payload.
+                if not os.path.lexists(source):
+                    install_tree(directory, 'content', root, name)
+                raise
+        finally:
+            if not (staging / 'payload').exists():
+                staging.rmdir()
+        resulting = None
+    remaining_files = {p: entry for p, entry in files.items()
+                       if p != name and not within_directory(p, name)}
+    if resulting is not None:
+        for path, content_hash in resulting['files'].items():
+            remaining_files[path] = {'local': signature(safe_path(local, path)),
+                                     'cloud': signature(safe_path(cloud, path)),
+                                     'anchorHash': content_hash}
+    remaining_conflicts = {p: entry for p, entry in conflicts.items()
+                           if p != name and not within_directory(p, name)}
+    save_state(args.state, local, cloud, remaining_files, remaining_conflicts)
+    print(f'RESOLVED\t{name}\t{args.choice}\tbackup={directory}')
+    return 0
+
+
 def resolve_conflict(args, local, cloud, files, conflicts):
     name = args.resolve
     ensure_not_cloud_only(args, name)
@@ -1244,7 +1414,9 @@ def resolve_conflict(args, local, cloud, files, conflicts):
     record = conflicts[name]
     ensure_not_cloud_only(args, record.get('sidecar'))
     if record.get('kind') == 'tree':
-        raise ValueError('这是目录级冲突；请先在文件管理器中核对整个目录，使两侧内容一致或都删除，随后重新同步')
+        return resolve_tree_conflict(args, local, cloud, files, conflicts)
+    if args.choice in ('restore-tree', 'delete-tree'):
+        raise ValueError('该选项仅适用于目录冲突')
     if is_review(record):
         raise ValueError('两个版本已经保留，仍待人工合并或确认；请使用 --acknowledge')
     local_file = safe_path(local, name)
@@ -1456,7 +1628,7 @@ def main():
     parser.add_argument('--acknowledge', metavar='RELATIVE_PATH')
     parser.add_argument('--review-newest', metavar='RELATIVE_PATH')
     parser.add_argument('--restore', metavar='BACKUP_ID')
-    parser.add_argument('--choice', choices=('local', 'cloud', 'both', 'newest'))
+    parser.add_argument('--choice', choices=('local', 'cloud', 'both', 'newest', 'restore-tree', 'delete-tree'))
     parser.add_argument('--backup-root', type=Path,
                         help='existing folder (iCloud Drive, OneDrive, ...) that holds backups')
     parser.add_argument('--backup-subpath', help='this pair\'s folder relative to --backup-root')
