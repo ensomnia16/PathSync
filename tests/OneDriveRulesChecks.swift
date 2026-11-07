@@ -15,7 +15,7 @@ struct OneDriveRulesChecks {
         try fm.createDirectory(at: cloud.appendingPathComponent(".pathsyncignore"), withIntermediateDirectories: true)
         var config = SyncConfig()
         config.pairs = [SyncPair(name: "Research", localPath: local.path, cloudPath: cloud.path,
-                                  enabled: true, syncCodexFiles: false, excludeRules: "local-only/")]
+                                  enabled: true, syncCodexFiles: false, excludeRules: "local-only/", cloudOnlyPaths: ["data/raw"])]
         config.inferOneDriveRootIfNeeded()
         let policy = root.appendingPathComponent(OneDriveRules.filename)
         func rejects(_ candidate: SyncConfig, requiring ids: Set<UUID>? = nil) {
@@ -37,6 +37,7 @@ struct OneDriveRulesChecks {
         assert(received.config.pairs[0].syncCodexFiles && received.config.pairs[0].syncClaudeFiles)
         assert(received.config.pairs[0].syncTemporaryFiles && !received.config.excludeLatexIntermediates)
         assert(received.managed == [config.pairs[0].id])
+        assert(received.config.pairs[0].cloudOnlyPaths == ["data/raw"], "Shared exclusions must not override device-local residency")
         let arguments = syncFilterArguments(received.config.pairs[0], excludeLatex: received.config.excludeLatexIntermediates)
         assert(arguments.contains("--shared-excludes") && !arguments.contains("--include-temp"))
         assert(!arguments.contains("--skip-claude") && !arguments.contains("--skip-codex"))
@@ -55,6 +56,16 @@ struct OneDriveRulesChecks {
             assert(pair[field] == nil, "local config must not persist a second policy")
         }
         assert(saved["excludeLatexIntermediates"] == nil)
+        assert(pair["cloudOnlyPaths"] as? [String] == ["data/raw"])
+        let roundtrip = try JSONDecoder().decode(SyncConfig.self, from: bytes)
+        assert(roundtrip.pairs[0].cloudOnlyPaths == ["data/raw"])
+        var previousVersion = saved
+        var previousPair = pair
+        previousPair.removeValue(forKey: "cloudOnlyPaths")
+        previousVersion["pairs"] = [previousPair]
+        let upgraded = try JSONDecoder().decode(SyncConfig.self,
+            from: JSONSerialization.data(withJSONObject: previousVersion))
+        assert(upgraded.pairs[0].cloudOnlyPaths.isEmpty, "Existing installations must not acquire cloud-only selections")
         var legacy = saved
         var legacyPair = pair
         legacyPair["excludeRules"] = "legacy/"

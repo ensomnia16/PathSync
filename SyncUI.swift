@@ -158,6 +158,37 @@ private let translations: [String: (zh: String, en: String)] = [
     "namePlaceholder": ("路径名称", "Folder name"),
     "local": ("本地", "Local"),
     "cloud": ("云端", "Cloud"),
+    "cloudOnlyTitle": ("仅云端子路径 · 这台 Mac", "Cloud-only subpaths · this Mac"),
+    "cloudOnlyHint": ("只影响这台 Mac。添加后需保存，已保存的子路径会暂停普通同步；添加策略不会立即删除文件。释放工作副本需另行确认，不会更改 OneDrive 根目录的排除规则。", "This applies only to this Mac. Save after adding a path to pause normal sync for that subpath. Adding a policy does not delete files. Releasing a working copy requires a separate confirmation and does not change the exclusions at the OneDrive root."),
+    "cloudOnlyPathLabel": ("相对子路径", "Relative subpath"),
+    "cloudOnlyPathPlaceholder": ("例如 DeepSight/archive/experiments", "For example, DeepSight/archive/experiments"),
+    "cloudOnlyPathHint": ("填写相对于本组根目录的具体子路径；精确匹配，不支持通配符或整个根目录。", "Enter a specific path relative to this folder pair's root. Paths match literally; wildcards and the whole root are not supported."),
+    "cloudOnlyAdd": ("添加", "Add"),
+    "cloudOnlyEmpty": ("尚无仅云端子路径。", "No cloud-only subpaths yet."),
+    "cloudOnlyRelease": ("释放工作副本…", "Release working copy…"),
+    "cloudOnlyReleaseHint": ("先确认 OneDrive 上传完成，再校验并释放本机工作副本。", "Confirm that OneDrive has finished uploading, then verify and release this Mac's working copy."),
+    "cloudOnlyRestore": ("恢复正常同步", "Restore normal sync"),
+    "cloudOnlyRestoreHint": ("恢复正常同步后需保存，之后按本组原方向同步；已释放工作副本的缺失不会作为删除传播。", "Save after restoring normal sync. This pair's selected direction then applies; the intentional absence of released working copies is not propagated as a deletion."),
+    "cloudOnlyOpenTarget": ("打开 OneDrive 目标", "Open OneDrive target"),
+    "cloudOnlySaveFirst": ("请先保存设置，再释放工作副本。", "Save settings before releasing a working copy."),
+    "cloudOnlyBusyHint": ("请等待当前操作完成。", "Wait for the current operation to finish."),
+    "cloudOnlyConfirmTitle": ("校验并释放工作副本？", "Verify and release the working copy?"),
+    "cloudOnlyConfirmScope": ("请先关闭正在使用此路径的应用，并在 OneDrive 中确认上传完成。此操作只移除本机工作目录中的副本，不删除 OneDrive 目标。", "First close apps using this path and confirm in OneDrive that uploading has finished. This operation removes only the copy in this Mac's working folder and does not delete the OneDrive target."),
+    "cloudOnlyConfirmVerification": ("将逐文件核对 OneDrive 挂载目录中的目标副本。目标缺失、内容不同、存在冲突或读取错误会阻止释放。校验可能下载 OneDrive 镜像；镜像校验不证明服务端已经完成上传。", "Each file is checked against the target copy in the mounted OneDrive folder. Missing target files, different contents, conflicts, or read errors prevent release. Verification may download the OneDrive mirror; checking that mirror does not prove that upload to the server has finished."),
+    "cloudOnlyConfirmCache": ("OneDrive 镜像缓存仍可能占用本机空间。如需释放这部分缓存，请打开目标，在 Finder 中选择“释放空间”。", "The OneDrive mirror cache may still use space on this Mac. To release that cache, open the target and choose “Free Up Space” in Finder."),
+    "cloudOnlyConfirmRelease": ("已确认上传，校验并释放", "Upload confirmed — verify and release"),
+    "cloudOnlyAdded": ("已添加仅云端子路径；保存后生效，文件尚未删除。", "Cloud-only subpath added. Save to apply; no files have been deleted."),
+    "cloudOnlyVerifiedFiles": ("正在核验文件 %@/%@", "Verifying files %@/%@"),
+    "cloudOnlyReleaseSummary": ("已释放「%@」的工作副本（%@ 个文件）。OneDrive 目标保留；其缓存可在 Finder 中释放。", "Released the working copy of “%@” (%@ files). The OneDrive target is retained; its cache can be freed in Finder."),
+    "cloudOnlyRemoved": ("已恢复正常同步；保存后按本组原方向执行。", "Normal sync restored. Save to apply this pair's selected direction."),
+    "releasingWorkingCopy": ("正在校验并释放本机工作副本…", "Verifying and releasing this Mac's working copy…"),
+    "workingCopyReleased": ("工作副本释放操作已完成，请查看校验结果。", "Working-copy release finished. Review the verification results."),
+    "cloudOnlyRecoveryTitle": ("有未完成的工作副本释放", "A working-copy release is unfinished"),
+    "cloudOnlyRecoveryHint": ("暂存目录仍有剩余副本，可能不完整。请先检查恢复记录；应用不会自动恢复或删除这些文件。", "Remaining copies are in staging and may be incomplete. Review the recovery record first; the app will not restore or delete these files automatically."),
+    "cloudOnlyRecoveryRefresh": ("刷新未完成释放记录", "Refresh unfinished release records"),
+    "cloudOnlyRecoveryOpen": ("打开恢复目录", "Open recovery folder"),
+    "cloudOnlyRecoveryReadError": ("部分恢复记录无法读取，请在 Finder 中检查记录目录。", "Some recovery records could not be read. Check the records folder in Finder."),
+    "cloudOnlyRecoveryOpenRecords": ("打开恢复记录目录", "Open recovery records folder"),
     "chooseFolder": ("选择文件夹", "Choose folder"),
     "browse": ("选择…", "Choose…"),
     "direction": ("定时方向", "Scheduled direction"),
@@ -358,6 +389,9 @@ func uiText(_ key: String, language: String) -> String {
 func uiError(_ error: Error, language: String) -> String {
     guard usesEnglish(language) else { return error.localizedDescription }
     let value = error as NSError
+    if value.domain == "com.ensom.PathSync.CloudOnlyStorage" {
+        return "Cloud-only storage operation failed:\n" + value.localizedDescription
+    }
     guard value.domain == "com.ensom.ResearchSync" else { return "The operation failed. Check History for details." }
     switch value.code {
     case 1: return "Choose both local and cloud folders for this pair."

@@ -1097,6 +1097,9 @@ struct ContentView: View {
                 Text(t("oneDriveOnlyHint"))
             }
 
+            CloudOnlySection(model: model, pair: pair)
+                .id(pair.id)
+
             Section {
                 if conflicts.isEmpty {
                     Label(t("noConflicts"), systemImage: "checkmark.seal")
@@ -1506,6 +1509,344 @@ struct ContentView: View {
             }
     }
 
+}
+
+private struct CloudOnlyReleaseTarget: Identifiable {
+    let path: String
+    var id: String { path }
+}
+
+private struct CloudOnlyReleaseRecovery: Identifiable {
+    let id: String
+    let relative: String
+    let target: String
+    let directory: URL
+}
+
+private struct CloudOnlyReleasePointer: Decodable {
+    let status: String
+    let journal: String
+    let target: String
+    let relative: String
+}
+
+/// Reads recovery pointers and checks only staging metadata. It never reads the
+/// payload's contents, restores files, or removes a pointer or staging folder.
+private func cloudOnlyReleaseRecoveries(at index: URL) -> (items: [CloudOnlyReleaseRecovery], unreadable: Bool) {
+    let manager = FileManager.default
+    var isDirectory: ObjCBool = false
+    guard manager.fileExists(atPath: index.path, isDirectory: &isDirectory) else { return ([], false) }
+    guard isDirectory.boolValue,
+          let pointers = try? manager.contentsOfDirectory(at: index,
+              includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else {
+        return ([], true)
+    }
+    var items: [CloudOnlyReleaseRecovery] = []
+    var unreadable = false
+    for url in pointers.filter({ $0.pathExtension == "json" }).sorted(by: { $0.path < $1.path }) {
+        guard let metadata = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              metadata.isRegularFile == true, metadata.isSymbolicLink != true,
+              let size = metadata.fileSize, size <= 1_048_576,
+              let data = try? Data(contentsOf: url),
+              let pointer = try? JSONDecoder().decode(CloudOnlyReleasePointer.self, from: data) else {
+            unreadable = true
+            continue
+        }
+        if pointer.status == "released" || pointer.status == "rolled_back" { continue }
+        guard pointer.journal.hasPrefix("/"), !pointer.journal.contains("\0"),
+              pointer.target.hasPrefix("/"), !pointer.target.contains("\0"),
+              let relative = try? normalizeCloudOnlyPath(pointer.relative) else {
+            unreadable = true
+            continue
+        }
+        let journal = URL(fileURLWithPath: pointer.journal).standardizedFileURL
+        let directory = journal.deletingLastPathComponent()
+        guard journal.lastPathComponent == "release.json",
+              directory.lastPathComponent.hasPrefix(".pathsync-local-release-") else {
+            unreadable = true
+            continue
+        }
+        let payload = directory.appendingPathComponent("payload")
+        if manager.fileExists(atPath: payload.path) {
+            items.append(CloudOnlyReleaseRecovery(id: url.path, relative: relative,
+                                                  target: pointer.target, directory: directory))
+        }
+    }
+    return (items, unreadable)
+}
+
+private final class CloudOnlySectionState: ObservableObject {
+    @Published var newPath = ""
+    @Published var releaseTarget: CloudOnlyReleaseTarget?
+    @Published var showsReleaseStatus = false
+    @Published var recoveries: [CloudOnlyReleaseRecovery] = []
+    @Published var recoveryReadFailed = false
+    @Published var refreshingRecovery = false
+
+    func refreshRecoveries(at index: URL) {
+        guard !refreshingRecovery else { return }
+        refreshingRecovery = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = cloudOnlyReleaseRecoveries(at: index)
+            DispatchQueue.main.async {
+                self.recoveries = result.items
+                self.recoveryReadFailed = result.unreadable
+                self.refreshingRecovery = false
+            }
+        }
+    }
+}
+
+/// A local storage choice, kept separate from the shared exclusion policy.
+private struct CloudOnlySection: View {
+    @ObservedObject var model: SyncModel
+    let pair: SyncPair
+    @StateObject private var state = CloudOnlySectionState()
+
+    private func t(_ key: String) -> String { model.t(key) }
+
+    private var recoveryIndex: URL {
+        URL(fileURLWithPath: mergeStatePath(pair) + ".cloud-only-releases", isDirectory: true)
+    }
+
+    private func refreshRecoveries() {
+        guard !model.isSyncActive else { return }
+        state.refreshRecoveries(at: recoveryIndex)
+    }
+
+    private var canRelease: Bool {
+        !model.hasUnsavedChanges && !model.isSyncActive
+            && !pair.localPath.isEmpty && !pair.cloudPath.isEmpty
+    }
+
+    private var releaseHint: String {
+        if model.isSyncActive { return t("cloudOnlyBusyHint") }
+        if model.hasUnsavedChanges { return t("cloudOnlySaveFirst") }
+        if pair.localPath.isEmpty || pair.cloudPath.isEmpty { return t("chooseFoldersHint") }
+        return t("cloudOnlyReleaseHint")
+    }
+
+    private func addPath() {
+        guard !model.isSyncActive, !state.newPath.isEmpty else { return }
+        state.showsReleaseStatus = false
+        model.addCloudOnlyPath(state.newPath, pairID: pair.id)
+        if model.statusKey == "cloudOnlyAdded" { state.newPath = "" }
+    }
+
+    var body: some View {
+        Section {
+            Text(t("cloudOnlyHint"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                TextField(t("cloudOnlyPathLabel"), text: $state.newPath,
+                          prompt: Text(t("cloudOnlyPathPlaceholder")))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(addPath)
+                    .help(t("cloudOnlyPathHint"))
+                    .accessibilityLabel(t("cloudOnlyPathLabel"))
+                Button(t("cloudOnlyAdd"), action: addPath)
+                    .disabled(state.newPath.isEmpty)
+            }
+            .disabled(model.isSyncActive)
+            Text(t("cloudOnlyPathHint"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if pair.cloudOnlyPaths.isEmpty {
+                Text(t("cloudOnlyEmpty"))
+                    .foregroundStyle(.secondary)
+            } else if pair.cloudOnlyPaths.count > 3 {
+                ScrollView {
+                    pathRows
+                }
+                .frame(height: 250)
+            } else {
+                pathRows
+            }
+
+            if !state.recoveries.isEmpty || state.recoveryReadFailed {
+                recoveryNotice
+            }
+
+            if state.showsReleaseStatus,
+               ["releasingWorkingCopy", "workingCopyReleased", "error"].contains(model.statusKey) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Label(t(model.statusKey), systemImage: model.statusKey == "error"
+                          ? "exclamationmark.triangle" : (model.statusKey == "releasingWorkingCopy"
+                          ? "arrow.triangle.2.circlepath" : "checkmark.circle"))
+                    if let detail = model.statusDetail, !detail.isEmpty {
+                        ScrollView {
+                            Text(detail)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(height: min(160, CGFloat(detail.components(separatedBy: "\n").count + 1) * 17))
+                    }
+                }
+                .foregroundStyle(model.statusKey == "error" ? Color.red : Color.secondary)
+            }
+        } header: {
+            HStack {
+                Text(t("cloudOnlyTitle"))
+                Spacer()
+                if state.refreshingRecovery { ProgressView().controlSize(.small) }
+                Button(action: refreshRecoveries) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help(t("cloudOnlyRecoveryRefresh"))
+                .accessibilityLabel(t("cloudOnlyRecoveryRefresh"))
+                .disabled(model.isSyncActive || state.refreshingRecovery)
+            }
+        } footer: {
+            Text(t("cloudOnlyRestoreHint"))
+        }
+        .sheet(item: $state.releaseTarget) { target in
+            releaseConfirmation(target.path)
+        }
+        .onAppear(perform: refreshRecoveries)
+        .onChange(of: model.isSyncActive) { active in
+            if !active { refreshRecoveries() }
+        }
+        .onChange(of: model.statusKey) { key in
+            if !["releasingWorkingCopy", "workingCopyReleased", "error"].contains(key) {
+                state.showsReleaseStatus = false
+            }
+        }
+    }
+
+    private var recoveryNotice: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !state.recoveries.isEmpty {
+                Label(t("cloudOnlyRecoveryTitle"), systemImage: "exclamationmark.triangle")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.orange)
+                Text(t("cloudOnlyRecoveryHint"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(state.recoveries) { recovery in
+                            HStack {
+                                Text(recovery.relative)
+                                    .font(.caption.monospaced())
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                                    .help(recovery.target)
+                                Spacer(minLength: 8)
+                                Button(t("cloudOnlyRecoveryOpen")) {
+                                    NSWorkspace.shared.open(recovery.directory)
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: min(130, CGFloat(state.recoveries.count) * 37))
+            }
+            if state.recoveryReadFailed {
+                Text(t("cloudOnlyRecoveryReadError"))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Button(t("cloudOnlyRecoveryOpenRecords")) {
+                    NSWorkspace.shared.open(recoveryIndex)
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var pathRows: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(pair.cloudOnlyPaths, id: \.self) { path in
+                VStack(alignment: .leading, spacing: 7) {
+                    Label {
+                        Text(path)
+                            .font(.body.monospaced())
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    } icon: {
+                        Image(systemName: "icloud")
+                            .foregroundStyle(.secondary)
+                    }
+                    .help(path)
+                    HStack(spacing: 10) {
+                        Button(t("cloudOnlyRelease")) {
+                            state.releaseTarget = CloudOnlyReleaseTarget(path: path)
+                        }
+                        .disabled(!canRelease)
+                        .help(releaseHint)
+                        Button(t("cloudOnlyRestore")) {
+                            state.showsReleaseStatus = false
+                            model.removeCloudOnlyPath(path, pairID: pair.id)
+                        }
+                        .disabled(model.isSyncActive)
+                        .help(t("cloudOnlyRestoreHint"))
+                        Spacer(minLength: 0)
+                        Button {
+                            model.openCloudOnlyTarget(path, pairID: pair.id)
+                        } label: {
+                            Label(t("cloudOnlyOpenTarget"), systemImage: "folder")
+                        }
+                        .disabled(pair.cloudPath.isEmpty)
+                    }
+                    .controlSize(.small)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if path != pair.cloudOnlyPaths.last { Divider() }
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func releaseConfirmation(_ path: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label(t("cloudOnlyConfirmTitle"), systemImage: "externaldrive.badge.exclamationmark")
+                .font(.title3.weight(.semibold))
+            Text(path)
+                .font(.body.monospaced())
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .truncationMode(.middle)
+                .help(path)
+            Text(t("cloudOnlyConfirmScope"))
+            Text(t("cloudOnlyConfirmVerification"))
+            Text(t("cloudOnlyConfirmCache"))
+                .foregroundStyle(.secondary)
+            Button {
+                model.openCloudOnlyTarget(path, pairID: pair.id)
+            } label: {
+                Label(t("cloudOnlyOpenTarget"), systemImage: "folder")
+            }
+            .disabled(pair.cloudPath.isEmpty)
+            Divider()
+            HStack {
+                Spacer()
+                Button(t("cancel")) { state.releaseTarget = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button(t("cloudOnlyConfirmRelease"), role: .destructive) {
+                    state.releaseTarget = nil
+                    state.showsReleaseStatus = true
+                    model.releaseCloudOnlyPath(path, pairID: pair.id)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(!canRelease)
+            }
+        }
+        .font(.callout)
+        .padding(24)
+        .frame(width: 560)
+        .fixedSize(horizontal: false, vertical: true)
+    }
 }
 
 /// A small coloured dot before a status text.

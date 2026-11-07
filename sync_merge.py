@@ -19,7 +19,9 @@ import tempfile
 import time
 import uuid
 
+sys.dont_write_bytecode = True
 from sync_tree import IGNORE_FILE, ExcludeRules, excluded_relative, load_exclude_rules
+import cloud_only
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
@@ -152,6 +154,8 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
 
 
 def excluded_path(name, args, directory=False):
+    if cloud_only.contains(name, getattr(args, 'cloud_only', ())):
+        return True
     if name == IGNORE_FILE and not directory:
         return args.shared_excludes
     if args.shared_excludes:
@@ -652,6 +656,7 @@ def restore_backup(args, local, cloud):
     if metadata.get('root') != str(root):
         raise ValueError('备份对应的同步路径已变更')
     name = metadata['name']
+    ensure_not_cloud_only(args, name)
     destination = safe_path(root, name)
     payload = directory / 'content'
     if payload.is_symlink() or digest(payload) != metadata['sha256']:
@@ -794,7 +799,14 @@ def sync_files(args, local, cloud, files, conflicts):
 
     tree_record_names = {name for name, record in active_conflicts.items()
                          if record.get('kind') == 'tree'}
-    blocked_directories = set()
+    # An unresolved tree conflict above a cloud-only child must remain blocked;
+    # filtering that child is not evidence that the old conflict was resolved.
+    protected_tree_conflicts = {
+        name for name, record in active_conflicts.items()
+        if record.get('kind') == 'tree' and
+        any(cloud_only.contains(prefix, (name,)) for prefix in args.cloud_only)
+    }
+    blocked_directories = set(protected_tree_conflicts)
     plan = []
 
     def planned(action, name, **detail):
@@ -804,6 +816,11 @@ def sync_files(args, local, cloud, files, conflicts):
 
     def linked(name):
         return name in symlinks or any(parent in symlinks for parent in ancestor_directories(name))
+
+    for name in sorted(protected_tree_conflicts):
+        print(f'CONFLICT\t{name}\t云端保留子路径的上级目录仍有冲突，请先核对')
+        planned('conflict', name, kind='tree')
+        counts['conflicts'] += 1
 
     # Scanning skips links, but a peer file or an old anchor can reintroduce
     # the same path. Exclude it on BOTH sides before metadata checks, directory
@@ -1220,10 +1237,12 @@ def sync_files(args, local, cloud, files, conflicts):
 
 def resolve_conflict(args, local, cloud, files, conflicts):
     name = args.resolve
+    ensure_not_cloud_only(args, name)
     ensure_no_tree_barrier(name, conflicts)
     if name not in conflicts:
         raise ValueError(f'没有待处理冲突：{name}')
     record = conflicts[name]
+    ensure_not_cloud_only(args, record.get('sidecar'))
     if record.get('kind') == 'tree':
         raise ValueError('这是目录级冲突；请先在文件管理器中核对整个目录，使两侧内容一致或都删除，随后重新同步')
     if is_review(record):
@@ -1305,10 +1324,12 @@ def resolve_conflict(args, local, cloud, files, conflicts):
 
 def resolve_review_newest(args, local, cloud, files, conflicts):
     name = args.review_newest
+    ensure_not_cloud_only(args, name)
     ensure_no_tree_barrier(name, conflicts)
     record = conflicts.get(name)
     if record is None or not is_review(record):
         raise ValueError(f'没有待确认的已保留版本：{name}')
+    ensure_not_cloud_only(args, record.get('sidecar'))
     primary = record['primary']
     sidecar = record['sidecar']
     main_local = safe_path(local, name)
@@ -1375,10 +1396,12 @@ def resolve_review_newest(args, local, cloud, files, conflicts):
 
 def acknowledge_review(args, local, cloud, files, conflicts):
     name = args.acknowledge
+    ensure_not_cloud_only(args, name)
     ensure_no_tree_barrier(name, conflicts)
     record = conflicts.get(name)
     if record is None or not is_review(record):
         raise ValueError(f'没有待确认的已保留版本：{name}')
+    ensure_not_cloud_only(args, record.get('sidecar'))
     local_file = safe_path(local, name)
     cloud_file = safe_path(cloud, name)
     local_sig = signature(local_file)
@@ -1397,6 +1420,11 @@ def acknowledge_review(args, local, cloud, files, conflicts):
     return 0
 
 
+def ensure_not_cloud_only(args, name):
+    if name is not None and cloud_only.contains(name, getattr(args, 'cloud_only', ())):
+        raise ValueError('该路径仅保留在云端，请先取消云端保留策略再执行手动操作')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('local', type=Path)
@@ -1413,6 +1441,12 @@ def main():
                         help='custom exclusion rule; may be repeated')
     parser.add_argument('--shared-excludes', action='store_true',
                         help='use authoritative shared rules and skip retired root ignore files')
+    parser.add_argument('--cloud-only', action='append', default=[], metavar='RELATIVE_PATH',
+                        help='keep this subpath in the cloud on this Mac; never sync its working copy')
+    parser.add_argument('--release-local', metavar='RELATIVE_PATH',
+                        help='verify the cloud mirror then release an exactly configured local working copy')
+    parser.add_argument('--retire-cloud-only', action='store_true',
+                        help='retire selected local baselines only, without scanning or syncing data')
     parser.add_argument('--hydrate-online-only', action='store_true',
                         help='download online-only cloud files the merge must read before comparing')
     parser.add_argument('--dry-run', action='store_true')
@@ -1448,8 +1482,29 @@ def main():
         parser.error('--restore cannot be combined with sync or resolution options')
     if not 1 <= args.backup_retention_days <= 365:
         parser.error('--backup-retention-days must be between 1 and 365')
+    if args.release_local is not None and (args.dry_run or args.resolve or args.acknowledge
+            or args.review_newest or args.restore or args.migrate_backups):
+        parser.error('--release-local cannot be combined with other actions or dry-run')
+    if args.retire_cloud_only and (not args.cloud_only or args.dry_run or args.resolve
+            or args.acknowledge or args.review_newest or args.restore or args.migrate_backups
+            or args.release_local is not None):
+        parser.error('--retire-cloud-only requires paths and cannot be combined with other actions')
+    if args.retire_cloud_only:
+        # This action must also allow unpinning an unavailable root or a path
+        # since replaced by a link. Match state roots lexically without probing
+        # provider paths; no data will be scanned, followed or removed.
+        local = Path(os.path.abspath(args.local))
+        cloud = Path(os.path.abspath(args.cloud))
+        args.cloud_only = cloud_only.validate_policy(args.cloud_only)
+        files, conflicts = load_state(args.state, local, cloud)
+        files, receipt = cloud_only.retire_anchors(args.state, local, cloud, files, conflicts,
+                                                  args.cloud_only, save_state)
+        print('RETIRED_CLOUD_ONLY\tpaths=' + str(len(args.cloud_only)) +
+              '\treceipt=' + (str(receipt) if receipt else 'none'))
+        return 0
     local = args.local.resolve()
     cloud = args.cloud.resolve()
+    args.cloud_only = cloud_only.validate_paths(local, cloud, args.cloud_only)
     args.local, args.cloud = local, cloud
     args.backup_count = 0
     cloud_ignore = cloud / IGNORE_FILE
@@ -1467,6 +1522,17 @@ def main():
         print(f'backups_moved={moved} backups_pending={failed}')
         return 2 if failed else 0
     files, conflicts = load_state(args.state, local, cloud)
+    if args.release_local is not None:
+        return cloud_only.release_local(local, cloud, args.state, files, conflicts,
+                                        args.release_local, args.cloud_only, save_state)
+    for name in (args.resolve, args.review_newest, args.acknowledge):
+        if name is not None:
+            ensure_not_cloud_only(args, name)
+            ensure_not_cloud_only(args, conflicts.get(name, {}).get('sidecar'))
+    if args.cloud_only and not (args.dry_run or args.resolve or args.acknowledge
+                               or args.review_newest or args.restore):
+        files, _ = cloud_only.retire_anchors(args.state, local, cloud, files, conflicts,
+                                           args.cloud_only, save_state)
     if not (args.dry_run or args.restore):
         # Backups kept here while the chosen folder was offline move there now.
         moved, _ = move_backups(args, only_pending=True) if args.backups.remote else (0, 0)

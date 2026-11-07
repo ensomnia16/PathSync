@@ -12,7 +12,7 @@ private let defaultConfigPath = supportDirectory + "/config.json"
 let logPath = supportDirectory + "/sync.log"
 private let agentPath = home + "/Library/LaunchAgents/" + appID + ".plist"
 
-private func mergeStatePath(_ pair: SyncPair) -> String {
+func mergeStatePath(_ pair: SyncPair) -> String {
     supportDirectory + "/merge-state/" + pair.id.uuidString.lowercased() + ".json"
 }
 
@@ -65,10 +65,12 @@ struct SyncPair: Codable, Identifiable, Equatable {
     var syncTemporaryFiles = false
     /// Transient filters resolved from the OneDrive root document, never saved locally.
     var excludeRules = ""
+    /// Device-local residency preferences, independent of shared exclusions.
+    var cloudOnlyPaths: [String] = []
 
     enum CodingKeys: String, CodingKey {
         case id, name, localPath, cloudPath, scheduledDirection, enabled
-        case syncCodexFiles, syncClaudeFiles, syncTemporaryFiles, excludeRules
+        case syncCodexFiles, syncClaudeFiles, syncTemporaryFiles, excludeRules, cloudOnlyPaths
     }
 
     /// The rule lines that sync_merge.py receives as --exclude.
@@ -81,7 +83,7 @@ struct SyncPair: Codable, Identifiable, Equatable {
     init(id: UUID = UUID(), name: String = "新路径", localPath: String = "", cloudPath: String = "",
          scheduledDirection: String = "merge", enabled: Bool = false,
          syncCodexFiles: Bool = true, syncClaudeFiles: Bool = true, syncTemporaryFiles: Bool = false,
-         excludeRules: String = "") {
+         excludeRules: String = "", cloudOnlyPaths: [String] = []) {
         self.id = id
         self.name = name
         self.localPath = localPath
@@ -92,6 +94,7 @@ struct SyncPair: Codable, Identifiable, Equatable {
         self.syncClaudeFiles = syncClaudeFiles
         self.syncTemporaryFiles = syncTemporaryFiles
         self.excludeRules = excludeRules
+        self.cloudOnlyPaths = cloudOnlyPaths
     }
 
     init(from decoder: Decoder) throws {
@@ -102,6 +105,7 @@ struct SyncPair: Codable, Identifiable, Equatable {
         cloudPath = try data.decode(String.self, forKey: .cloudPath)
         scheduledDirection = try data.decode(String.self, forKey: .scheduledDirection)
         enabled = try data.decode(Bool.self, forKey: .enabled)
+        cloudOnlyPaths = try data.decodeIfPresent([String].self, forKey: .cloudOnlyPaths) ?? []
         // Legacy filter fields are ignored. OneDriveRules.read supplies them.
     }
 
@@ -113,11 +117,12 @@ struct SyncPair: Codable, Identifiable, Equatable {
         try data.encode(cloudPath, forKey: .cloudPath)
         try data.encode(scheduledDirection, forKey: .scheduledDirection)
         try data.encode(enabled, forKey: .enabled)
+        try data.encode(cloudOnlyPaths, forKey: .cloudOnlyPaths)
     }
 
     var isUnusedDefaultPlaceholder: Bool {
         name == "新路径" && localPath.isEmpty && cloudPath.isEmpty &&
-            scheduledDirection == "merge" && !enabled
+            scheduledDirection == "merge" && !enabled && cloudOnlyPaths.isEmpty
     }
 }
 
@@ -573,7 +578,7 @@ func syncStatusJSON(_ config: SyncConfig) -> String {
     return String(decoding: data, as: UTF8.self)
 }
 
-private func withSyncLock<T>(_ body: () throws -> T) throws -> T {
+func withSyncLock<T>(_ body: () throws -> T) throws -> T {
     try fm.createDirectory(atPath: supportDirectory, withIntermediateDirectories: true)
     let lockFD = open(supportDirectory + "/sync.lock", O_CREAT | O_RDWR, 0o600)
     guard lockFD >= 0 else { throw NSError(domain: appID, code: 5, userInfo: [NSLocalizedDescriptionKey: "无法创建同步锁。"]) }
@@ -607,7 +612,7 @@ private func centralFilterArguments(_ pair: SyncPair, config: SyncConfig) throws
     guard let resolved = effective.pairs.first(where: { $0.id == pair.id }) else {
         throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "找不到指定路径组。"])
     }
-    return syncFilterArguments(resolved, excludeLatex: effective.excludeLatexIntermediates)
+    return try syncFilterArguments(resolved, excludeLatex: effective.excludeLatexIntermediates) + cloudOnlyArguments(resolved)
 }
 
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
@@ -639,6 +644,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      "--conflict-policy", conflictPolicy,
                      "--backup-retention-days", String(backupRetentionDays)]
     arguments += syncFilterArguments(pair, excludeLatex: excludeLatex)
+    arguments += try cloudOnlyArguments(pair)
     if checkCloud && cloudStorageProvider(pair.cloudPath) != nil { arguments.append("--hydrate-online-only") }
     if dryRun { arguments.append("--dry-run") }
     if dryRun && plan { arguments.append("--plan-json") }
@@ -890,6 +896,7 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
     guard !selectedPairs(config, pairID: pairID).isEmpty else {
         throw NSError(domain: appID, code: 7, userInfo: [NSLocalizedDescriptionKey: "没有可同步的路径。"])
     }
+    for pair in selectedPairs(config, pairID: pairID) { _ = try validatedCloudOnlyPaths(pair.cloudOnlyPaths) }
     return try withSyncLock {
         try validatedPairSet(config.pairs, including: pairID)
         let shared = try OneDriveRules.read(config, requiring: Set(selectedPairs(config, pairID: pairID).map(\.id)))
@@ -1534,6 +1541,9 @@ final class SyncModel: ObservableObject {
                 throw NSError(domain: appID, code: 9, userInfo: [NSLocalizedDescriptionKey: "启用后台同步前，请至少启用一组路径。"])
             }
             try validatedPairSet(config.pairs)
+            for index in config.pairs.indices {
+                config.pairs[index].cloudOnlyPaths = try validatedCloudOnlyPaths(config.pairs[index].cloudOnlyPaths)
+            }
             try validatedBackupLocation(config)
             for pair in config.pairs where pair.enabled {
                 _ = try pendingConflicts(for: pair)
@@ -1551,6 +1561,14 @@ final class SyncModel: ObservableObject {
             config = try withSyncLock {
                 // Stopping the schedule must remain possible while its rules file is unavailable.
                 let shared = try config.enabled ? OneDriveRules.read(config).config : config
+                for pair in shared.pairs {
+                    let previous = savedConfig.pairs.first { $0.id == pair.id }
+                    let paths = try cloudOnlyTransitionPaths(from: previous?.cloudOnlyPaths ?? [], to: pair.cloudOnlyPaths)
+                    if let previous { try retireCloudOnlyBaselines(previous, paths: paths) }
+                    if previous?.localPath != pair.localPath || previous?.cloudPath != pair.cloudPath {
+                        try retireCloudOnlyBaselines(pair, paths: paths)
+                    }
+                }
                 try saveConfig(shared)
                 return shared
             }
@@ -1649,6 +1667,60 @@ final class SyncModel: ObservableObject {
                     self.statusDetail = uiError(error, language: current.language)
                 }
                 self.refreshHistory()
+            }
+        }
+    }
+
+    func addCloudOnlyPath(_ text: String, pairID: UUID) {
+        guard !isSyncActive, let index = config.pairs.firstIndex(where: { $0.id == pairID }) else { return }
+        do {
+            config.pairs[index].cloudOnlyPaths = try validatedCloudOnlyPaths(config.pairs[index].cloudOnlyPaths + [normalizeCloudOnlyPath(text)])
+            preview = nil
+            statusKey = "cloudOnlyAdded"
+            statusDetail = nil
+        } catch { statusKey = "error"; statusDetail = uiError(error, language: config.language) }
+    }
+
+    func removeCloudOnlyPath(_ path: String, pairID: UUID) {
+        guard !isSyncActive, let index = config.pairs.firstIndex(where: { $0.id == pairID }) else { return }
+        config.pairs[index].cloudOnlyPaths.removeAll { $0 == path }
+        preview = nil
+        statusKey = "cloudOnlyRemoved"
+        statusDetail = nil
+    }
+
+    func openCloudOnlyTarget(_ path: String, pairID: UUID) {
+        guard let pair = config.pairs.first(where: { $0.id == pairID }),
+              !pair.cloudPath.isEmpty, let relative = try? normalizeCloudOnlyPath(path) else { return }
+        let url = URL(fileURLWithPath: pair.cloudPath, isDirectory: true).appendingPathComponent(relative)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func releaseCloudOnlyPath(_ path: String, pairID: UUID) {
+        guard !isSyncActive, !hasUnsavedChanges,
+              let pair = config.pairs.first(where: { $0.id == pairID }), pair.cloudOnlyPaths.contains(path) else { return }
+        let current = savedConfig
+        busy = true
+        preview = nil
+        statusKey = "releasingWorkingCopy"
+        statusDetail = path
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result {
+                try releaseCloudOnlyWorkingCopy(pair, relativePath: path, configuration: current) { message in
+                    DispatchQueue.main.async { self.statusDetail = message }
+                }
+            }
+            DispatchQueue.main.async {
+                self.busy = false
+                switch result {
+                case .success(let summary):
+                    self.statusKey = "workingCopyReleased"
+                    self.statusDetail = summary
+                case .failure(let error):
+                    self.statusKey = "error"
+                    self.statusDetail = uiError(error, language: current.language)
+                }
+                self.refreshState()
             }
         }
     }
@@ -1798,6 +1870,7 @@ struct ResearchSyncApp: App {
         if args.contains("--install") {
             do {
                 let config = try loadConfig()
+                for pair in config.pairs { _ = try validatedCloudOnlyPaths(pair.cloudOnlyPaths) }
                 try validatedPairSet(config.pairs)
                 try validatedBackupLocation(config)
                 for pair in config.pairs where pair.enabled {
