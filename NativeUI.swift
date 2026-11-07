@@ -1606,15 +1606,18 @@ private final class CloudOnlySectionState: ObservableObject {
     @Published var recoveries: [CloudOnlyReleaseRecovery] = []
     @Published var recoveryReadFailed = false
     @Published var refreshingRecovery = false
+    @Published var workingCopyStatuses: [String: CloudOnlyWorkingCopyStatus] = [:]
 
-    func refreshRecoveries(at index: URL) {
+    func refreshRecoveries(at index: URL, pair: SyncPair) {
         guard !refreshingRecovery else { return }
         refreshingRecovery = true
         DispatchQueue.global(qos: .utility).async {
             let result = cloudOnlyReleaseRecoveries(at: index)
+            let statuses = cloudOnlyWorkingCopyStatuses(pair, statePath: mergeStatePath(pair))
             DispatchQueue.main.async {
                 self.recoveries = result.items
                 self.recoveryReadFailed = result.unreadable
+                self.workingCopyStatuses = statuses
                 self.refreshingRecovery = false
             }
         }
@@ -1635,7 +1638,7 @@ private struct CloudOnlySection: View {
 
     private func refreshRecoveries() {
         guard !model.isSyncActive else { return }
-        state.refreshRecoveries(at: recoveryIndex)
+        state.refreshRecoveries(at: recoveryIndex, pair: pair)
     }
 
     private var canRelease: Bool {
@@ -1744,6 +1747,12 @@ private struct CloudOnlySection: View {
             releaseConfirmation(target.path)
         }
         .onAppear(perform: refreshRecoveries)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshRecoveries()
+        }
+        .onChange(of: pair.cloudOnlyPaths) { _ in refreshRecoveries() }
+        .onChange(of: pair.localPath) { _ in refreshRecoveries() }
+        .onChange(of: pair.cloudPath) { _ in refreshRecoveries() }
         .onChange(of: model.isSyncActive) { active in
             if !active { refreshRecoveries() }
         }
@@ -1813,11 +1822,25 @@ private struct CloudOnlySection: View {
                     }
                     .help(path)
                     HStack(spacing: 10) {
-                        Button(t("cloudOnlyRelease")) {
-                            state.releaseTarget = CloudOnlyReleaseTarget(path: path)
+                        switch state.workingCopyStatuses[path] {
+                        case .present:
+                            Button(t("cloudOnlyRelease")) {
+                                state.releaseTarget = CloudOnlyReleaseTarget(path: path)
+                            }
+                            .disabled(!canRelease)
+                            .help(releaseHint)
+                        case .released:
+                            Label(t("cloudOnlyAlreadyReleased"), systemImage: "checkmark.circle")
+                                .foregroundStyle(.secondary)
+                        case .missing:
+                            Text(t("cloudOnlyWorkingCopyMissing"))
+                                .foregroundStyle(.secondary)
+                        case .unavailable:
+                            Text(t("cloudOnlyWorkingCopyUnavailable"))
+                                .foregroundStyle(.secondary)
+                        case nil:
+                            ProgressView().controlSize(.small)
                         }
-                        .disabled(!canRelease)
-                        .help(releaseHint)
                         Button(t("cloudOnlyRestore")) {
                             state.showsReleaseStatus = false
                             model.removeCloudOnlyPath(path, pairID: pair.id)

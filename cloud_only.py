@@ -556,6 +556,26 @@ def _save_receipt(journal, state, receipt):
     atomic_json(index / (journal.parent.name + '.json'), recovery)
 
 
+def completed_release(target, cloud_target, state, relative):
+    """Match the durable completion pointer without reading provider contents."""
+    index = Path(state).parent / (Path(state).name + '.cloud-only-releases')
+    for pointer in index.glob('*.json'):
+        info = pointer.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1_048_576:
+            continue
+        try:
+            receipt = json.loads(pointer.read_text(encoding='utf-8'))
+        except (ValueError, UnicodeError):
+            continue
+        if (isinstance(receipt, dict) and receipt.get('status') == 'released'
+                and receipt.get('relative') == relative
+                and receipt.get('target') == str(target)
+                and receipt.get('cloud') == str(cloud_target)
+                and receipt.get('state') == str(state)):
+            return True
+    return False
+
+
 def release_local(local, cloud, state, files, conflicts, relative, configured, save_state, rebuildable=()):
     relative = validate_relative(relative)
     if relative not in configured:
@@ -564,7 +584,14 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
     if _related_conflicts(relative, conflicts):
         raise ValueError('释放目标存在未决冲突或上级目录冲突，请先处理')
     target = safe_target(local, relative)
-    safe_target(cloud, relative)
+    cloud_target = safe_target(cloud, relative)
+    if not os.path.lexists(target):
+        if completed_release(target, cloud_target, state, relative):
+            if not cloud_target.exists():
+                raise ValueError('本地工作副本此前已释放，但 OneDrive 目标当前不存在，请检查云端路径：' + str(cloud_target))
+            print('ALREADY_RELEASED_LOCAL\t' + relative, flush=True)
+            return 0
+        raise ValueError('本地工作副本不存在，且没有匹配的完成释放记录；请检查路径或恢复正常同步：' + str(target))
     # All validation failures before staging leave state and both data trees untouched.
     original_state = Path(state).read_bytes() if Path(state).exists() else None
     for attempt in range(3):

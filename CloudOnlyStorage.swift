@@ -58,6 +58,59 @@ func cloudOnlyTransitionPaths(from old: [String], to new: [String]) throws -> [S
     }.sorted()
 }
 
+enum CloudOnlyWorkingCopyStatus {
+    case present, released, missing, unavailable
+}
+
+/// Only metadata and small local completion pointers are read. A paused policy
+/// alone is not evidence that a working copy was successfully released.
+func cloudOnlyWorkingCopyStatuses(_ pair: SyncPair, statePath state: String) -> [String: CloudOnlyWorkingCopyStatus] {
+    let manager = FileManager.default
+    let local = URL(fileURLWithPath: pair.localPath).standardizedFileURL.resolvingSymlinksInPath()
+    let cloud = URL(fileURLWithPath: pair.cloudPath).standardizedFileURL.resolvingSymlinksInPath()
+    let index = URL(fileURLWithPath: state + ".cloud-only-releases", isDirectory: true)
+    var released = Set<String>()
+    for url in (try? manager.contentsOfDirectory(at: index, includingPropertiesForKeys: nil)) ?? []
+        where url.pathExtension == "json" {
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? NSNumber, size.intValue <= 1_048_576,
+              let data = try? Data(contentsOf: url),
+              let pointer = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              pointer["status"] as? String == "released",
+              pointer["state"] as? String == state,
+              let relative = pointer["relative"] as? String,
+              (try? normalizeCloudOnlyPath(relative)) == relative,
+              pointer["target"] as? String == local.appendingPathComponent(relative).path,
+              pointer["cloud"] as? String == cloud.appendingPathComponent(relative).path else { continue }
+        released.insert(relative)
+    }
+    var result: [String: CloudOnlyWorkingCopyStatus] = [:]
+    for relative in pair.cloudOnlyPaths {
+        guard (try? normalizeCloudOnlyPath(relative)) == relative else {
+            result[relative] = .unavailable
+            continue
+        }
+        do {
+            _ = try manager.attributesOfItem(atPath: local.appendingPathComponent(relative).path)
+            result[relative] = .present
+        } catch let error as NSError {
+            guard error.domain == NSCocoaErrorDomain,
+                  [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) else {
+                result[relative] = .unavailable
+                continue
+            }
+            result[relative] = .missing
+            if released.contains(relative),
+               let attributes = try? manager.attributesOfItem(atPath: cloud.appendingPathComponent(relative).path),
+               attributes[.type] as? FileAttributeType != .typeSymbolicLink {
+                result[relative] = .released
+            }
+        }
+    }
+    return result
+}
+
 /// The caller owns the global lock. Retire metadata before committing a local
 /// policy transition, including an unpin before the first scheduled sync.
 func retireCloudOnlyBaselines(_ pair: SyncPair, paths: [String]) throws {
@@ -159,6 +212,8 @@ func releaseCloudOnlyWorkingCopy(_ pair: SyncPair, relativePath: String,
                    let count = fields.first(where: { $0.hasPrefix("files=") }) {
                     releasedSummary = String(format: uiText("cloudOnlyReleaseSummary", language: configuration.language),
                                              fields[1], String(count.dropFirst("files=".count)))
+                } else if fields.first == "ALREADY_RELEASED_LOCAL", fields.count == 2 {
+                    releasedSummary = String(format: uiText("cloudOnlyAlreadyReleasedSummary", language: configuration.language), fields[1])
                 }
             }
         }

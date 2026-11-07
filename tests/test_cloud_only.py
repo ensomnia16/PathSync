@@ -157,6 +157,71 @@ class CloudOnlyTests(unittest.TestCase):
         self.assertEqual((self.local / 'models/readme.txt').read_text(), 'keep here')
         self.assertEqual(self.snapshot(self.cloud), cloud_before)
 
+    def test_repeated_release_is_successful_without_touching_files_state_or_receipts(self):
+        self.seed_pair()
+        self.successful('--cloud-only=data', '--release-local=data')
+        before = self.snapshot(self.root)
+        repeated = self.successful('--cloud-only=data', '--release-local=data')
+        self.assertIn('ALREADY_RELEASED_LOCAL\tdata', repeated.stdout)
+        self.assertNotIn('RELEASED_LOCAL\tdata\tfiles=', repeated.stdout)
+        self.assertEqual(self.snapshot(self.root), before)
+        with mock.patch.object(cloud_only, 'verify_copies', side_effect=AssertionError('must not rescan')):
+            self.assertEqual(self.release_direct(), 0)
+
+    def test_missing_source_without_completed_release_has_clear_error(self):
+        self.seed_pair()
+        shutil.rmtree(self.local / 'data')
+        result = self.assert_release_rejected()
+        self.assertIn('没有匹配的完成释放记录', result.stdout + result.stderr)
+        self.assertNotIn('ALREADY_RELEASED_LOCAL', result.stdout)
+
+    def test_release_receipt_must_match_roots_state_path_and_completed_status(self):
+        self.seed_pair()
+        self.successful('--cloud-only=data', '--release-local=data')
+        pointer = next((self.root / 'state.json.cloud-only-releases').glob('*.json'))
+        receipt = json.loads(pointer.read_text())
+        for key, changed in [('status', 'cleanup_incomplete'), ('cloud', str(self.root / 'other-cloud/data')),
+                             ('target', str(self.root / 'other-local/data')), ('state', str(self.root / 'other.json')),
+                             ('relative', 'other')]:
+            with self.subTest(key=key):
+                pointer.write_text(json.dumps({**receipt, key: changed}))
+                result = self.assert_release_rejected()
+                self.assertIn('没有匹配的完成释放记录', result.stdout + result.stderr)
+        pointer.write_text(json.dumps(receipt))
+        self.successful('--cloud-only=data', '--release-local=data')
+
+    def test_already_released_requires_retained_cloud_target(self):
+        self.seed_pair()
+        self.successful('--cloud-only=data', '--release-local=data')
+        shutil.rmtree(self.cloud / 'data')
+        result = self.assert_release_rejected()
+        self.assertIn('OneDrive 目标当前不存在', result.stdout + result.stderr)
+
+    def test_recreated_source_is_verified_even_with_old_completed_receipt(self):
+        self.seed_pair()
+        self.successful('--cloud-only=data', '--release-local=data')
+        self.write(self.local, 'data/new.txt', 'new unsynced research')
+        self.assert_release_rejected()
+        self.assertEqual((self.local / 'data/new.txt').read_text(), 'new unsynced research')
+        self.write(self.cloud, 'data/new.txt', 'new unsynced research')
+        result = self.successful('--cloud-only=data', '--release-local=data')
+        self.assertIn('RELEASED_LOCAL\tdata\tfiles=', result.stdout)
+        self.assertFalse((self.local / 'data').exists())
+
+    def test_invalid_or_symlink_completion_pointer_is_not_accepted(self):
+        self.seed_pair()
+        self.successful('--cloud-only=data', '--release-local=data')
+        pointer = next((self.root / 'state.json.cloud-only-releases').glob('*.json'))
+        saved = pointer.read_bytes()
+        for malformed in [b'null', b'[]', b'{invalid', b'\xff']:
+            pointer.write_bytes(malformed)
+            self.assert_release_rejected()
+        pointer.unlink()
+        other = self.root / 'external.json'
+        other.write_bytes(saved)
+        pointer.symlink_to(other)
+        self.assert_release_rejected()
+
     def test_release_refuses_unuploaded_or_different_or_missing_cloud_content(self):
         self.seed_pair()
         self.write(self.local, 'data/not-uploaded.txt', 'only local')
