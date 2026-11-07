@@ -241,8 +241,7 @@ struct HistoryPage: View {
         if record.finishedAt == nil { return t("historyInterrupted") }
         if record.hasFailures { return t("historyFailed") }
         if record.counts["pending_delete", default: 0] > 0 { return t("historyPendingDelete") }
-        if record.counts["reviews", default: 0] > 0
-            || (!record.isPreview && record.counts["kept_both", default: 0] > 0) {
+        if record.needsManualReview {
             return t("historyReview")
         }
         if record.needsAttention { return t("historyAttention") }

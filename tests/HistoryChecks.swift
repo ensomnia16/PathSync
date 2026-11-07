@@ -33,6 +33,7 @@ struct HistoryChecks {
         assert(records[3].events[1].side == "cloud")
         assert(records[3].events[1].reason == "conflict-overwrite")
         assert(records[3].needsAttention)
+        assert(records[3].needsManualReview, "Legacy records without a review count remain reviewable")
         assert(records[4].isPreview)
         assert(records[4].needsAttention)
         assert(records[4].events[0].path == "main.tex")
@@ -54,6 +55,16 @@ struct HistoryChecks {
         let failed = parseSyncHistory(launchFailure)
         assert(failed.count == 1 && failed[0].needsAttention)
         assert(failed[0].events.first?.detail == "无法启动同步程序")
+
+        let automaticCopy = """
+        2026-11-07T13:48:00Z 开始 [科研] 双向合并：/local → /cloud
+        2026-11-07T13:50:00Z 结束 [科研]，退出码 0：KEPT_BOTH\tmain.log\tcopy=main (cloud conflict abc).log
+        uploaded=0 downloaded=597 kept_both=1 backups=1 reviews=0 failed=0
+        """
+        let automatic = parseSyncHistory(automaticCopy)[0]
+        assert(!automatic.needsAttention && !automatic.needsManualReview && automatic.hasChanges)
+        let waiting = parseSyncHistory(automaticCopy.replacingOccurrences(of: "reviews=0", with: "reviews=1"))[0]
+        assert(waiting.needsAttention && waiting.needsManualReview)
 
         let traceback = """
         2026-11-07T09:47:00Z 开始 [科研] 双向合并：/local → /cloud

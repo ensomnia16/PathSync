@@ -25,11 +25,16 @@ struct SyncHistoryRecord: Identifiable {
     var counts: [String: Int] = [:]
     var events: [SyncHistoryEvent] = []
 
+    var needsManualReview: Bool {
+        counts["reviews", default: 0] > 0
+            || (!isPreview && counts["reviews"] == nil && counts["kept_both", default: 0] > 0)
+    }
+
     var needsAttention: Bool {
         exitCode != nil && (counts["failed", default: 0] > 0 || exitCode != 0
-            || counts["reviews", default: 0] > 0
+            || needsManualReview
             || counts["pending_delete", default: 0] > 0
-            || (!isPreview && counts["kept_both", default: 0] > 0))
+        )
     }
 
     var hasFailures: Bool {
