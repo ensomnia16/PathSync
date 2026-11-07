@@ -5,6 +5,7 @@ The provider's local mirror is the byte source for verification; this module
 cannot certify whether the provider has completed a remote upload.
 """
 import hashlib
+import base64
 import ctypes
 import errno
 import json
@@ -21,6 +22,19 @@ import unicodedata
 import uuid
 
 READ_TIMEOUT_SECONDS = 60
+class UnstableFileError(OSError):
+    """A bounded retry must start a fresh snapshot before any source move."""
+
+
+REBUILDABLE_DIRECTORIES = {'.venv', '.tox', '.nox', '__pycache__', '.pytest_cache',
+                           '.mypy_cache', '.ruff_cache', 'node_modules'}
+
+
+def disposable_cache(name, kind, rebuildable, whole_tree=False):
+    parts = Path(name).parts
+    return (whole_tree or any(part in rebuildable for part in parts[:-1])
+            or bool(parts and parts[-1] in rebuildable and kind in ('directory', 'symlink')))
+
 
 
 def validate_relative(value):
@@ -120,20 +134,22 @@ def retire_anchors(state, local, cloud, files, conflicts, prefixes, save_state):
     return remaining, receipt
 
 
-def _record(info):
+def _record(info, allow_symlinks=False):
     if stat.S_ISREG(info.st_mode):
         kind = 'file'
     elif stat.S_ISDIR(info.st_mode):
         kind = 'directory'
+    elif allow_symlinks and stat.S_ISLNK(info.st_mode):
+        kind = 'symlink'
     else:
         raise OSError('释放目标包含符号链接或特殊文件')
     # ctime can legitimately change when the whole target is renamed to staging.
-    return {'kind': kind, 'size': info.st_size if kind == 'file' else 0,
+    return {'kind': kind, 'size': info.st_size if kind in ('file', 'symlink') else 0,
             'identity': [info.st_dev, info.st_ino], 'mtime_ns': info.st_mtime_ns,
             'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid}
 
 
-def inventory(root, relative, allow_hardlinks=False):
+def inventory(root, relative, allow_hardlinks=False, rebuildable=(), whole_tree=False):
     target = safe_target(root, relative)
     result = {}
     device = target.lstat().st_dev
@@ -143,8 +159,11 @@ def inventory(root, relative, allow_hardlinks=False):
         info = path.lstat()
         if info.st_dev != device:
             raise OSError('释放目标包含其他挂载点，无法安全核查占用')
-        record = _record(info)
-        if record['kind'] == 'file' and not allow_hardlinks and info.st_nlink != 1:
+        kind = ('directory' if stat.S_ISDIR(info.st_mode) else
+                'symlink' if stat.S_ISLNK(info.st_mode) else 'file')
+        discardable = disposable_cache(name, kind, rebuildable, whole_tree)
+        record = _record(info, allow_symlinks=discardable)
+        if record['kind'] == 'file' and not allow_hardlinks and not discardable and info.st_nlink != 1:
             raise OSError('本地副本含硬链接，无法隔离外部写入，保留本地文件')
         result[name] = record
         if record['kind'] == 'directory':
@@ -222,7 +241,7 @@ def restore_target(staging, local, relative):
         os.close(destination)
 
 
-def secure_digest(root, relative, expected):
+def secure_digest(root, relative, expected, provider_retries=0):
     previous_alarm = signal.getsignal(signal.SIGALRM)
     def deadline(_signal, _frame):
         raise TimeoutError(f'释放核验读取超时：{relative}')
@@ -235,16 +254,19 @@ def secure_digest(root, relative, expected):
             if not before.st_mode & 0o444:
                 raise PermissionError(f'释放核验文件不可读：{relative}')
             if _record(before) != expected or expected['kind'] != 'file':
-                raise OSError(f'释放核验前文件已变化：{relative}')
+                raise UnstableFileError(f'释放核验前文件已变化：{relative}')
             digest = hashlib.sha256()
             count = 0
             for block in iter(lambda: f.read(1024 * 1024), b''):
                 count += len(block)
                 digest.update(block)
             after = os.fstat(f.fileno())
-            if (_record(after) != expected or before.st_ctime_ns != after.st_ctime_ns
-                    or count != expected['size']):
-                raise OSError(f'释放核验时文件已变化：{relative}')
+            if _record(after) != expected or count != expected['size']:
+                raise UnstableFileError(f'释放核验时文件已变化：{relative}')
+            if before.st_ctime_ns != after.st_ctime_ns:
+                if provider_retries:
+                    return secure_digest(root, relative, expected, provider_retries - 1)
+                raise UnstableFileError(f'释放核验时文件已变化：{relative}')
             return digest.hexdigest()
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -255,7 +277,7 @@ def preserved_metadata(root, relative, expected):
     fd = _open_regular(root, relative)
     try:
         if _record(os.fstat(fd)) != expected:
-            raise OSError('释放元数据核验期间目标已变化')
+            raise UnstableFileError('释放元数据核验期间目标已变化')
         libc = ctypes.CDLL(None, use_errno=True)
         list_attrs = libc.flistxattr
         get_attr = libc.fgetxattr
@@ -292,6 +314,8 @@ def preserved_metadata(root, relative, expected):
             if get_attr(*args) != size:
                 raise OSError('扩展属性读取时发生变化：' + name)
             attrs[name] = {'bytes': size, 'sha256': hashlib.sha256(value.raw).hexdigest()}
+            if name == 'com.apple.quarantine':
+                attrs[name]['value'] = base64.b64encode(value.raw).decode('ascii')
         if sys.platform == 'darwin':
             libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
             libc.acl_get_fd_np.restype = ctypes.c_void_p
@@ -351,19 +375,57 @@ def mirror_metadata(metadata, directory):
             'attributes': attributes}
 
 
-def verify_copies(local, relative, cloud, cloud_relative=None, expected=None, provider_mirror=False):
+def metadata_retained(left, right, directory, provider_mirror):
+    if not provider_mirror:
+        return left == right
+    source = mirror_metadata(left, directory)
+    retained = mirror_metadata(right, directory)
+    retained['attributes'] = {key: value for key, value in retained['attributes'].items()
+                              if key in source['attributes']}
+    # Exact source permissions and quarantine provenance are archived before
+    # release and restored when the same content is downloaded back to local.
+    if (source['mode'] & 0o700) & ~(retained['mode'] & 0o700) == 0:
+        retained['mode'] = source['mode']
+    quarantine = source['attributes'].get('com.apple.quarantine')
+    if quarantine and 'value' in quarantine and retained['attributes'].get('com.apple.quarantine'):
+        source['attributes'].pop('com.apple.quarantine')
+        retained['attributes'].pop('com.apple.quarantine')
+    return source == retained
+
+
+def write_quarantine(fd, value, create_only=False):
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == 'darwin':
+        flags = 0x2 if create_only else 0  # XATTR_CREATE never replaces another origin.
+        arguments = (fd, b'com.apple.quarantine', value, len(value), 0, flags)
+    else:
+        arguments = (fd, b'com.apple.quarantine', value, len(value), 1 if create_only else 0)
+    if libc.fsetxattr(*arguments) != 0:
+        raise OSError(ctypes.get_errno(), '无法保存文件来源记录')
+
+
+def verify_copies(local, relative, cloud, cloud_relative=None, expected=None,
+                  provider_mirror=False, rebuildable=(), repair_metadata=False):
     cloud_relative = cloud_relative or relative
-    source = inventory(local, relative)
-    remote = inventory(cloud, cloud_relative, allow_hardlinks=True)
+    rebuildable = tuple(sorted(set(rebuildable) & REBUILDABLE_DIRECTORIES)) if provider_mirror else ()
+    whole_tree = expected.get('whole_tree', False) if expected else Path(relative).name in rebuildable
+    source = inventory(local, relative, rebuildable=rebuildable, whole_tree=whole_tree)
+    remote = inventory(cloud, cloud_relative, allow_hardlinks=True,
+                       rebuildable=rebuildable, whole_tree=whole_tree)
     if expected is not None and source != expected['inventory']:
         raise OSError('释放暂存后的本地目录发生变化，已拒绝清理')
     hashes = {}
     metadata = {}
     remote_metadata = {}
-    file_count = sum(entry['kind'] == 'file' for entry in source.values())
+    discarded = {name for name, entry in source.items()
+                 if disposable_cache(name, entry['kind'], rebuildable, whole_tree)}
+    file_count = sum(entry['kind'] == 'file' for name, entry in source.items() if name not in discarded)
     last_progress = time.monotonic()
     print(f'PROGRESS\tRELEASE_VERIFY\t0\t{file_count}', flush=True)
     for name, entry in source.items():
+        if name in discarded:
+            metadata[name] = remote_metadata[name] = None
+            continue
         other = remote.get(name)
         disposable = (provider_mirror and other is None and entry['kind'] == 'file'
                       and Path(name or relative).name == '.DS_Store')
@@ -371,36 +433,99 @@ def verify_copies(local, relative, cloud, cloud_relative=None, expected=None, pr
             raise OSError(f'云端副本缺少文件或类型/大小不同：{name or relative}')
         left_metadata = preserved_metadata(local, _joined(relative, name), entry)
         right_metadata = None if disposable else preserved_metadata(cloud, _joined(cloud_relative, name), other)
-        comparable_left, comparable_right = left_metadata, right_metadata
-        if provider_mirror and not disposable:
-            comparable_left = mirror_metadata(left_metadata, entry['kind'] == 'directory')
-            comparable_right = mirror_metadata(right_metadata, entry['kind'] == 'directory')
-        if ((not disposable and comparable_left != comparable_right)
-                or (expected is not None and left_metadata != expected['metadata'][name])):
-            raise OSError(f'云端副本权限、资源分叉或扩展属性不同：{name or relative}')
-        metadata[name] = left_metadata
-        remote_metadata[name] = right_metadata
+        if expected is not None and left_metadata != expected['metadata'][name]:
+            raise OSError(f'本地文件元数据已变化：{name or relative}')
         if entry['kind'] == 'file':
             left = secure_digest(local, _joined(relative, name), entry)
-            right = left if disposable else secure_digest(cloud, _joined(cloud_relative, name), other)
+            right = left if disposable else secure_digest(cloud, _joined(cloud_relative, name), other,
+                                                           provider_retries=2 if provider_mirror else 0)
             if left != right or (expected is not None and left != expected['hashes'][name]):
                 raise OSError(f'云端副本内容不同或本地文件已变化：{name or relative}')
             hashes[name] = left
             if len(hashes) == file_count or time.monotonic() - last_progress >= 5:
                 print(f'PROGRESS\tRELEASE_VERIFY\t{len(hashes)}\t{file_count}', flush=True)
                 last_progress = time.monotonic()
-    if inventory(local, relative) != source:
-        raise OSError('释放核验期间本地目录发生变化')
+        origin = left_metadata['attributes'].get('com.apple.quarantine', {}).get('value')
+        if (repair_metadata and provider_mirror and not disposable and origin is not None
+                and 'com.apple.quarantine' not in right_metadata['attributes']):
+            path = _joined(cloud_relative, name)
+            fd = _open_regular(cloud, path)
+            try:
+                if _record(os.fstat(fd)) != other:
+                    raise UnstableFileError('补齐来源记录前云端文件已变化')
+                try:
+                    write_quarantine(fd, base64.b64decode(origin, validate=True), create_only=True)
+                except OSError as error:
+                    if error.errno != errno.EEXIST:
+                        raise
+            finally:
+                os.close(fd)
+            right_metadata = preserved_metadata(cloud, path, other)
+        if not disposable and not metadata_retained(left_metadata, right_metadata,
+                                                     entry['kind'] == 'directory', provider_mirror):
+            raise OSError(f'云端副本权限、资源分叉或扩展属性不同：{name or relative}')
+        metadata[name] = left_metadata
+        remote_metadata[name] = right_metadata
+    if inventory(local, relative, rebuildable=rebuildable, whole_tree=whole_tree) != source:
+        raise UnstableFileError('释放核验期间本地目录发生变化')
     # Reject disappearing/changing corresponding cloud entries, including links.
-    final_remote = inventory(cloud, cloud_relative, allow_hardlinks=True)
-    if any(final_remote.get(name) != remote.get(name) for name in source):
-        raise OSError('释放核验期间云端镜像发生变化')
+    final_remote = inventory(cloud, cloud_relative, allow_hardlinks=True,
+                             rebuildable=rebuildable, whole_tree=whole_tree)
+    if any(final_remote.get(name) != remote.get(name) for name in source if name not in discarded):
+        raise UnstableFileError('释放核验期间云端镜像发生变化')
     for name, entry in source.items():
-        if (preserved_metadata(local, _joined(relative, name), entry) != metadata[name]
-                or (remote_metadata[name] is not None and
-                    preserved_metadata(cloud, _joined(cloud_relative, name), remote[name]) != remote_metadata[name])):
-            raise OSError('释放核验期间扩展属性或权限发生变化')
-    return {'inventory': source, 'hashes': hashes, 'metadata': metadata}
+        if name in discarded:
+            continue
+        if preserved_metadata(local, _joined(relative, name), entry) != metadata[name]:
+            raise UnstableFileError('释放核验期间本地扩展属性或权限发生变化')
+        if remote_metadata[name] is not None:
+            final_metadata = preserved_metadata(cloud, _joined(cloud_relative, name), remote[name])
+            if not metadata_retained(metadata[name], final_metadata, entry['kind'] == 'directory', provider_mirror):
+                raise UnstableFileError('释放核验期间云端扩展属性或权限发生变化')
+    return {'inventory': source, 'hashes': hashes, 'metadata': metadata,
+            'rebuildable': rebuildable, 'whole_tree': whole_tree, 'discarded': sorted(discarded)}
+
+
+def released_file_metadata(local, state):
+    result = {}
+    index = Path(state).parent / (Path(state).name + '.cloud-only-releases')
+    if not index.is_dir():
+        return result
+    for pointer in sorted(index.glob('*.json'), key=lambda path: path.stat().st_mtime_ns):
+        receipt = json.loads(pointer.read_text(encoding='utf-8'))
+        if receipt.get('status') != 'released' or receipt.get('state') != str(state):
+            continue
+        relative = validate_relative(receipt['relative'])
+        if receipt.get('target') != str(safe_target(local, relative)):
+            continue
+        journal = json.loads(Path(receipt['journal']).read_text(encoding='utf-8'))
+        verification = journal['verification']
+        for name, content_hash in verification['hashes'].items():
+            metadata = verification['metadata'][name]
+            if metadata is not None:
+                result[_joined(relative, name)] = (content_hash, metadata)
+    return result
+
+
+def restore_file_metadata(local, relative, content_hash, archived):
+    record = archived.get(relative)
+    if record is None or record[0] != content_hash:
+        return
+    metadata = record[1]
+    fd = _open_regular(local, relative)
+    try:
+        if os.fstat(fd).st_uid != metadata['uid']:
+            raise OSError('恢复文件的所有者已变化，原始元数据仍保留在释放记录中')
+        current = _record(os.fstat(fd))
+        if secure_digest(local, relative, current) != content_hash:
+            raise OSError('恢复元数据前文件已变化，保留当前文件及原始元数据记录')
+        quarantine = metadata['attributes'].get('com.apple.quarantine', {}).get('value')
+        if quarantine is not None:
+            value = base64.b64decode(quarantine, validate=True)
+            write_quarantine(fd, value)
+        os.fchmod(fd, metadata['mode'])
+    finally:
+        os.close(fd)
 
 
 def _working_copy_root(local, cloud):
@@ -431,7 +556,7 @@ def _save_receipt(journal, state, receipt):
     atomic_json(index / (journal.parent.name + '.json'), recovery)
 
 
-def release_local(local, cloud, state, files, conflicts, relative, configured, save_state):
+def release_local(local, cloud, state, files, conflicts, relative, configured, save_state, rebuildable=()):
     relative = validate_relative(relative)
     if relative not in configured:
         raise ValueError('只能释放已精确配置为云端保留的子路径')
@@ -442,7 +567,14 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
     safe_target(cloud, relative)
     # All validation failures before staging leave state and both data trees untouched.
     original_state = Path(state).read_bytes() if Path(state).exists() else None
-    verified = verify_copies(local, relative, cloud, provider_mirror=True)
+    for attempt in range(3):
+        try:
+            verified = verify_copies(local, relative, cloud, provider_mirror=True, rebuildable=rebuildable, repair_metadata=True)
+            break
+        except UnstableFileError:
+            if attempt == 2:
+                raise
+            time.sleep(1)
     if (Path(state).read_bytes() if Path(state).exists() else None) != original_state:
         raise OSError('核验期间同步状态已变化，请重试；没有释放本地副本')
     staging = Path(tempfile.mkdtemp(prefix='.pathsync-local-release-', dir=local.parent))
@@ -461,14 +593,15 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
         receipt['status'] = 'baseline_retired'
         _save_receipt(journal, state, receipt)
         # Refuse source changes between the complete verification and rename.
-        if inventory(local, relative) != verified['inventory']:
+        if inventory(local, relative, rebuildable=verified['rebuildable'],
+                     whole_tree=verified['whole_tree']) != verified['inventory']:
             raise OSError('释放前本地副本发生变化，没有移动文件')
         stage_target(local, relative, staging, verified['inventory'][''])
         receipt['status'] = 'staged'
         _save_receipt(journal, state, receipt)
         try:
             ensure_not_in_use(payload)
-            verify_copies(staging, 'payload', cloud, relative, verified, provider_mirror=True)
+            verify_copies(staging, 'payload', cloud, relative, verified, provider_mirror=True, rebuildable=rebuildable, repair_metadata=True)
         except BaseException:
             if not os.path.lexists(target):
                 restore_target(staging, local, relative)
@@ -483,7 +616,7 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
         # retained FD/mmap/directory references and bytes immediately before
         # destruction, after the last journal write and any external changes.
         ensure_not_in_use(payload)
-        verify_copies(staging, 'payload', cloud, relative, verified, provider_mirror=True)
+        verify_copies(staging, 'payload', cloud, relative, verified, provider_mirror=True, rebuildable=rebuildable, repair_metadata=True)
         try:
             if payload.is_dir():
                 shutil.rmtree(payload)

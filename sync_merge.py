@@ -614,8 +614,12 @@ def copy_protected(args, source, destination, source_sig, destination_sig,
             args.backup_count += 1
             if backup_manifest(args, backup_id)['sha256'] != destination_hash:
                 raise OSError('目标文件在备份期间发生变化，已取消覆盖')
+    if destination_side == 'local' and destination_sig is None and not hasattr(args, 'released_metadata'):
+        args.released_metadata = cloud_only.released_file_metadata(args.local, args.state)
     copy_atomic(source, destination, source_sig, destination_sig,
                 source_hash, destination_hash)
+    if destination_side == 'local' and destination_sig is None:
+        cloud_only.restore_file_metadata(args.local, name, source_hash, args.released_metadata)
 
 
 def delete_protected(args, root, name, side):
@@ -1099,6 +1103,10 @@ def sync_files(args, local, cloud, files, conflicts):
                         else:
                             next_conflicts[name] = preserved_record(preserving, sidecar, primary)
                 if not args.dry_run:
+                    if previous is None:
+                        if not hasattr(args, 'released_metadata'):
+                            args.released_metadata = cloud_only.released_file_metadata(local, args.state)
+                        cloud_only.restore_file_metadata(local, name, hashes[0], args.released_metadata)
                     next_files[name] = aligned(name, local_sig, cloud_sig, hashes[0])
                     clear_pending(next_conflicts, name)
                 counts['unchanged'] += 1
@@ -1695,8 +1703,12 @@ def main():
         return 2 if failed else 0
     files, conflicts = load_state(args.state, local, cloud)
     if args.release_local is not None:
+        rebuildable = tuple(rule[:-1] for rule in args.exclude
+                            if rule.endswith('/') and rule[:-1] in cloud_only.REBUILDABLE_DIRECTORIES
+                            and args.shared_excludes)
         return cloud_only.release_local(local, cloud, args.state, files, conflicts,
-                                        args.release_local, args.cloud_only, save_state)
+                                        args.release_local, args.cloud_only, save_state,
+                                        rebuildable=rebuildable)
     for name in (args.resolve, args.review_newest, args.acknowledge):
         if name is not None:
             ensure_not_cloud_only(args, name)

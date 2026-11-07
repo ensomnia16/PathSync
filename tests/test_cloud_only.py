@@ -254,6 +254,140 @@ class CloudOnlyTests(unittest.TestCase):
         self.successful('--cloud-only=data', '--release-local=data')
         self.assertFalse((self.local / 'data').exists())
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS Finder metadata')
+    def test_release_accepts_additional_cloud_finder_metadata(self):
+        self.seed_pair()
+        target = self.cloud / 'data/result.json'
+        value = 'ffffffffffffffff' + '00' * 24
+        result = subprocess.run(['/usr/bin/xattr', '-wx', 'com.apple.FinderInfo',
+                                 value, str(target)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.successful('--cloud-only=data', '--release-local=data')
+        self.assertFalse((self.local / 'data').exists())
+        self.assertEqual(subprocess.check_output(['/usr/bin/xattr', '-px',
+                         'com.apple.FinderInfo', str(target)]).decode().split(),
+                         [value[i:i + 2].upper() for i in range(0, len(value), 2)])
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS Finder metadata')
+    def test_release_still_rejects_conflicting_finder_metadata(self):
+        self.seed_pair()
+        for root, value in ((self.local, '4142434445464748'), (self.cloud, '494a4b4c4d4e4f50')):
+            result = subprocess.run(['/usr/bin/xattr', '-wx', 'com.apple.FinderInfo',
+                                     value + '00' * 24, str(root / 'data/result.json')],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_release_rejected()
+
+    def test_release_disposes_only_explicitly_excluded_rebuildable_cache_links(self):
+        self.seed_pair()
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'important.txt').write_text('must stay')
+        (self.local / 'data/node_modules').symlink_to(outside, target_is_directory=True)
+        self.successful('--shared-excludes', '--exclude=node_modules/',
+                        '--cloud-only=data', '--release-local=data')
+        self.assertFalse((self.local / 'data').exists())
+        self.assertEqual((outside / 'important.txt').read_text(), 'must stay')
+
+    def test_release_does_not_treat_arbitrary_exclusions_as_disposable(self):
+        self.seed_pair()
+        private = self.local / 'data/private'
+        private.mkdir()
+        (private / 'unique.txt').write_text('keep this evidence')
+        self.assert_release_rejected('--shared-excludes', '--exclude=private/')
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS quarantine provenance')
+    def test_release_archives_original_permissions_and_quarantine_for_restore(self):
+        self.seed_pair()
+        local_file = self.local / 'data/result.json'
+        cloud_file = self.cloud / 'data/result.json'
+        local_file.chmod(0o644)
+        cloud_file.chmod(0o700)
+        original = '0082;12345678;PathSync fixture;local-origin'
+        retained = '0081;87654321;PathSync fixture;cloud-origin'
+        for path, value in ((local_file, original), (cloud_file, retained)):
+            subprocess.run(['/usr/bin/xattr', '-w', 'com.apple.quarantine', value, str(path)],
+                           check=True, capture_output=True)
+        self.successful('--cloud-only=data', '--release-local=data')
+        self.assertFalse(local_file.exists())
+        self.assertEqual(subprocess.check_output(['/usr/bin/xattr', '-p',
+                         'com.apple.quarantine', str(cloud_file)]).decode().strip(), retained)
+        self.successful()
+        self.assertEqual(stat.S_IMODE(local_file.stat().st_mode), 0o644)
+        self.assertEqual(subprocess.check_output(['/usr/bin/xattr', '-p',
+                         'com.apple.quarantine', str(local_file)]).decode().strip(), original)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS quarantine provenance')
+    def test_release_preserves_missing_cloud_quarantine_metadata(self):
+        self.seed_pair()
+        subprocess.run(['/usr/bin/xattr', '-w', 'com.apple.quarantine',
+                        '0082;12345678;PathSync fixture;origin',
+                        str(self.local / 'data/result.json')],
+                       check=True, capture_output=True)
+        self.successful('--cloud-only=data', '--release-local=data')
+        self.assertEqual(subprocess.check_output(['/usr/bin/xattr', '-p', 'com.apple.quarantine',
+                         str(self.cloud / 'data/result.json')]).decode().strip(),
+                         '0082;12345678;PathSync fixture;origin')
+
+    def test_release_retries_a_transient_snapshot_change_before_staging(self):
+        self.seed_pair()
+        verify = cloud_only.verify_copies
+        attempts = 0
+
+        def transient(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise cloud_only.UnstableFileError('provider updated metadata while downloading')
+            return verify(*args, **kwargs)
+
+        with mock.patch.object(cloud_only, 'verify_copies', side_effect=transient), \
+                mock.patch.object(cloud_only.time, 'sleep'):
+            self.release_direct()
+        self.assertEqual(attempts, 4)  # fresh preflight plus two post-staging checks
+        self.assertFalse((self.local / 'data').exists())
+
+    def test_cloud_content_read_rechecks_provider_ctime_changes(self):
+        self.seed_pair()
+        target = self.cloud / 'data/result.json'
+        expected = cloud_only._record(target.stat())
+        real_fstat = os.fstat
+
+        def changed_ctime(fd):
+            info = real_fstat(fd)
+            changed_ctime.calls += 1
+            if changed_ctime.calls == 2:
+                from types import SimpleNamespace
+                fields = ('st_mode', 'st_size', 'st_dev', 'st_ino', 'st_mtime_ns',
+                          'st_uid', 'st_gid', 'st_ctime_ns')
+                values = {key: getattr(info, key) for key in fields}
+                values['st_ctime_ns'] += 1
+                return SimpleNamespace(**values)
+            return info
+
+        changed_ctime.calls = 0
+        with mock.patch.object(cloud_only.os, 'fstat', side_effect=changed_ctime):
+            actual = cloud_only.secure_digest(self.cloud, 'data/result.json', expected,
+                                               provider_retries=2)
+        self.assertEqual(actual, sync_merge.digest(target))
+        self.assertEqual(changed_ctime.calls, 4)
+        changed_ctime.calls = 0
+        with mock.patch.object(cloud_only.os, 'fstat', side_effect=changed_ctime):
+            with self.assertRaises(cloud_only.UnstableFileError):
+                cloud_only.secure_digest(self.cloud, 'data/result.json', expected)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS quarantine provenance')
+    def test_mismatched_content_does_not_change_cloud_origin(self):
+        self.seed_pair()
+        subprocess.run(['/usr/bin/xattr', '-w', 'com.apple.quarantine',
+                        '0082;12345678;PathSync fixture;origin',
+                        str(self.local / 'data/result.json')], check=True, capture_output=True)
+        (self.cloud / 'data/result.json').write_text('different content')
+        self.assert_release_rejected()
+        result = subprocess.run(['/usr/bin/xattr', '-p', 'com.apple.quarantine',
+                                 str(self.cloud / 'data/result.json')], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+
     def test_release_refuses_executable_bit_differences_despite_equal_file_bytes(self):
         self.seed_pair()
         (self.local / 'data/result.json').chmod(0o755)
