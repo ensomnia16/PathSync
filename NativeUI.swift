@@ -1228,6 +1228,18 @@ struct ContentView: View {
 
             Section {
                 Toggle(t("checkCloud"), isOn: $model.config.checkCloudBeforeSync)
+                LabeledContent(model.config.language == "en" ? "OneDrive metadata index" : "OneDrive 元数据索引") {
+                    HStack {
+                        Text(model.oneDriveConnected ? (model.config.language == "en" ? "Connected" : "已连接") : (model.config.language == "en" ? "Not connected" : "尚未连接"))
+                            .foregroundStyle(.secondary)
+                        Button(model.config.language == "en" ? "Connect read-only…" : "连接只读查询…") { model.connectOneDrive() }
+                            .disabled(model.oneDriveConnecting || model.busy)
+                        if model.oneDriveConnecting { ProgressView().controlSize(.small) }
+                    }
+                }
+                if let error = model.oneDriveConnectionError { Text(error).foregroundStyle(.orange) }
+                Text(model.config.language == "en" ? "First connection uses rclone’s Microsoft OAuth app with Files.Read and offline_access. Credentials stay in this Mac’s Keychain. Background sync refreshes silently; it never opens a browser." : "首次连接通过 rclone 的微软授权应用申请 Files.Read 及 offline_access。登录凭据仅存这台 Mac 的钥匙串。后续后台自动续期，不打开浏览器。")
+                    .font(.caption).foregroundStyle(.secondary)
             } footer: {
                 Text(t("checkCloudHint"))
             }

@@ -23,13 +23,15 @@ import uuid
 sys.dont_write_bytecode = True
 from sync_tree import IGNORE_FILE, ExcludeRules, excluded_relative, load_exclude_rules
 import cloud_only
+import graph_index
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
 FILE_READ_TIMEOUT_SECONDS = 60
+ALLOW_ONLINE_DOWNLOADS = False
 
 
-def enable_cloud_materialization():
+def enable_cloud_materialization(enabled=True):
     """Opt this real sync process into reading macOS File Provider placeholders.
 
     launchd jobs inherit the system default (off), unlike GUI-launched jobs.
@@ -43,10 +45,10 @@ def enable_cloud_materialization():
     set_policy = library.setiopolicy_np
     set_policy.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_int)
     set_policy.restype = ctypes.c_int
-    # IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, ON
-    if set_policy(3, 0, 2) != 0:
+    # IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, process scope, ON=2 / OFF=1
+    if set_policy(3, 0, 2 if enabled else 1) != 0:
         error = ctypes.get_errno()
-        raise OSError(error, '无法启用云端仅在线文件的按需下载：' + os.strerror(error))
+        raise OSError(error, '无法设置云端文件按需下载策略：' + os.strerror(error))
 
 
 def is_review(record):
@@ -148,6 +150,8 @@ def unchanged_metadata(current, previous, cloud=False):
 
 
 def digest(path):
+    if not ALLOW_ONLINE_DOWNLOADS and is_dataless(path):
+        raise OSError('云端内容待核验：仅在线文件未下载；保留文件和基线，请先在 OneDrive 下载所需文件')
     hasher = hashlib.sha256()
     previous_alarm = signal.getsignal(signal.SIGALRM)
 
@@ -840,6 +844,16 @@ def sync_files(args, local, cloud, files, conflicts):
     symlinks = set()
     local_names = scan(local, args, errors, symlinks)
     cloud_names = scan(cloud, args, errors, symlinks)
+    index = getattr(args, 'graph_index', None)
+    if index:
+        # Abort before any mutation when the File Provider mirror lags the server.
+        for name, remote in index.entries.items():
+            if excluded_path(name, args):
+                continue
+            mirror = signature(safe_path(cloud, name))
+            if (mirror is None or mirror[0] != remote['size'] or remote['mtime'] is None
+                    or abs(mirror[1] - remote['mtime']) >= 1_000_000_000):
+                raise OSError('OneDrive 本地目录尚未跟上服务器元数据，请等待 OneDrive 更新后重试：' + name)
     names = local_names | cloud_names | set(active_files) | set(active_conflicts)
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
@@ -989,12 +1003,39 @@ def sync_files(args, local, cloud, files, conflicts):
 
     import_names = sorted(new_cloud_only, key=import_priority)
 
+    repaired_metadata = {}
+
+    def locally_verified_anchor(name):
+        record = files.get(name)
+        if not record or not record.get('anchorHash') or name in conflicts:
+            return False
+        local_file, cloud_file = local / name, cloud / name
+        try:
+            local_sig, cloud_sig = signature(local_file), signature(cloud_file)
+            if not (unchanged_metadata(local_sig, record.get('local'))
+                    and unchanged_metadata(cloud_sig, record.get('cloud'), cloud=True)):
+                return False
+            before_ctime = change_time(local_file)
+            if (before_ctime == record.get('localCtime')
+                    or repaired_metadata.get(name) == before_ctime):
+                return True
+            matched = (digest(safe_path(local, name)) == record['anchorHash']
+                       and signature(local_file) == local_sig
+                       and change_time(local_file) == before_ctime)
+            if matched:
+                repaired_metadata[name] = before_ctime
+            return matched
+        except OSError:
+            return False
+
     def needs_cloud_content(name):
         record = files.get(name)
         local_file, cloud_file = local / name, cloud / name
         try:
             if record is None or name in conflicts:
                 return True
+            if locally_verified_anchor(name):
+                return False
             return not (unchanged_metadata(signature(local_file), record.get('local'))
                         and unchanged_metadata(signature(cloud_file), record.get('cloud'), cloud=True)
                         and record.get('localCtime') == change_time(local_file))
@@ -1002,7 +1043,7 @@ def sync_files(args, local, cloud, files, conflicts):
             return True
 
     online_only = []
-    if args.hydrate_online_only and not args.dry_run:
+    if args.hydrate_online_only and args.download_online_content and not args.dry_run:
         online_only = sorted((name for name in cloud_names
                               if name not in tree_record_names and not blocked(name)
                               and is_dataless(cloud / name) and needs_cloud_content(name)),
@@ -1012,7 +1053,7 @@ def sync_files(args, local, cloud, files, conflicts):
         counts['online_only'] = len(online_only)
     # A preview never downloads placeholders; it reports them instead.
     ordered_names = sorted(names - new_cloud_only) + import_names
-    prefetch = CloudPrefetch(cloud, [] if args.dry_run else import_names, online_only,
+    prefetch = CloudPrefetch(cloud, [] if args.dry_run or not args.download_online_content else import_names, online_only,
                              order=ordered_names)
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
@@ -1078,7 +1119,25 @@ def sync_files(args, local, cloud, files, conflicts):
             if review and (local_sig is None or cloud_sig is None):
                 raise OSError('待合并的主文件缺失；请先人工检查，未覆盖任何一侧')
 
-            if (not pending and previous and local_sig is not None and cloud_sig is not None
+            if index and not pending and not review and local_sig is not None and cloud_sig is not None:
+                # Equality only; overwrites and deletion anchors retain SHA256 checks.
+                sha = index.verified_common(name, safe_path(local, name), cloud_sig)
+                if sha:
+                    if signature(local_file) != local_sig or signature(cloud_file) != cloud_sig:
+                        raise OSError('文件在云端哈希核验期间发生变化，请重试')
+                    if not args.dry_run:
+                        next_files[name] = aligned(name, local_sig, cloud_sig, sha)
+                    counts['unchanged'] += 1
+                    continue
+
+            if (not args.dry_run and not pending and previous
+                    and index is None and locally_verified_anchor(name)):
+                if name in repaired_metadata:
+                    next_files[name] = {**previous, 'localCtime': repaired_metadata[name]}
+                counts['unchanged'] += 1
+                continue
+
+            if (index is None and not pending and previous and local_sig is not None and cloud_sig is not None
                     and unchanged_metadata(local_sig, previous.get('local'))
                     and unchanged_metadata(cloud_sig, previous.get('cloud'), cloud=True)
                     and previous.get('localCtime') == change_time(local_file)):
@@ -1097,6 +1156,8 @@ def sync_files(args, local, cloud, files, conflicts):
                 counts['online_only'] += 1
                 continue
 
+            if not args.download_online_content and cloud_sig is not None and is_dataless(cloud_file):
+                counts['online_only'] += 1
             print(f'PROGRESS\tFILE\t{name}', flush=True)
             local_file = safe_path(local, name)
             cloud_file = safe_path(cloud, name)
@@ -1652,8 +1713,12 @@ def main():
                         help='verify the cloud mirror then release an exactly configured local working copy')
     parser.add_argument('--retire-cloud-only', action='store_true',
                         help='retire selected local baselines only, without scanning or syncing data')
+    parser.add_argument('--download-online-content', action='store_true',
+                        help='explicitly allow reading and downloading cloud placeholders; default never materializes them')
     parser.add_argument('--hydrate-online-only', action='store_true',
                         help='download online-only cloud files the merge must read before comparing')
+    parser.add_argument('--graph-auth-helper', type=Path)
+    parser.add_argument('--onedrive-root', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--plan-json', action='store_true',
                         help='with --dry-run, also print the planned actions as one JSON line')
@@ -1707,8 +1772,9 @@ def main():
         print('RETIRED_CLOUD_ONLY\tpaths=' + str(len(args.cloud_only)) +
               '\treceipt=' + (str(receipt) if receipt else 'none'))
         return 0
-    if not args.dry_run:
-        enable_cloud_materialization()
+    global ALLOW_ONLINE_DOWNLOADS
+    ALLOW_ONLINE_DOWNLOADS = args.download_online_content and not args.dry_run
+    enable_cloud_materialization(ALLOW_ONLINE_DOWNLOADS)
     local = args.local.resolve()
     cloud = args.cloud.resolve()
     args.cloud_only = cloud_only.validate_paths(local, cloud, args.cloud_only)
@@ -1716,8 +1782,8 @@ def main():
     args.backup_count = 0
     cloud_ignore = cloud / IGNORE_FILE
     if not args.shared_excludes and is_dataless(cloud_ignore):
-        if args.dry_run:
-            raise OSError(f'{cloud_ignore}: 规则文件仅在线，请先下载后再预览')
+        if args.dry_run or not args.download_online_content:
+            raise OSError(f'{cloud_ignore}: 规则文件仅在线，请先下载后再同步或预览')
         error = CloudPrefetch.hydrate(cloud_ignore)
         if error:
             raise OSError(f'{cloud_ignore}: {error}')
@@ -1757,7 +1823,31 @@ def main():
         return resolve_conflict(args, local, cloud, files, conflicts)
     if args.acknowledge:
         return acknowledge_review(args, local, cloud, files, conflicts)
-    return sync_files(args, local, cloud, files, conflicts)
+    args.graph_index = None
+    if not args.graph_auth_helper:
+        return sync_files(args, local, cloud, files, conflicts)
+    if not args.onedrive_root:
+        raise ValueError('云端索引需要 OneDrive 根目录')
+    remote = cloud.relative_to(args.onedrive_root.resolve()).as_posix()
+    auth = graph_index.credentials(args.graph_auth_helper)
+    def progress(*fields):
+        print('PROGRESS\tGRAPH\t' + '\t'.join(fields), flush=True)
+    client = graph_index.GraphClient(auth['access_token'], progress)
+    index = None
+    try:
+        index = graph_index.GraphIndex(args.state.with_suffix('.index.sqlite'), local, cloud,
+                                      auth['drive_id'], remote, client.get, progress)
+        index.refresh()
+        args.graph_index = index
+        result = sync_files(args, local, cloud, files, conflicts)
+        index.flush_hashes()
+        print('GRAPH_INDEX\t' + json.dumps({**index.stats, 'requests': client.requests,
+              'wire_bytes': client.wire_bytes}, ensure_ascii=False))
+        return result
+    finally:
+        if index:
+            index.close()
+        client.close()
 
 
 if __name__ == '__main__':
