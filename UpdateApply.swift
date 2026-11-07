@@ -41,6 +41,19 @@ guard fm.fileExists(atPath: staged.path), fm.fileExists(atPath: installed.path) 
 }
 
 do {
+    #if !UPDATE_APPLY_TESTS
+    let verifier = Process()
+    verifier.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+    verifier.arguments = ["--verify", "--deep", "--strict", "-R",
+                          pathSyncCodeSigningRequirement(), staged.path]
+    verifier.standardOutput = FileHandle.nullDevice
+    verifier.standardError = FileHandle.nullDevice
+    try verifier.run()
+    verifier.waitUntilExit()
+    guard verifier.terminationStatus == 0 else {
+        fail("更新包的应用签名身份不匹配，未替换当前应用。")
+    }
+    #endif
     try fm.createDirectory(at: backups, withIntermediateDirectories: true)
     if fm.fileExists(atPath: previous.path) { try fm.removeItem(at: previous) }
     try fm.moveItem(at: installed, to: previous)

@@ -235,6 +235,25 @@ class CloudOnlyTests(unittest.TestCase):
         self.assert_release_rejected()
         self.assertEqual(subprocess.check_output(['/usr/bin/xattr', '-p', 'com.pathsync.test-evidence', str(target)]), before)
 
+    def test_release_accepts_private_provider_directories_and_disposable_finder_cache(self):
+        self.seed_pair()
+        (self.local / 'data').chmod(0o755)
+        (self.cloud / 'data').chmod(0o700)
+        self.write(self.local, 'data/.DS_Store', 'rebuildable Finder cache')
+        self.successful('--cloud-only=data', '--release-local=data')
+        self.assertFalse((self.local / 'data').exists())
+        self.assertTrue((self.cloud / 'data/result.json').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS per-device metadata')
+    def test_release_accepts_device_last_use_attribute_differences(self):
+        self.seed_pair()
+        result = subprocess.run(['/usr/bin/xattr', '-w', 'com.apple.lastuseddate#PS',
+                                 'local last use', str(self.local / 'data/result.json')],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.successful('--cloud-only=data', '--release-local=data')
+        self.assertFalse((self.local / 'data').exists())
+
     def test_release_refuses_executable_bit_differences_despite_equal_file_bytes(self):
         self.seed_pair()
         (self.local / 'data/result.json').chmod(0o755)

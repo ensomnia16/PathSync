@@ -95,7 +95,7 @@ func prepareUpdate(_ release: AppRelease, installedBundle: URL,
                         .appendingPathComponent("UpdateApply") else {
                     throw updateError("安装包应用信息不匹配，或当前应用目录不可写。")
                 }
-                try runUpdateTool("/usr/bin/codesign", ["--verify", "--deep", "--strict", staged.path])
+                try runUpdateTool("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", pathSyncCodeSigningRequirement(), staged.path])
                 try runUpdateTool("/usr/bin/lipo", ["-verify_arch", currentArchitecture(), executable.path])
                 let helper = root.appendingPathComponent("UpdateApply")
                 try fm.copyItem(at: packagedHelper, to: helper)

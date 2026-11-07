@@ -33,10 +33,15 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/PathSyncDrawerCompact.ic
 
 architecture="$(uname -m)"
 swiftc -module-cache-path "$module_cache" -target "$architecture-apple-macosx13.0" -parse-as-library -O \
-    -o "$app/Contents/MacOS/PathSync" "$source_dir/ResearchSync.swift" "$source_dir/SyncHistory.swift" "$source_dir/SyncPreview.swift" "$source_dir/Shortcuts.swift" "$source_dir/ApplicationIdentity.swift" "$source_dir/CloudOnlyStorage.swift" "$source_dir/StorageAnalysisView.swift" "$source_dir/MenuBarState.swift" "$source_dir/MenuBarController.swift" "$source_dir/HistoryPage.swift" "$source_dir/SyncUI.swift" "$source_dir/NativeUI.swift" "$source_dir/SyncNotifications.swift" "$source_dir/UpdateChecker.swift" "$source_dir/UpdateInstaller.swift" "$source_dir/OneDriveRules.swift" "$source_dir/LatexDiff.swift" "$source_dir/CodexSummary.swift"
+    -o "$app/Contents/MacOS/PathSync" "$source_dir/ResearchSync.swift" "$source_dir/SyncHistory.swift" "$source_dir/SyncPreview.swift" "$source_dir/Shortcuts.swift" "$source_dir/ApplicationIdentity.swift" "$source_dir/CodeSigningIdentity.swift" "$source_dir/CloudOnlyStorage.swift" "$source_dir/StorageAnalysisView.swift" "$source_dir/MenuBarState.swift" "$source_dir/MenuBarController.swift" "$source_dir/HistoryPage.swift" "$source_dir/SyncUI.swift" "$source_dir/NativeUI.swift" "$source_dir/SyncNotifications.swift" "$source_dir/UpdateChecker.swift" "$source_dir/UpdateInstaller.swift" "$source_dir/OneDriveRules.swift" "$source_dir/LatexDiff.swift" "$source_dir/CodexSummary.swift"
+cat "$source_dir/CodeSigningIdentity.swift" "$source_dir/UpdateApply.swift" > "$output_dir/UpdateApplyMain.swift"
 swiftc -module-cache-path "$module_cache" -target "$architecture-apple-macosx13.0" -O \
-    -o "$app/Contents/Resources/UpdateApply" "$source_dir/UpdateApply.swift"
+    -o "$app/Contents/Resources/UpdateApply" "$output_dir/UpdateApplyMain.swift"
 ln -s PathSync "$app/Contents/MacOS/ResearchSync"
-codesign --force --deep --sign - "$app"
+case "${PATHSYNC_SIGNING_MODE:-stable}" in
+    stable) /usr/bin/python3 "$source_dir/tools/sign-app.py" "$app" ;;
+    adhoc) /usr/bin/python3 "$source_dir/tools/sign-app.py" --adhoc "$app" ;;
+    *) print -u2 "PATHSYNC_SIGNING_MODE must be stable or adhoc"; exit 1 ;;
+esac
 codesign --verify --deep --strict "$app"
 print "$app"

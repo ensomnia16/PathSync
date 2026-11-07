@@ -342,7 +342,16 @@ def _joined(prefix, name):
     return prefix + '/' + name if name else prefix
 
 
-def verify_copies(local, relative, cloud, cloud_relative=None, expected=None):
+def mirror_metadata(metadata, directory):
+    # File Provider stores per-device access/last-use records. Directory group
+    # and other permissions may be narrowed to 0700 in its private mirror.
+    attributes = {key: value for key, value in metadata['attributes'].items()
+                  if key not in ('com.apple.macl', 'com.apple.lastuseddate#PS')}
+    return {**metadata, 'mode': metadata['mode'] & ~0o077 if directory else metadata['mode'],
+            'attributes': attributes}
+
+
+def verify_copies(local, relative, cloud, cloud_relative=None, expected=None, provider_mirror=False):
     cloud_relative = cloud_relative or relative
     source = inventory(local, relative)
     remote = inventory(cloud, cloud_relative, allow_hardlinks=True)
@@ -350,21 +359,30 @@ def verify_copies(local, relative, cloud, cloud_relative=None, expected=None):
         raise OSError('释放暂存后的本地目录发生变化，已拒绝清理')
     hashes = {}
     metadata = {}
+    remote_metadata = {}
     file_count = sum(entry['kind'] == 'file' for entry in source.values())
     last_progress = time.monotonic()
     print(f'PROGRESS\tRELEASE_VERIFY\t0\t{file_count}', flush=True)
     for name, entry in source.items():
         other = remote.get(name)
-        if other is None or (entry['kind'], entry['size']) != (other['kind'], other['size']):
+        disposable = (provider_mirror and other is None and entry['kind'] == 'file'
+                      and Path(name or relative).name == '.DS_Store')
+        if not disposable and (other is None or (entry['kind'], entry['size']) != (other['kind'], other['size'])):
             raise OSError(f'云端副本缺少文件或类型/大小不同：{name or relative}')
         left_metadata = preserved_metadata(local, _joined(relative, name), entry)
-        right_metadata = preserved_metadata(cloud, _joined(cloud_relative, name), other)
-        if left_metadata != right_metadata or (expected is not None and left_metadata != expected['metadata'][name]):
+        right_metadata = None if disposable else preserved_metadata(cloud, _joined(cloud_relative, name), other)
+        comparable_left, comparable_right = left_metadata, right_metadata
+        if provider_mirror and not disposable:
+            comparable_left = mirror_metadata(left_metadata, entry['kind'] == 'directory')
+            comparable_right = mirror_metadata(right_metadata, entry['kind'] == 'directory')
+        if ((not disposable and comparable_left != comparable_right)
+                or (expected is not None and left_metadata != expected['metadata'][name])):
             raise OSError(f'云端副本权限、资源分叉或扩展属性不同：{name or relative}')
         metadata[name] = left_metadata
+        remote_metadata[name] = right_metadata
         if entry['kind'] == 'file':
             left = secure_digest(local, _joined(relative, name), entry)
-            right = secure_digest(cloud, _joined(cloud_relative, name), other)
+            right = left if disposable else secure_digest(cloud, _joined(cloud_relative, name), other)
             if left != right or (expected is not None and left != expected['hashes'][name]):
                 raise OSError(f'云端副本内容不同或本地文件已变化：{name or relative}')
             hashes[name] = left
@@ -375,11 +393,12 @@ def verify_copies(local, relative, cloud, cloud_relative=None, expected=None):
         raise OSError('释放核验期间本地目录发生变化')
     # Reject disappearing/changing corresponding cloud entries, including links.
     final_remote = inventory(cloud, cloud_relative, allow_hardlinks=True)
-    if any(final_remote.get(name) != remote[name] for name in source):
+    if any(final_remote.get(name) != remote.get(name) for name in source):
         raise OSError('释放核验期间云端镜像发生变化')
     for name, entry in source.items():
         if (preserved_metadata(local, _joined(relative, name), entry) != metadata[name]
-                or preserved_metadata(cloud, _joined(cloud_relative, name), remote[name]) != metadata[name]):
+                or (remote_metadata[name] is not None and
+                    preserved_metadata(cloud, _joined(cloud_relative, name), remote[name]) != remote_metadata[name])):
             raise OSError('释放核验期间扩展属性或权限发生变化')
     return {'inventory': source, 'hashes': hashes, 'metadata': metadata}
 
@@ -423,7 +442,7 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
     safe_target(cloud, relative)
     # All validation failures before staging leave state and both data trees untouched.
     original_state = Path(state).read_bytes() if Path(state).exists() else None
-    verified = verify_copies(local, relative, cloud)
+    verified = verify_copies(local, relative, cloud, provider_mirror=True)
     if (Path(state).read_bytes() if Path(state).exists() else None) != original_state:
         raise OSError('核验期间同步状态已变化，请重试；没有释放本地副本')
     staging = Path(tempfile.mkdtemp(prefix='.pathsync-local-release-', dir=local.parent))
@@ -449,7 +468,7 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
         _save_receipt(journal, state, receipt)
         try:
             ensure_not_in_use(payload)
-            verify_copies(staging, 'payload', cloud, relative, verified)
+            verify_copies(staging, 'payload', cloud, relative, verified, provider_mirror=True)
         except BaseException:
             if not os.path.lexists(target):
                 restore_target(staging, local, relative)
@@ -464,7 +483,7 @@ def release_local(local, cloud, state, files, conflicts, relative, configured, s
         # retained FD/mmap/directory references and bytes immediately before
         # destruction, after the last journal write and any external changes.
         ensure_not_in_use(payload)
-        verify_copies(staging, 'payload', cloud, relative, verified)
+        verify_copies(staging, 'payload', cloud, relative, verified, provider_mirror=True)
         try:
             if payload.is_dir():
                 shutil.rmtree(payload)
