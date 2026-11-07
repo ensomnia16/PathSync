@@ -33,7 +33,7 @@ CLI `--download-online-content` opts into content downloads; previews never do.
 Thus zero downloads is guaranteed for the comparison path, not for future real
 file transfers initiated by the user or by OneDrive itself.
 
-## Validation scope for 2.18.0
+## Validation scope for 2.18.1
 
 Persistent cursor/cache, failed-page rollback, expired cursors, folder moves and
 deletions, changed local fingerprints, unsafe paths, equal placeholders, and stale
@@ -46,6 +46,14 @@ The prior DeepSight metadata benchmark measured a 62-page initial query at
 223.206 seconds; two unchanged incremental checks took 1.450 and 1.372 seconds,
 with one Graph request and zero content reads each. These are reference
 measurements of the algorithm before this application integration.
+
+The 2.18.1 follow-up removes NSFileCoordinator's implicit materialization from
+root exclusion-policy reads. Mac mini sampling reproduced a >180s wait inside its
+File Provider access claim despite a resident 1,331-byte policy file. Root policy
+reads now disable materialization on the reader thread, reject dataless files,
+verify stable inode/size/mtime/ctime snapshots, and return within a 20s deadline.
+A timed-out reader holds one slot until it finishes, preventing accumulating
+blocked readers. The central OneDrive root policy remains the only authority.
 
 Build requires Go 1.26+ for the pinned OAuth helper dependency, plus macOS command
 line tools. No rclone installation is needed on end-user Macs; the signed app
