@@ -16,10 +16,13 @@ struct OneDriveRules {
     private static let maximumBytes = 1_000_000
 
     private enum Failure: LocalizedError {
-        case rootUnavailable, invalidDocument, oversized, unresolvedVersion([String]), legacyFilters, missingPolicy, missingPair(String)
+        case timedOut, onlineOnly, changed, rootUnavailable, invalidDocument, oversized, unresolvedVersion([String]), legacyFilters, missingPolicy, missingPair(String)
 
         var errorDescription: String? {
             switch self {
+            case .timedOut: return "OneDrive 根规则读取超过 20 秒或仍在等待，已暂停同步；未改用本地规则。"
+            case .onlineOnly: return "OneDrive 根目录的 PathSync-Exclusions.json 仅在线，请先在 OneDrive 下载这一个规则文件；本次未下载数据文件。"
+            case .changed: return "OneDrive 根规则在读取期间发生变化，请重试；本次未执行同步。"
             case .rootUnavailable: return "OneDrive 规则目录不可用，已暂停读取同步规则。"
             case .invalidDocument: return "OneDrive 排除规则文件格式无效，已暂停使用。"
             case .oversized: return "OneDrive 排除规则过大，无法安全读取或传递。"
@@ -111,6 +114,14 @@ struct OneDriveRules {
 
     /// Only regular, bounded root configuration files are accepted. A missing
     /// document is reported to the caller, never replaced from local rules.
+    private static func sameFile(_ a: stat, _ b: stat) -> Bool {
+        a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size
+            && a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec
+            && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec
+            && a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec
+            && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
+    }
+
     private static func boundedData(at url: URL) throws -> Data? {
         // Check File Provider metadata before opening. This limits content reads
         // (including any provider hydration) to small rule documents.
@@ -124,6 +135,8 @@ struct OneDriveRules {
             throw Failure.invalidDocument
         }
         guard info.st_size <= maximumBytes else { throw Failure.oversized }
+        guard info.st_flags & UInt32(SF_DATALESS) == 0 else { throw Failure.onlineOnly }
+        let observed = info
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else {
             // A file observed above must not disappear or change type before open.
@@ -137,12 +150,17 @@ struct OneDriveRules {
             throw Failure.invalidDocument
         }
         guard info.st_size <= maximumBytes else { throw Failure.oversized }
+        guard sameFile(observed, info) else { throw Failure.changed }
+        let opened = info
         var data = Data()
         while let chunk = try file.read(upToCount: min(64 * 1024, maximumBytes + 1 - data.count)),
               !chunk.isEmpty {
             data.append(chunk)
             guard data.count <= maximumBytes else { throw Failure.oversized }
         }
+        var current = stat()
+        guard fstat(descriptor, &info) == 0, lstat(url.path, &current) == 0,
+              sameFile(opened, info), sameFile(opened, current) else { throw Failure.changed }
         return data
     }
 
@@ -186,7 +204,28 @@ struct OneDriveRules {
 
     /// Every preview and sync reads this one document. Local cached fields,
     /// .pathsyncignore files and previous configuration snapshots are not inputs.
+    private static let readSlot = DispatchSemaphore(value: 1)
+
     static func read(_ original: SyncConfig, requiring pairIDs: Set<UUID>? = nil) throws
+        -> (config: SyncConfig, managed: Set<UUID>) {
+        guard readSlot.wait(timeout: .now()) == .success else { throw Failure.timedOut }
+        let done = DispatchSemaphore(value: 0)
+        var result: Result<(config: SyncConfig, managed: Set<UUID>), Error>?
+        DispatchQueue.global(qos: .utility).async {
+            result = Result {
+                let previous = getiopolicy_np(3, 1)
+                guard setiopolicy_np(3, 1, 1) == 0 else { throw Failure.rootUnavailable }
+                defer { if previous >= 0 { _ = setiopolicy_np(3, 1, previous) } }
+                return try readAvailable(original, requiring: pairIDs)
+            }
+            readSlot.signal()
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 20) == .success else { throw Failure.timedOut }
+        return try result!.get()
+    }
+
+    private static func readAvailable(_ original: SyncConfig, requiring pairIDs: Set<UUID>?) throws
         -> (config: SyncConfig, managed: Set<UUID>) {
         let required = pairIDs ?? Set(original.pairs.filter { $0.enabled }.map(\.id))
         guard required.isSubset(of: Set(original.pairs.map(\.id))) else { throw Failure.missingPolicy }
@@ -210,15 +249,10 @@ struct OneDriveRules {
             }
         }
         let url = try sharedURL(config)
-        let coordinator = NSFileCoordinator(filePresenter: nil)
-        var coordinatorError: NSError?
-        var result: Result<Document?, Error>?
-        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinatorError) { location in
-            result = Result { try load(at: location) }
-        }
-        if let coordinatorError { throw coordinatorError }
-        guard let result else { throw Failure.rootUnavailable }
-        guard let document = try result.get() else { throw Failure.missingPolicy }
+        // NSFileCoordinator can ask File Provider to materialize a file before
+        // invoking its accessor, even when the rule document is already resident.
+        // Read this small regular file directly with NOFOLLOW and stable snapshots.
+        guard let document = try load(at: url) else { throw Failure.missingPolicy }
         for pair in pairs where required.contains(config.pairs[pair.index].id) {
             guard document.pairs[pair.key] != nil else {
                 throw Failure.missingPair(config.pairs[pair.index].name)

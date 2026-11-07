@@ -1,11 +1,12 @@
 import AppKit
 
 enum SyncMenuBarState: String, CaseIterable {
-    case disabled, syncing, enabled
+    case disabled, syncing, attention, enabled
 
     static func resolve(scheduleEnabled: Bool, hasEnabledPairs: Bool,
-                        uiBusy: Bool, workerRunning: Bool) -> Self {
+                        uiBusy: Bool, workerRunning: Bool, hasIssues: Bool = false) -> Self {
         if uiBusy || workerRunning { return .syncing }
+        if hasIssues { return .attention }
         return scheduleEnabled && hasEnabledPairs ? .enabled : .disabled
     }
 
@@ -32,7 +33,17 @@ private let menuBarIcons: [SyncMenuBarState: [NSImage]] = Dictionary(
                              xRadius: 0.8, yRadius: 0.8).fill()
             }
             guard let context = NSGraphicsContext.current?.cgContext else { return true }
-            if state == .disabled {
+            if state == .attention {
+                // Keep the full drawer; a separate tall, thin mark remains
+                // legible at native menu-bar size without obscuring its outline.
+                let stem = NSBezierPath()
+                stem.move(to: NSPoint(x: 18.75, y: 8))
+                stem.line(to: NSPoint(x: 18.75, y: 15))
+                stem.lineWidth = 1.8
+                stem.lineCapStyle = .round
+                stem.stroke()
+                NSBezierPath(ovalIn: NSRect(x: 17.85, y: 3.2, width: 1.8, height: 1.8)).fill()
+            } else if state == .disabled {
                 // Cut a gap first, so the slash reads on every menu-bar color.
                 for (width, clear) in [(3.5, true), (1.6, false)] {
                     context.setBlendMode(clear ? .clear : .normal)
@@ -48,7 +59,8 @@ private let menuBarIcons: [SyncMenuBarState: [NSImage]] = Dictionary(
                 context.setBlendMode(.clear)
                 context.fillEllipse(in: badge)
                 context.setBlendMode(.normal)
-                let symbol = state == .syncing ? "arrow.triangle.2.circlepath" : "checkmark"
+                let symbol = state == .syncing ? "arrow.triangle.2.circlepath"
+                    : state == .attention ? "exclamationmark" : "checkmark"
                 context.saveGState()
                 context.translateBy(x: badge.midX, y: badge.midY)
                 if state == .syncing { context.rotate(by: -CGFloat(phase) * .pi / 6) }

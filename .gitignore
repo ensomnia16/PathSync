@@ -3,3 +3,9 @@
 *.app/
 *.zip
 __pycache__/
+
+work/
+*.dylib
+*.sqlite*
+*.token
+*.key

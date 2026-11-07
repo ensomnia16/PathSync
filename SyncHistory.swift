@@ -162,6 +162,30 @@ func parseSyncHistory(_ text: String) -> [SyncHistoryRecord] {
             finish(record)
             continue
         }
+        // A large per-file error list can push its start line outside the
+        // bounded log tail. Preserve the completion summary instead of losing
+        // the failed run and displaying a healthy menu-bar icon after restart.
+        if (body.hasPrefix("结束 [") || body.hasPrefix("失败 [")),
+           let opening = body.firstIndex(of: "["),
+           let closing = body[body.index(after: opening)...].firstIndex(of: "]"),
+           let colon = body.firstIndex(of: "：") {
+            let name = String(body[body.index(after: opening)..<closing])
+            if !records.contains(where: { $0.pairName == name
+                && (body.hasPrefix("失败 [") || $0.finishedAt == date) }) {
+                var record = SyncHistoryRecord(id: started, startedAt: date, pairName: name,
+                    direction: "双向合并", sourcePath: "", destinationPath: "", isPreview: false)
+                started += 1
+                record.finishedAt = date
+                if let code = body.range(of: "，退出码 ") {
+                    record.exitCode = Int(body[code.upperBound..<colon])
+                } else {
+                    record.exitCode = 1
+                }
+                record.output = String(body[body.index(after: colon)...])
+                trailing = record
+            }
+            continue
+        }
         if let record = startRecord(body, date: date, id: started) {
             started += 1
             if let interrupted = open[record.pairName] { finish(interrupted) }

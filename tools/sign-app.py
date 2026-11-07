@@ -35,7 +35,12 @@ def sign_app(app, adhoc=False):
         if result.returncode:
             raise ValueError('Could not unlock the dedicated PathSync signing keychain.')
         options += ['--keychain', str(keychain)]
-    for path, identifier in ((helper, BUNDLE_ID + '.UpdateApply'), (app, BUNDLE_ID)):
+    nested = [(helper, BUNDLE_ID + '.UpdateApply')]
+    for name in ('QuickXorHash.dylib', 'OneDriveOAuth', 'OneDriveAuth'):
+        path = app / 'Contents/Resources' / name
+        if path.exists():
+            nested.append((path, BUNDLE_ID + '.' + name.replace('.', '_')))
+    for path, identifier in [*nested, (app, BUNDLE_ID)]:
         command = ['/usr/bin/codesign', *options, '--identifier', identifier]
         if not adhoc:
             command += ['--requirements',
