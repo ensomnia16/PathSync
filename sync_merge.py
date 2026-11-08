@@ -151,7 +151,7 @@ def unchanged_metadata(current, previous, cloud=False):
 
 def digest(path):
     if not ALLOW_ONLINE_DOWNLOADS and is_dataless(path):
-        raise OSError('云端内容待核验：仅在线文件未下载；保留文件和基线，请先在 OneDrive 下载所需文件')
+        raise OSError('仅在线文件未下载，已保留文件与基线；只需云端保留可将对应子目录设为仅云端（也会暂停上传），需要本地副本则在 OneDrive 下载所选文件后重试')
     hasher = hashlib.sha256()
     previous_alarm = signal.getsignal(signal.SIGALRM)
 

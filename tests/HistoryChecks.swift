@@ -143,6 +143,17 @@ struct HistoryChecks {
         defer { try? FileManager.default.removeItem(at: temporary) }
         let fromDisk = try readSyncHistory(at: temporary.path)
         assert(fromDisk.count == 5)
+        let onlineFailure = "FAILED\tCityU Meeting/archive/a.pdf\t仅在线文件未下载，保留\nFAILED\tKTH/a.zip\t云端内容待核验：仅在线文件未下载\nuploaded=0 downloaded=0 failed=2\nGRAPH_INDEX\t{\"pages\":1}"
+        let diagnosis = syncIssueSummary(onlineFailure)
+        assert(diagnosis.contains("2 个仅在线文件待处理"))
+        assert(diagnosis.contains("CityU Meeting（1）") && diagnosis.contains("KTH（1）"))
+        assert(diagnosis.contains("上传也会暂停"))
+        assert(!diagnosis.contains("GRAPH_INDEX"))
+        let mismatch = syncIssueSummary("FAILED\tcache/a.pkgf\tOneDrive 本地目录尚未跟上服务器元数据；保留文件与基线\nGRAPH_INDEX\t{}")
+        assert(mismatch.contains("cache/a.pkgf"))
+        assert(mismatch.contains("等待 OneDrive"))
+        assert(syncIssueSummary("PermissionError: denied\nGRAPH_INDEX\t{}").contains("PermissionError: denied"))
+        assert(!syncIssueSummary("GRAPH_INDEX\t{}").contains("GRAPH_INDEX"))
         print("History parser checks passed")
     }
 }

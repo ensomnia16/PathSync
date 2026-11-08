@@ -728,7 +728,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     // plan is complete and is exactly what the person needs to see.
     let completePreview = dryRun && plan && process.terminationStatus == 2 && parseSyncPlan(result) != nil
     guard process.terminationStatus == 0 || completePreview else {
-        let summary = strippingSyncPlan(result).split(separator: "\n").last.map(String.init) ?? "退出码 \(process.terminationStatus)"
+        let summary = syncIssueSummary(strippingSyncPlan(result), language: language)
         throw NSError(domain: appID, code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "「\(pair.name)」未完全成功：\(summary)。详情见同步记录。"])
     }
     return result
