@@ -158,6 +158,24 @@ class PackageTests(unittest.TestCase):
         self.assertTrue((self.local / self.mirror / 'external').is_symlink())
         self.assertEqual(outside.read_text(), 'private outside bytes')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS authorization and document metadata')
+    def test_mac_authorization_added_after_copy_is_not_a_document_change(self):
+        p.copy_missing(self.cloud, self.local, self.mirror, m.digest, lambda: None)
+        original = p.subprocess.run
+        def authorization(arguments, **kwargs):
+            result = original(arguments, **kwargs)
+            if arguments == ['/usr/bin/xattr', str(self.local / self.mirror)]:
+                result.stdout += b'com.apple.macl\n'
+            return result
+        with mock.patch.object(p.subprocess, 'run', side_effect=authorization):
+            self.assertEqual(p.snapshot(self.cloud / self.mirror, m.digest, lambda: None),
+                             p.snapshot(self.local / self.mirror, m.digest, lambda: None))
+        # Document tags/forks must still participate in verification.
+        subprocess.run(['/usr/bin/xattr', '-w', 'com.apple.metadata:_kMDItemUserTags',
+                        'user tag', str(self.local / self.mirror)], check=True)
+        self.assertNotEqual(p.snapshot(self.cloud / self.mirror, m.digest, lambda: None),
+                            p.snapshot(self.local / self.mirror, m.digest, lambda: None))
+
 
 class StopTests(unittest.TestCase):
     def test_stop_does_not_wait_for_blocked_read_only_directory_threads(self):

@@ -100,7 +100,9 @@ def snapshot(path, digest, check):
             for key in names:
                 # Provider transport, quarantine and access metadata do not
                 # describe the document; never transport them into the work copy.
-                if key.startswith(('com.apple.fileprovider.', 'com.apple.lastuseddate', 'com.apple.quarantine')):
+                # macl is macOS's path-bound user-intent authorization, added
+                # after publication/access. It is not package document content.
+                if key == 'com.apple.macl' or key.startswith(('com.apple.fileprovider.', 'com.apple.lastuseddate', 'com.apple.quarantine')):
                     continue
                 value = attribute(current, key)
                 if value is None:
