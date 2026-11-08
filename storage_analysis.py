@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import stat
 import sys
+import sqlite3
+import unicodedata
+import graph_index
 
 from cloud_only import _record, safe_target, secure_digest, validate_relative
 
@@ -47,21 +50,41 @@ def children(path, info, device, totals):
         return None
     try:
         with os.scandir(path) as entries:
-            return {entry.name for entry in entries}
+            return {unicodedata.normalize('NFC', entry.name) for entry in entries}
     except OSError:
         totals['errors'] += 1
         return None
 
 
-def analyze(local, cloud, scope='', verify=False):
+def analyze(local, cloud, scope='', verify=False, cloud_index=None):
     local, cloud = Path(local).resolve(strict=True), Path(cloud).resolve(strict=True)
     if local == cloud or local in cloud.parents or cloud in local.parents:
         raise ValueError('Analysis roots must be separate folders.')
     if scope:
         scope = validate_relative(scope)
+    snapshot, cloud_warning = None, None
+    if cloud_index:
+        try:
+            snapshot = graph_index.cached_snapshot(cloud_index, local, cloud)
+        except (OSError, ValueError, KeyError, sqlite3.Error) as error:
+            cloud_warning = str(error)
+    remote_sizes, remote_directories = {}, set()
+    prefix = scope + '/' if scope else ''
+    if snapshot:
+        for path, item in snapshot['entries'].items():
+            path = unicodedata.normalize('NFC', path)
+            if not path.startswith(prefix):
+                continue
+            tail = path[len(prefix):]
+            if not tail:
+                continue
+            name = prefix + tail.split('/')[0]
+            remote_sizes[name] = remote_sizes.get(name, 0) + item['size']
+            if '/' in tail:
+                remote_directories.add(name)
     roots = [safe_target(root, scope) if scope else root for root in (local, cloud)]
     root_info = [inspect(path) for path in roots]
-    if not any(map(directory, root_info)):
+    if not any(map(directory, root_info)) and not remote_sizes:
         raise ValueError('The selected folder is unavailable.')
     totals = dict.fromkeys(FIELDS, 0)
     devices = (local.stat().st_dev, cloud.stat().st_dev)
@@ -69,7 +92,7 @@ def analyze(local, cloud, scope='', verify=False):
         raise ValueError('The selected path has different types on the two sides.')
     left_names = children(roots[0], root_info[0], devices[0], totals)
     right_names = children(roots[1], root_info[1], devices[1], totals)
-    names = (left_names or set()) | (right_names or set())
+    names = (left_names or set()) | (right_names or set()) | {name[len(prefix):] for name in remote_sizes}
     local_seen, cloud_seen = set(), set()
     rows = []
     for name in sorted(names):
@@ -128,12 +151,17 @@ def analyze(local, cloud, scope='', verify=False):
                 row['errors'] += 1
             else:
                 row['verifiedBytes' if same else 'differentBytes'] += left_bytes
+        row['isDirectory'] |= relative in remote_directories
+        row['hasCloud'] |= relative in remote_sizes
         row['usage'] = {field: row.pop(field) for field in FIELDS}
+        row['usage']['cloudLogicalBytes'] = remote_sizes.get(relative, 0) if snapshot else None
         for field in FIELDS:
             totals[field] += row['usage'][field]
         rows.append(row)
+    totals['cloudLogicalBytes'] = sum(remote_sizes.values()) if snapshot else None
     return {'rows': sorted(rows, key=lambda row: (-row['usage']['localBytes'], row['path'])),
-            'totals': totals}
+            'totals': totals, 'cloudIndexUpdatedAt': snapshot['updated'] if snapshot else None,
+            'cloudIndexWarning': cloud_warning}
 
 
 def main():
@@ -142,9 +170,34 @@ def main():
     parser.add_argument('cloud')
     parser.add_argument('--scope', default='')
     parser.add_argument('--verify', action='store_true')
+    parser.add_argument('--cloud-index', type=Path)
+    parser.add_argument('--refresh-cloud-index', action='store_true')
+    parser.add_argument('--graph-auth-helper', type=Path)
+    parser.add_argument('--onedrive-root', type=Path)
     args = parser.parse_args()
     try:
-        result = analyze(args.local, args.cloud, args.scope, args.verify)
+        from sync_merge import enable_cloud_materialization
+        enable_cloud_materialization(False)
+        warning = None
+        if args.refresh_cloud_index:
+            client = index = None
+            try:
+                if not (args.cloud_index and args.graph_auth_helper and args.onedrive_root):
+                    raise ValueError('云端大小查询缺少 OneDrive 配置。')
+                local, cloud = Path(args.local).resolve(strict=True), Path(args.cloud).resolve(strict=True)
+                relative = cloud.relative_to(args.onedrive_root.resolve(strict=True)).as_posix()
+                auth = graph_index.credentials(args.graph_auth_helper)
+                client = graph_index.GraphClient(auth['access_token'])
+                index = graph_index.GraphIndex(args.cloud_index, local, cloud, auth['drive_id'], relative, client.get)
+                index.refresh()
+            except (OSError, ValueError, KeyError, sqlite3.Error) as error:
+                warning = '云端刷新未完成：' + str(error)
+            finally:
+                if index: index.close()
+                if client: client.close()
+        result = analyze(args.local, args.cloud, args.scope, args.verify, args.cloud_index)
+        if warning:
+            result['cloudIndexWarning'] = warning
     except (OSError, ValueError) as error:
         parser.exit(1, f'{error}\n')
     json.dump(result, sys.stdout)

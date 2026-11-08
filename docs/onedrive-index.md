@@ -65,3 +65,17 @@ names, maps only this observed numeric-colon encoding when the raw name is absen
 and rejects alias collisions transactionally. Unverified mirror paths remain
 untouched while independent files can proceed. Any directory deletion or existing
 tree conflict containing such a path stays blocked with its anchors retained.
+
+## Storage analysis
+
+The storage panel shows OneDrive cloud size separately from allocated local cache
+space. Cloud size sums logical file sizes from a committed server metadata index,
+including online-only files and paths marked cloud-only on this Mac. Directory
+rows and their totals use the same snapshot; remote-only subfolders can be browsed
+without creating or reading their contents on disk.
+
+Ordinary scans open the index read-only and show its update time. Missing or
+mismatched snapshots display “Not queried”, never an assumed zero. “Refresh Cloud
+Size” silently refreshes the delta index with the existing Keychain login; it does
+not authorize a new login or download file contents. A failed refresh keeps a
+valid cached size, with its old timestamp and a visible warning.

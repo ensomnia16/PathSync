@@ -184,6 +184,70 @@ def content_hashes(path):
         os.close(fd)
 
 
+
+def indexed_entries(db, root_id, cloud, stats):
+    rows = {row[0]: row for row in db.execute('SELECT * FROM items')}
+    paths = {root_id: ''}
+    def relative(identity, seen=None):
+        if identity in paths:
+            return paths[identity]
+        seen = set() if seen is None else seen
+        if identity in seen or identity not in rows:
+            raise IndexError('云端目录索引不完整或存在循环；已保留原索引')
+        seen.add(identity)
+        row = rows[identity]
+        component(row[2])
+        parent = relative(row[1], seen)
+        paths[identity] = parent + '/' + row[2] if parent else row[2]
+        return paths[identity]
+    entries = {}
+    for identity, row in rows.items():
+        if row[3]:
+            continue
+        name = relative(identity)
+        # OneDrive can expose a colon as a numeric entity in Graph while
+        # File Provider exposes ':'. Prefer an exact existing mirror name;
+        # translate only this observed encoding and reject every collision.
+        decoded = re.sub(r'&#(?:x0*3a|0*58);', ':', name, flags=re.IGNORECASE)
+        if decoded != name and not os.path.lexists(cloud / name):
+            name = decoded
+            stats['mapped_names'] += 1
+        if name in entries:
+            raise IndexError('云端目录出现同名记录，索引未推进')
+        entries[name] = {'id': identity, 'size': row[4], 'quick': row[5],
+                         'mtime': row[6], 'etag': row[7]}
+    return entries
+
+
+def cached_snapshot(database, local_root, cloud_root):
+    """Read one committed metadata snapshot, without credentials or network I/O."""
+    path = Path(database)
+    if not path.is_file() or path.is_symlink():
+        raise IndexError('尚无云端索引，请先预览同步或刷新云端大小。')
+    db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=3)
+    try:
+        db.execute('BEGIN')
+        meta = dict(db.execute('SELECT key,value FROM meta'))
+        binding = json.loads(meta.get('binding', '{}'))
+        if not isinstance(binding, dict) or not all(isinstance(binding.get(k), str) for k in ('local', 'cloud')):
+            raise IndexError('云端索引目录信息无效，请刷新云端大小。')
+        cloud = Path(cloud_root).resolve(strict=True)
+        info = cloud.stat()
+        if (binding.get('version') != 1 or Path(binding['local']).resolve(strict=True) != Path(local_root).resolve(strict=True)
+                or Path(binding['cloud']).resolve(strict=True) != cloud or binding.get('cloudRootDevice') != info.st_dev
+                or binding.get('cloudRootInode') != info.st_ino or not meta.get('root') or not meta.get('cursor')):
+            raise IndexError('云端索引与当前目录不一致，请刷新云端大小。')
+        updated = float(meta['updated'])
+        if not 0 < updated < 1e12:
+            raise IndexError('云端索引更新时间无效，请刷新云端大小。')
+        entries = indexed_entries(db, meta['root'], cloud, {'mapped_names': 0})
+        if any(not isinstance(e['size'], int) or e['size'] < 0 for e in entries.values()):
+            raise IndexError('云端索引文件大小无效，请刷新云端大小。')
+        return {'entries': entries, 'updated': updated}
+    finally:
+        db.close()
+
+
 class GraphIndex:
     def __init__(self, database, local_root, cloud_root, drive_id, remote_path, fetch, progress=None):
         self.path = Path(database)
@@ -269,36 +333,7 @@ class GraphIndex:
                         (identity, parent, name, int(folder), size, quick, mtime, item.get('eTag')))
 
     def _entries(self, root_id):
-        rows = {row[0]: row for row in self.db.execute('SELECT * FROM items')}
-        paths = {root_id: ''}
-        def relative(identity, seen=None):
-            if identity in paths:
-                return paths[identity]
-            seen = set() if seen is None else seen
-            if identity in seen or identity not in rows:
-                raise IndexError('云端目录索引不完整或存在循环；已保留原索引')
-            seen.add(identity)
-            row = rows[identity]
-            parent = relative(row[1], seen)
-            paths[identity] = parent + '/' + row[2] if parent else row[2]
-            return paths[identity]
-        entries = {}
-        for identity, row in rows.items():
-            if row[3]:
-                continue
-            name = relative(identity)
-            # OneDrive can expose a colon as a numeric entity in Graph while
-            # File Provider exposes ':'. Prefer an exact existing mirror name;
-            # translate only this observed encoding and reject every collision.
-            decoded = re.sub(r'&#(?:x0*3a|0*58);', ':', name, flags=re.IGNORECASE)
-            if decoded != name and not os.path.lexists(self.cloud / name):
-                name = decoded
-                self.stats['mapped_names'] += 1
-            if name in entries:
-                raise IndexError('云端目录出现同名记录，索引未推进')
-            entries[name] = {'id': identity, 'size': row[4], 'quick': row[5],
-                             'mtime': row[6], 'etag': row[7]}
-        return entries
+        return indexed_entries(self.db, root_id, self.cloud, self.stats)
 
     def refresh(self):
         started = time.monotonic()

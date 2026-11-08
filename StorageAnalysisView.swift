@@ -6,6 +6,7 @@ private typealias ViewState<Value> = SwiftUI.State<Value>
 private struct StorageUsage: Decodable {
     let localBytes: Int64
     let cloudBytes: Int64
+    let cloudLogicalBytes: Int64?
     let verifiedBytes: Int64
     let differentBytes: Int64
     let unverifiedBytes: Int64
@@ -25,6 +26,8 @@ private struct StorageRow: Decodable, Identifiable {
 private struct StorageReport: Decodable {
     let rows: [StorageRow]
     let totals: StorageUsage
+    let cloudIndexUpdatedAt: Double?
+    let cloudIndexWarning: String?
 }
 
 struct StorageAnalysisView: View {
@@ -52,6 +55,7 @@ struct StorageAnalysisView: View {
     private func description(_ usage: StorageUsage) -> String {
         [
             t("工作副本", "Working copy") + " " + bytes(usage.localBytes),
+            t("OneDrive 云端大小", "OneDrive cloud size") + " " + (usage.cloudLogicalBytes.map { bytes($0) } ?? t("未查询", "Not queried")),
             t("OneDrive 本机缓存", "OneDrive cache on this Mac") + " " + bytes(usage.cloudBytes),
             t("内容相同", "Content matched") + " " + bytes(usage.verifiedBytes),
             t("候选未验证", "Unverified candidates") + " " + bytes(usage.unverifiedBytes),
@@ -86,7 +90,7 @@ struct StorageAnalysisView: View {
         return nil
     }
 
-    private func scan(_ folder: String, verify: Bool = false) {
+    private func scan(_ folder: String, verify: Bool = false, refreshCloud: Bool = false) {
         guard process == nil, let pair, let resources = Bundle.main.resourceURL else { return }
         if scope != folder { query = "" }
         scope = folder
@@ -95,9 +99,16 @@ struct StorageAnalysisView: View {
 
         let job = Process()
         job.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        job.arguments = ["-B", resources.appendingPathComponent("storage_analysis.py").path,
-                         "--scope=" + folder, "--", pair.localPath, pair.cloudPath]
-        if verify { job.arguments?.insert("--verify", at: 2) }
+        let indexPath = URL(fileURLWithPath: mergeStatePath(pair)).deletingPathExtension().appendingPathExtension("index.sqlite").path
+        var arguments = ["-B", resources.appendingPathComponent("storage_analysis.py").path,
+                         "--scope=" + folder, "--cloud-index=" + indexPath]
+        if verify { arguments.append("--verify") }
+        if refreshCloud {
+            arguments += ["--refresh-cloud-index", "--graph-auth-helper=" + OneDriveConnection.helper.path,
+                          "--onedrive-root=" + model.config.oneDriveRoot]
+        }
+        arguments += ["--", pair.localPath, pair.cloudPath]
+        job.arguments = arguments
         let output = Pipe()
         job.standardOutput = output
         job.standardError = output
@@ -127,9 +138,9 @@ struct StorageAnalysisView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(t("本地空间分析", "Local Storage Analysis")).font(.title2.bold())
-            Text(t("按磁盘实际分配统计。同路径、同大小只是候选；内容校验读取已下载的文件。",
-                   "Counts allocated disk space. Same path and size indicate a candidate. Verification reads files already downloaded."))
+            Text(t("空间分析", "Storage Analysis")).font(.title2.bold())
+            Text(t("工作副本与本机缓存按磁盘实际占用统计；云端大小包含仅在线文件，读取索引元数据，不下载文件内容。",
+                   "Working copy and cache show allocated disk space. Cloud size includes online-only files and uses metadata without downloading contents."))
                 .foregroundStyle(.secondary)
             HStack {
                 Button {
@@ -150,6 +161,8 @@ struct StorageAnalysisView: View {
                     }
                 } else {
                     Button(t("扫描占用", "Scan Usage")) { scan(scope) }
+                    Button(t("刷新云端大小", "Refresh Cloud Size")) { scan(scope, refreshCloud: true) }
+                        .disabled(!model.oneDriveConnected || model.config.oneDriveRoot.isEmpty)
                     Button(t("校验重复内容", "Verify Matching Content")) { scan(scope, verify: true) }
                 }
             }
@@ -157,6 +170,16 @@ struct StorageAnalysisView: View {
                 .textFieldStyle(.roundedBorder)
             if let report {
                 Text(description(report.totals)).font(.caption).foregroundStyle(.secondary)
+                if let updated = report.cloudIndexUpdatedAt {
+                    Text(t("云端索引更新于 ", "Cloud index updated ") + Date(timeIntervalSince1970: updated).formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(t("尚无云端大小；连接 OneDrive 后点击“刷新云端大小”。未知大小不会显示为 0。", "Cloud size is unavailable. Connect OneDrive, then refresh cloud size. Unknown sizes are not shown as zero."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let warning = report.cloudIndexWarning {
+                    Text(warning).font(.caption).foregroundStyle(.orange)
+                }
                 if report.totals.errors > 0 {
                     Text(t("有 \(report.totals.errors) 项未能完整检查，部分占用可能未计入。",
                            "\(report.totals.errors) entries could not be checked completely. Some usage may be missing."))
