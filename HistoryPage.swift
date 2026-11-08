@@ -238,6 +238,7 @@ struct HistoryPage: View {
     }
 
     private func resultText(_ record: SyncHistoryRecord) -> String {
+        if record.awaitingDownloadOnly { return usesEnglish(language) ? "Pending download" : "待下载" }
         if record.finishedAt == nil { return t("historyInterrupted") }
         if record.hasFailures { return t("historyFailed") }
         if record.counts["pending_delete", default: 0] > 0 { return t("historyPendingDelete") }
@@ -249,6 +250,7 @@ struct HistoryPage: View {
     }
 
     private func resultIcon(_ record: SyncHistoryRecord) -> String {
+        if record.awaitingDownloadOnly { return "arrow.down.circle" }
         if record.finishedAt == nil { return "minus.circle" }
         if record.hasFailures { return "xmark.octagon.fill" }
         if record.needsAttention { return "exclamationmark.triangle.fill" }
@@ -256,6 +258,7 @@ struct HistoryPage: View {
     }
 
     private func resultColor(_ record: SyncHistoryRecord) -> Color {
+        if record.awaitingDownloadOnly { return .secondary }
         if record.finishedAt == nil { return .secondary }
         if record.hasFailures { return .red }
         if record.needsAttention { return .orange }

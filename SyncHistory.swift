@@ -34,8 +34,15 @@ struct SyncHistoryRecord: Identifiable {
         finishedAt == nil || exitCode != .some(0) || hasFailures
     }
 
+    var awaitingDownloadOnly: Bool {
+        finishedAt != nil && exitCode == 2 && counts["online_only", default: 0] > 0
+            && counts["failed", default: 0] == counts["online_only", default: 0]
+            && !events.filter { $0.kind == "FAILED" }.isEmpty
+            && events.filter { $0.kind == "FAILED" }.allSatisfy { $0.detail.contains("仅在线文件未下载") }
+    }
+
     var needsAttention: Bool {
-        incompleteOrFailed || needsManualReview || counts["pending_delete", default: 0] > 0
+        (incompleteOrFailed && !awaitingDownloadOnly) || needsManualReview || counts["pending_delete", default: 0] > 0
     }
 
     var hasFailures: Bool {

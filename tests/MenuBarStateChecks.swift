@@ -75,6 +75,15 @@ struct MenuBarStateChecks {
         assert(truncated.count == 1 && truncated[0].needsAttention)
         model.history = truncated
         assert(model.menuBarState == .attention, "a truncated error log must retain its warning after restart")
+        let background = SyncModel(testConfig: config, workerRunning: true)
+        var inFlight = failed; inFlight.finishedAt = nil; inFlight.exitCode = nil
+        background.history = [inFlight]
+        assert(background.isPairSyncActive(pair))
+        assert(background.pairStatus(pair).text == background.t("pairSyncing"))
+        assert(background.pairFootnote(pair) == background.t("pairSyncing"))
+        background.history = [failed]
+        assert(!background.isPairSyncActive(pair))
+        assert(background.pairStatus(pair).text == background.t("pairLastFailed"))
         model.history = []
         model.config.enabled = false
         assert(model.hasUnsavedChanges)
