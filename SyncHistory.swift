@@ -307,3 +307,28 @@ func syncIssueSummary(_ output: String, language: String = "zh-Hans") -> String 
     }
     return messages.joined(separator: "\n")
 }
+
+struct SyncIssueGroup: Identifiable {
+    let folder: String
+    let online: Bool
+    let events: [SyncHistoryEvent]
+    var id: String { (online ? "online:" : "error:") + folder }
+    var canPauseFolder: Bool {
+        online && !folder.isEmpty && !folder.hasPrefix("/")
+            && !folder.split(separator: "/").contains("..")
+            && events.allSatisfy { $0.path.hasPrefix(folder + "/") }
+    }
+}
+
+func syncIssueGroups(_ record: SyncHistoryRecord) -> [SyncIssueGroup] {
+    let failures = record.events.filter { $0.kind == "FAILED" }
+    let grouped = Dictionary(grouping: failures) { event -> String in
+        let online = event.detail.contains("仅在线文件未下载")
+        let parts = event.path.split(separator: "/")
+        return (online ? "online:" : "error:") + (parts.count > 1 ? String(parts[0]) : "")
+    }
+    return grouped.map { key, events in
+        SyncIssueGroup(folder: String(key.dropFirst(key.hasPrefix("online:") ? 7 : 6)),
+                       online: key.hasPrefix("online:"), events: events)
+    }.sorted { $0.events.count == $1.events.count ? $0.id < $1.id : $0.events.count > $1.events.count }
+}

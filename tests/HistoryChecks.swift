@@ -154,6 +154,15 @@ struct HistoryChecks {
         assert(mismatch.contains("等待 OneDrive"))
         assert(syncIssueSummary("PermissionError: denied\nGRAPH_INDEX\t{}").contains("PermissionError: denied"))
         assert(!syncIssueSummary("GRAPH_INDEX\t{}").contains("GRAPH_INDEX"))
+        var actionable = SyncHistoryRecord(id: 99, startedAt: Date(), pairName: "Test", direction: "双向合并", sourcePath: "/l", destinationPath: "/c", isPreview: false)
+        actionable.output = onlineFailure + "\nFAILED\troot.pdf\t仅在线文件未下载\nFAILED\t../escape.txt\t仅在线文件未下载\nFAILED\tcache/a.pkgf\tOneDrive 本地目录尚未跟上服务器元数据"
+        actionable.finishParsing()
+        let groups = syncIssueGroups(actionable)
+        assert(groups.filter { $0.online }.count == 4)
+        assert(groups.first { $0.folder == "CityU Meeting" }!.canPauseFolder)
+        assert(!groups.first { $0.folder.isEmpty }!.canPauseFolder)
+        assert(!groups.first { $0.folder == ".." }!.canPauseFolder)
+        assert(groups.first { $0.folder == "cache" }!.online == false)
         print("History parser checks passed")
     }
 }
