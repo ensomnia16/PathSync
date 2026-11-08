@@ -653,6 +653,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
         arguments += ["--graph-auth-helper", authHelper.path, "--onedrive-root", oneDriveRoot]
     }
     if dryRun { arguments.append("--dry-run") }
+    else { arguments.append("--download-online-content") }
     if dryRun && plan { arguments.append("--plan-json") }
     arguments += backupArguments
     process.arguments = arguments

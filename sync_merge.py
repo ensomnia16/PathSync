@@ -1074,7 +1074,7 @@ def sync_files(args, local, cloud, files, conflicts):
         counts['online_only'] = len(online_only)
     # A preview never downloads placeholders; it reports them instead.
     ordered_names = sorted(names - new_cloud_only) + import_names
-    prefetch = CloudPrefetch(cloud, [] if args.dry_run or not args.download_online_content else import_names, online_only,
+    prefetch = CloudPrefetch(cloud, [] if args.dry_run or not args.download_online_content or args.direction == 'upload' else import_names, online_only,
                              order=ordered_names)
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
@@ -1124,6 +1124,14 @@ def sync_files(args, local, cloud, files, conflicts):
                         next_files[name] = aligned(name, None, None, None)
                     clear_pending(next_conflicts, name)
                 continue
+
+            # A one-way run never needs the contents of a new file on the
+            # opposite side. Decide this before opening a placeholder.
+            if previous is None and name not in conflicts:
+                if ((local_sig is None and cloud_sig is not None and args.direction == 'upload')
+                        or (cloud_sig is None and local_sig is not None and args.direction == 'download')):
+                    counts['skipped'] += 1
+                    continue
 
             if (args.dry_run and previous is None and name not in conflicts
                     and (local_sig is None) != (cloud_sig is None)):

@@ -722,13 +722,30 @@ class MergeTests(unittest.TestCase):
         (self.local/'a.txt').write_text('same'); shutil.copy2(self.local/'a.txt', self.cloud/'a.txt')
         item = self.graph_file('a.txt')
         with mock.patch.object(sync_merge, 'checked_digests', side_effect=AssertionError('cloud content read')):
-            code, output, hydrated = self.graph_run([item], online=['a.txt'])
+            code, output, hydrated = self.graph_run([item], '--download-online-content', online=['a.txt'])
             self.assertEqual(code, 0, output); self.assertEqual(hydrated, [])
             self.assertIn('unchanged=1', output); self.assertIn('"hash_reads": 1', output)
-            code, output, hydrated = self.graph_run([], online=['a.txt'])
+            code, output, hydrated = self.graph_run([], '--download-online-content', online=['a.txt'])
             self.assertEqual(code, 0, output); self.assertEqual(hydrated, [])
             self.assertIn('"hash_hits": 1', output); self.assertIn('"hash_reads": 0', output)
         self.assertEqual(json.loads(self.state.read_text())['files']['a.txt']['anchorHash'], hashlib.sha256(b'same').hexdigest())
+
+    def test_enabled_download_imports_new_cloud_file_but_skips_cloud_only_policy(self):
+        (self.cloud/'new.txt').write_text('needed')
+        (self.cloud/'DeepSight').mkdir()
+        (self.cloud/'DeepSight'/'archive.txt').write_text('skip')
+        code, output, _ = self.run_in_process('--download-online-content', '--cloud-only', 'DeepSight', online=['new.txt', 'DeepSight/archive.txt'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((self.local/'new.txt').read_text(), 'needed')
+        self.assertFalse((self.local/'DeepSight').exists())
+
+    def test_upload_only_never_prefetches_cloud_new_files(self):
+        for n in range(101):
+            (self.cloud/f'{n}.txt').write_text('cloud')
+        code, output, hydrated = self.run_in_process('--download-online-content', '--direction', 'upload', online=[f'{n}.txt' for n in range(101)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(hydrated, [])
+        self.assertEqual(list(self.local.iterdir()), [])
 
     def test_graph_remote_mirror_lag_preserves_path_but_allows_independent_upload(self):
         (self.cloud/'remote.txt').write_text('remote'); item = self.graph_file('remote.txt')

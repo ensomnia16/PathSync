@@ -935,7 +935,7 @@ struct ContentView: View {
             Text("\(group.folder.isEmpty ? (english ? "Root files" : "根目录文件") : group.folder) · \(group.events.count) \(english ? "files" : "项")")
                 .font(.callout.weight(.semibold)).textSelection(.enabled)
             Text(group.online
-                ? (english ? "Online-only files remain pending. Existing files were preserved and no automatic downloads started; choose whether to keep this folder only in the cloud or download selected files in OneDrive." : "这些文件的云端版本还没有下载。按当前设置，应用不会自动下载，所以这部分暂未同步。只想放在云端：暂停此目录同步；想在本机使用：打开 OneDrive 目录，选择文件下载后重试。")
+                ? (english ? "These files were not downloaded in the last run. Retry downloads missing or updated files in the normal sync scope and skips cloud-only folders. Pause this folder if you want it to stay out of sync." : "上次这些文件还没有下载到本机。重试会自动下载正常同步范围内的缺失或更新文件，并跳过‘仅云端’目录。若不想下载此目录，可以暂停它的同步。")
                 : group.events.first?.detail ?? "")
                 .font(.callout).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             if !group.online {
