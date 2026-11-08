@@ -41,6 +41,30 @@ class GraphIndexTests(unittest.TestCase):
  def test_literal_entity_exact_mirror_name_is_preserved(self):
   f=self.file('a&#x3a;b.txt');(self.cloud/f['name']).write_bytes(b'base')
   x=self.seeded([f]);self.assertIn('a&#x3a;b.txt',x.entries)
+ def test_quote_entities_match_file_provider_names_without_reading_content(self):
+  for index,entity in enumerate(['&#x22;','&#X0022;','&#34;','&#0034;']):
+   literal='mail'+str(index)+'"accepted".eml'
+   f=self.file(literal,identity='quote');f['name']=literal.replace('"',entity)
+   (self.cloud/literal).write_bytes(b'base')
+   with mock.patch.object(g,'content_hashes',side_effect=AssertionError('must not hydrate or read files')):
+    x=self.seeded([f])
+   self.assertIn(literal,x.entries);self.assertEqual(x.stats['mapped_names'],1)
+ def test_exact_literal_quote_entity_name_wins_when_both_mirrors_exist(self):
+  f=self.file('mail&#x22;accepted&#x22;.eml')
+  (self.cloud/f['name']).write_bytes(b'base');(self.cloud/'mail"accepted".eml').write_bytes(b'other')
+  x=self.seeded([f]);self.assertIn(f['name'],x.entries);self.assertEqual(x.stats['mapped_names'],0)
+ def test_ambiguous_quote_alias_rolls_back(self):
+  f=self.file('mail"accepted".eml');other={**f,'id':'second','name':'mail&#x22;accepted&#x22;.eml'}
+  with self.assertRaises(g.IndexError):self.seeded([f,other])
+ def test_mixed_quote_and_colon_entities_in_ancestors(self):
+  f=self.file('room:1/"accepted".eml',parent='folder');f['name']='&#34;accepted&#x22;.eml'
+  (self.cloud/'room:1').mkdir();(self.cloud/'room:1/"accepted".eml').write_bytes(b'base')
+  folder={'id':'folder','name':'room&#58;1','folder':{},'parentReference':{'id':'root'}}
+  x=self.seeded([folder,f]);self.assertIn('room:1/"accepted".eml',x.entries)
+ def test_other_entities_are_never_decoded_into_paths(self):
+  for index,entity in enumerate(['&#x2f;','&#47;','&#x5c;','&#0;','&amp;']):
+   f=self.file('literal'+entity+'name.txt',identity='literal'+str(index))
+   x=self.seeded([f]);self.assertIn(f['name'],x.entries);self.assertEqual(x.stats['mapped_names'],0)
  def test_serialized_package_and_ordinary_file_keep_distinct_identities(self):
   f=self.file('bundle:time',identity='plain');(self.cloud/'bundle:time').write_bytes(b'base')
   package=self.cloud/'bundle:time 2';package.mkdir()
