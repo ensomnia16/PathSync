@@ -980,7 +980,7 @@ struct ContentView: View {
             } else if model.conflictCount > 0 {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             } else { Image(systemName: "checkmark.circle").foregroundStyle(.secondary) }
-            Text(model.statusKey == "error" ? (model.config.language == "en" ? "Sync incomplete — view issue details" : "同步未完成，请查看问题详情") : (model.statusDetail ?? t(model.statusKey)))
+            Text((model.statusKey == "error" || !issueRecords.isEmpty) ? (model.config.language == "en" ? "Sync incomplete — view issue details" : "同步未完成，请查看问题详情") : (model.statusDetail ?? t(model.statusKey)))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .help(model.statusDetail ?? t(model.statusKey))

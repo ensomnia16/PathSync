@@ -198,7 +198,7 @@ func parseSyncHistory(_ text: String) -> [SyncHistoryRecord] {
     return records.sorted { $0.id > $1.id }
 }
 
-func readSyncHistory(at path: String, maxBytes: UInt64 = 2_000_000) throws -> [SyncHistoryRecord] {
+func readSyncHistory(at path: String, maxBytes: UInt64 = 16_000_000) throws -> [SyncHistoryRecord] {
     guard FileManager.default.fileExists(atPath: path) else { return [] }
     let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
     defer { try? handle.close() }
@@ -222,7 +222,7 @@ final class SyncHistoryReader {
     private var fileID: UInt64?
     private var records: [SyncHistoryRecord] = []
 
-    init(path: String, maxBytes: Int = 2_000_000) {
+    init(path: String, maxBytes: Int = 16_000_000) {
         self.path = path
         self.maxBytes = maxBytes
     }
@@ -299,7 +299,7 @@ func syncIssueSummary(_ output: String, language: String = "zh-Hans") -> String 
     if messages.isEmpty {
         // Keep actual diagnostic output, excluding protocol, counters and statistics.
         let diagnostic = output.split(whereSeparator: \.isNewline).last { line in
-            !line.hasPrefix("GRAPH_INDEX\t") && !line.hasPrefix("PROGRESS\t")
+            !line.contains("GRAPH_INDEX") && !line.hasPrefix("PROGRESS\t")
                 && !line.hasPrefix("SYNC_PLAN\t") && !line.hasPrefix("uploaded=")
                 && !line.trimmingCharacters(in: .whitespaces).isEmpty
         }
