@@ -41,7 +41,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--app', type=Path, default=Path('/Applications/路径同步.app'))
     parser.add_argument('--bin-dir', type=Path, default=Path.home()/'.local/bin')
-    parser.add_argument('--instructions', action='store_true', help='also add the agreed output-path rules to global Codex guidance')
+    parser.add_argument('--instructions', action='store_true', help='also install output-path, canonical-file and version-management guidance for Codex')
     parser.add_argument('--codex-home', type=Path, default=Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex'))))
     args = parser.parse_args()
     cli = args.app / 'Contents/Resources/pathsync_cli.py'
