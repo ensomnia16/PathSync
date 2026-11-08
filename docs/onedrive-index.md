@@ -33,7 +33,7 @@ CLI `--download-online-content` opts into content downloads; previews never do.
 Thus zero downloads is guaranteed for the comparison path, not for future real
 file transfers initiated by the user or by OneDrive itself.
 
-## Validation scope for 2.18.1
+## Validation scope for 2.18.2
 
 Persistent cursor/cache, failed-page rollback, expired cursors, folder moves and
 deletions, changed local fingerprints, unsafe paths, equal placeholders, and stale
@@ -58,3 +58,10 @@ blocked readers. The central OneDrive root policy remains the only authority.
 Build requires Go 1.26+ for the pinned OAuth helper dependency, plus macOS command
 line tools. No rclone installation is needed on end-user Macs; the signed app
 bundles the helper. rclone is MIT licensed; its license accompanies the app.
+
+The first live authenticated check exposed Graph colon entities (`&#x3a;`) whose
+File Provider paths contain ordinary colons. Version 2.18.2 prefers exact mirror
+names, maps only this observed numeric-colon encoding when the raw name is absent,
+and rejects alias collisions transactionally. Unverified mirror paths remain
+untouched while independent files can proceed. Any directory deletion or existing
+tree conflict containing such a path stays blocked with its anchors retained.

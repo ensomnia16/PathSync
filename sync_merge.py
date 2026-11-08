@@ -845,16 +845,25 @@ def sync_files(args, local, cloud, files, conflicts):
     local_names = scan(local, args, errors, symlinks)
     cloud_names = scan(cloud, args, errors, symlinks)
     index = getattr(args, 'graph_index', None)
+    index_unverified = set()
     if index:
-        # Abort before any mutation when the File Provider mirror lags the server.
         for name, remote in index.entries.items():
             if excluded_path(name, args):
                 continue
-            mirror = signature(safe_path(cloud, name))
-            if (mirror is None or mirror[0] != remote['size'] or remote['mtime'] is None
-                    or abs(mirror[1] - remote['mtime']) >= 1_000_000_000):
-                raise OSError('OneDrive 本地目录尚未跟上服务器元数据，请等待 OneDrive 更新后重试：' + name)
-    names = local_names | cloud_names | set(active_files) | set(active_conflicts)
+            try:
+                mirror = signature(safe_path(cloud, name))
+                valid = (mirror is not None and mirror[0] == remote['size']
+                         and remote['mtime'] is not None
+                         and abs(mirror[1] - remote['mtime']) < 1_000_000_000)
+            except OSError:
+                valid = False
+            if not valid:
+                index_unverified.add(name)
+    # Preserve unverified paths and their ancestors; provider lag is never
+    # evidence for deletion. Independent files can still make progress.
+    index_unverified_parents = {directory for name in index_unverified
+                                for directory in ancestor_directories(name)}
+    names = local_names | cloud_names | set(active_files) | set(active_conflicts) | index_unverified
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0, 'online_only': 0}
@@ -915,6 +924,12 @@ def sync_files(args, local, cloud, files, conflicts):
         if blocked(directory):
             continue
         record = active_conflicts[directory]
+        if directory in index_unverified_parents:
+            blocked_directories.add(directory)
+            print(f'FAILED\t{directory}\tOneDrive 目录含未核验的云端文件，保留目录冲突与基线')
+            planned('failed', directory, detail='云端目录元数据尚未就绪')
+            counts['failed'] += 1
+            continue
         try:
             left = directory_snapshot(local, directory, args)
             right = directory_snapshot(cloud, directory, args)
@@ -963,6 +978,12 @@ def sync_files(args, local, cloud, files, conflicts):
 
             left_exists = directory_exists(left_path)
             right_exists = directory_exists(right_path)
+            if directory in index_unverified_parents and not (left_exists and right_exists):
+                blocked_directories.add(directory)
+                print(f'FAILED\t{directory}\t目录内云端元数据未就绪，未确认目录删除')
+                planned('failed', directory, detail='目录内云端元数据未就绪')
+                counts['failed'] += 1
+                continue
             if left_exists == right_exists:
                 continue
             deleted_side = 'cloud' if left_exists else 'local'
@@ -1064,6 +1085,11 @@ def sync_files(args, local, cloud, files, conflicts):
             continue
         if blocked(name):
             counts['skipped'] += 1
+            continue
+        if name in index_unverified:
+            print(f'FAILED\t{name}\tOneDrive 本地目录尚未跟上服务器元数据；保留文件与基线')
+            planned('failed', name, detail='OneDrive 镜像与服务器元数据尚未一致')
+            counts['failed'] += 1
             continue
         prefetch_error = prefetch.check(name)
         if prefetch_error:

@@ -32,6 +32,16 @@ class GraphIndexTests(unittest.TestCase):
    if '/root:/' in url:return {'id':'root','name':'test','folder':{}}
    return {'value':items,'@odata.deltaLink':CURSOR}
   x=self.index(fetch);x.refresh();return x
+ def test_colon_entity_matches_file_provider_name(self):
+  f=self.file('a:b.txt');f['name']='a&#x3a;b.txt'
+  (self.cloud/'a:b.txt').write_bytes(b'base')
+  x=self.seeded([f]);self.assertIn('a:b.txt',x.entries);self.assertEqual(x.stats['mapped_names'],1)
+ def test_literal_entity_exact_mirror_name_is_preserved(self):
+  f=self.file('a&#x3a;b.txt');(self.cloud/f['name']).write_bytes(b'base')
+  x=self.seeded([f]);self.assertIn('a&#x3a;b.txt',x.entries)
+ def test_ambiguous_decoded_name_rolls_back(self):
+  f=self.file('a:b.txt');other={**f,'id':'second','name':'a&#x3a;b.txt'}
+  with self.assertRaises(g.IndexError):self.seeded([f,other])
  def test_restart_uses_one_delta_request_and_disk_hash_cache(self):
   f=self.file();x=self.seeded([f]);sig=[4,self.local.joinpath('a.txt').stat().st_mtime_ns]
   self.assertEqual(x.verified_common('a.txt',self.local/'a.txt',sig),hashlib.sha256(b'base').hexdigest())

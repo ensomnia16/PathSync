@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import sqlite3
 import stat
@@ -191,7 +192,7 @@ class GraphIndex:
         self.fetch = fetch
         self.progress = progress or (lambda *args: None)
         self.fresh = False
-        self.stats = {'pages': 0, 'changed': 0, 'rebuilt': 0, 'hash_hits': 0, 'hash_reads': 0}
+        self.stats = {'pages': 0, 'changed': 0, 'rebuilt': 0, 'hash_hits': 0, 'hash_reads': 0, 'mapped_names': 0}
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.path.is_symlink():
             raise IndexError('索引路径不可为符号链接')
@@ -286,6 +287,13 @@ class GraphIndex:
             if row[3]:
                 continue
             name = relative(identity)
+            # OneDrive can expose a colon as a numeric entity in Graph while
+            # File Provider exposes ':'. Prefer an exact existing mirror name;
+            # translate only this observed encoding and reject every collision.
+            decoded = re.sub(r'&#(?:x0*3a|0*58);', ':', name, flags=re.IGNORECASE)
+            if decoded != name and not os.path.lexists(self.cloud / name):
+                name = decoded
+                self.stats['mapped_names'] += 1
             if name in entries:
                 raise IndexError('云端目录出现同名记录，索引未推进')
             entries[name] = {'id': identity, 'size': row[4], 'quick': row[5],

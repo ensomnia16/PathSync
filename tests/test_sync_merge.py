@@ -730,12 +730,27 @@ class MergeTests(unittest.TestCase):
             self.assertIn('"hash_hits": 1', output); self.assertIn('"hash_reads": 0', output)
         self.assertEqual(json.loads(self.state.read_text())['files']['a.txt']['anchorHash'], hashlib.sha256(b'same').hexdigest())
 
-    def test_graph_remote_mirror_lag_aborts_before_upload_or_deletion(self):
+    def test_graph_remote_mirror_lag_preserves_path_but_allows_independent_upload(self):
         (self.cloud/'remote.txt').write_text('remote'); item = self.graph_file('remote.txt')
         (self.cloud/'remote.txt').unlink(); (self.local/'new.txt').write_text('keep')
-        with self.assertRaisesRegex(OSError, '尚未跟上服务器'):
-            self.graph_run([item])
-        self.assertFalse((self.cloud/'new.txt').exists()); self.assertFalse(self.state.exists())
+        code, output, _ = self.graph_run([item])
+        self.assertEqual(code, 2, output)
+        self.assertIn('尚未跟上服务器', output)
+        self.assertEqual((self.cloud/'new.txt').read_text(), 'keep')
+        self.assertFalse((self.local/'remote.txt').exists())
+
+    def test_graph_lag_inside_missing_anchored_directory_never_deletes_survivors(self):
+        (self.local/'d').mkdir(); (self.local/'d'/'a.txt').write_text('base')
+        self.assertEqual(self.run_merge().returncode,0)
+        stat=(self.cloud/'d'/'a.txt').stat()
+        item={'id':'file','name':'a.txt','parentReference':{'id':'dir'},'size':4,
+              'file':{'hashes':{'quickXorHash':sync_merge.graph_index.content_hashes(self.local/'d'/'a.txt')['quickXorHash']}},
+              'fileSystemInfo':{'lastModifiedDateTime':datetime.fromtimestamp(stat.st_mtime,timezone.utc).isoformat()}}
+        shutil.rmtree(self.cloud/'d')
+        code,output,_=self.graph_run([{'id':'dir','name':'d','folder':{},'parentReference':{'id':'root'}},item])
+        self.assertEqual(code,2,output)
+        self.assertEqual((self.local/'d'/'a.txt').read_text(),'base')
+        self.assertIn('未确认目录删除',output)
 
     def test_graph_changed_placeholder_preserves_both_files(self):
         (self.local/'a.txt').write_text('same'); shutil.copy2(self.local/'a.txt', self.cloud/'a.txt')
