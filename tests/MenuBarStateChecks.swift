@@ -72,6 +72,10 @@ struct MenuBarStateChecks {
         assert(model.pairStatus(pair).text == model.t("pairSynced"))
         assert(model.menuBarIssueSummary == nil)
         var stopped = recovered; stopped.exitCode = 130; stopped.counts = ["stopped": 1]
+        assert(syncStatusResult(stopped) == "stopped")
+        assert(syncStatusResult(recovered) == "ok")
+        assert(syncStatusResult(failed) == "incomplete")
+        assert(syncStatusResult(nil) == "never")
         model.history = [stopped]
         assert(model.menuBarState == .enabled)
         assert(model.pairStatus(pair).text == "已停止")
