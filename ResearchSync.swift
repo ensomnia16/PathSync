@@ -549,6 +549,15 @@ func syncIsRunning(at path: String = supportDirectory + "/sync.lock") -> Bool {
 }
 
 /// The --status report for Shortcuts and scripts: read-only JSON.
+func syncStatusResult(_ record: SyncHistoryRecord?) -> String {
+    guard let record else { return "never" }
+    if record.finishedAt == nil { return "incomplete" }
+    if record.awaitingDownloadOnly { return "pending_download" }
+    if record.hasFailures { return "incomplete" }
+    if record.stopped { return "stopped" }
+    return record.needsAttention ? "attention" : "ok"
+}
+
 func syncStatusJSON(_ config: SyncConfig) -> String {
     let history = (try? readSyncHistory(at: logPath)) ?? []
     let formatter = ISO8601DateFormatter()
@@ -561,13 +570,7 @@ func syncStatusJSON(_ config: SyncConfig) -> String {
                     && record.pairName == pair.name
                     && config.pairs.filter { $0.name == pair.name }.count == 1))
         }
-        let result: String
-        switch record {
-        case nil: result = "never"
-        case let record? where record.finishedAt == nil || record.hasFailures: result = "incomplete"
-        case let record? where record.needsAttention: result = "attention"
-        default: result = "ok"
-        }
+        let result = syncStatusResult(record)
         var entry: [String: Any] = [
             "id": pair.id.uuidString, "name": pair.name, "enabled": pair.enabled,
             "direction": pair.scheduledDirection, "lastResult": result,

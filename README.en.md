@@ -73,3 +73,7 @@ The menu bar drawer icon has three states: slash (scheduled sync off), rotating 
 The executable is named `PathSync`; a `ResearchSync` symlink preserves existing CLI scripts. The bundle identifier and data directory stay unchanged. LaunchAgents declare `AssociatedBundleIdentifiers`, and an existing schedule is migrated without changing its interval. Update backups are kept outside Applications as non-app folders to avoid duplicate app/notification registrations.
 
 The minimal example has 11 rebuildable environment/cache rules. Do not exclude unique research material because a folder contains many small files; package and verify it first.
+
+## Agent CLI
+
+The `pathsync` CLI provides JSON policy queries, output-path checks, status, preview, sync and cooperative stop. It shares the signed scheduler and Python transfer engine with the GUI. Policy checks read the authoritative OneDrive root document and this Mac’s residency settings without network requests or content hydration. See [CLI and agent guidance](docs/agent-cli.md).

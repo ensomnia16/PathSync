@@ -73,6 +73,8 @@ pathsync://open                 打开主窗口
 
 ## 命令行
 
+新增 agent CLI `pathsync`，见 [CLI 与 agent 输出规范](docs/agent-cli.md)。GUI 与 CLI 共用签名调度核心和 Python 同步引擎，根排除规则、同步锁、OneDrive 登录、增量索引、冲突与备份逻辑一致。规则查询和输出路径检查可独立运行，不启动 GUI，不调用 Graph、不下载业务文件。
+
 应用包中的 `Contents/MacOS/PathSync` 支持：
 
 ```text
