@@ -551,9 +551,10 @@ func syncIsRunning(at path: String = supportDirectory + "/sync.lock") -> Bool {
 /// The --status report for Shortcuts and scripts: read-only JSON.
 func syncStatusResult(_ record: SyncHistoryRecord?) -> String {
     guard let record else { return "never" }
-    if record.finishedAt == nil || record.hasFailures { return "incomplete" }
-    if record.stopped { return "stopped" }
+    if record.finishedAt == nil { return "incomplete" }
     if record.awaitingDownloadOnly { return "pending_download" }
+    if record.hasFailures { return "incomplete" }
+    if record.stopped { return "stopped" }
     return record.needsAttention ? "attention" : "ok"
 }
 

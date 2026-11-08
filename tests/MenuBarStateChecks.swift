@@ -76,6 +76,10 @@ struct MenuBarStateChecks {
         assert(syncStatusResult(recovered) == "ok")
         assert(syncStatusResult(failed) == "incomplete")
         assert(syncStatusResult(nil) == "never")
+        var awaiting = recovered; awaiting.exitCode = 2
+        awaiting.output = "FAILED\ta.txt\t仅在线文件未下载\nfailed=1 online_only=1"
+        awaiting.finishParsing()
+        assert(syncStatusResult(awaiting) == "pending_download")
         model.history = [stopped]
         assert(model.menuBarState == .enabled)
         assert(model.pairStatus(pair).text == "已停止")
