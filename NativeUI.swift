@@ -87,11 +87,16 @@ extension SyncModel {
         return parts.joined(separator: " · ")
     }
 
+    var hasPendingDownloads: Bool {
+        savedConfig.pairs.contains { $0.enabled && lastRecord(for: $0)?.awaitingDownloadOnly == true }
+    }
+
     var statusHeadline: String {
         if isSyncActive { return t(statusKey == "previewing" ? "previewing" : "syncing") }
         if conflictCount > 0 { return String(format: t("conflictCountShort"), conflictCount) }
         if !hasEnabledPairs { return t("menubarNoPairs") }
         if menuBarState == .attention { return t("menubarStateAttention") }
+        if hasPendingDownloads { return config.language == "en" ? "Downloads pending" : "有文件待下载" }
         return t("statusReady")
     }
 
@@ -900,15 +905,6 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 overviewHeader
-                if model.savedConfig.pairs.contains(where: { $0.enabled && model.lastRecord(for: $0)?.needsAttention == true }) && !model.isSyncActive {
-                    HStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
-                        Text(model.config.language == "en" ? "Some files need attention. Other folders can keep syncing." : "部分文件需要处理，其他目录可继续同步。")
-                            .font(.callout)
-                        Spacer()
-                        Button(model.config.language == "en" ? "Details…" : "查看详情…") { openWindow(id: "sync-details") }
-                    }
-                }
                 if let banner = model.resultBanner {
                     Label(banner, systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -933,7 +929,7 @@ struct ContentView: View {
             Group {
                 if model.isSyncActive {
                     ProgressView()
-                } else if model.menuBarState == .attention {
+                } else if model.statusKey == "error" {
                     Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
                 } else if model.conflictCount > 0 {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
@@ -941,6 +937,8 @@ struct ContentView: View {
                     Image(systemName: "folder.badge.plus").foregroundStyle(.secondary)
                 } else if model.menuBarState == .attention {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                } else if model.hasPendingDownloads {
+                    Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
                 } else {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 }
