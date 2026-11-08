@@ -169,8 +169,10 @@ struct HistoryChecks {
         let largeRun = "2026-11-08T03:12:40Z 开始 [大目录] 双向合并：/local → /cloud\n2026-11-08T03:12:44Z 结束 [大目录]，退出码 2：" + manyFailures + "\nuploaded=0 downloaded=0 failed=12858 online_only=12858\nGRAPH_INDEX\t{}\n2026-11-08T03:12:44Z 失败 [大目录]：未完全成功：GRAPH_INDEX\t{}\n"
         assert(largeRun.utf8.count > 2_000_000)
         try largeRun.write(to: largeLog, atomically: true, encoding: .utf8)
-        assert(syncIssueGroups(try readSyncHistory(at: largeLog.path)[0])[0].events.count == 12858)
-        assert(syncIssueGroups(try SyncHistoryReader(path: largeLog.path).read()[0])[0].events.count == 12858)
+        let largeDisk = try readSyncHistory(at: largeLog.path)
+        let largeCached = try SyncHistoryReader(path: largeLog.path).read()
+        assert(syncIssueGroups(largeDisk[0])[0].events.count == 12858)
+        assert(syncIssueGroups(largeCached[0])[0].events.count == 12858)
         print("History parser checks passed")
     }
 }
