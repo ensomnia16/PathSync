@@ -173,6 +173,19 @@ struct HistoryChecks {
         let largeCached = try SyncHistoryReader(path: largeLog.path).read()
         assert(syncIssueGroups(largeDisk[0])[0].events.count == 12858)
         assert(syncIssueGroups(largeCached[0])[0].events.count == 12858)
+        var pendingDownload = SyncHistoryRecord(id: 100, startedAt: Date(), pairName: "Download", direction: "双向合并", sourcePath: "/l", destinationPath: "/c", isPreview: false)
+        pendingDownload.finishedAt = Date(); pendingDownload.exitCode = 2
+        pendingDownload.output = onlineFailure + "\nonline_only=2"
+        pendingDownload.finishParsing()
+        assert(pendingDownload.awaitingDownloadOnly)
+        assert(!pendingDownload.needsAttention, "normal pending downloads must not be presented as blocking errors")
+        var blocked = pendingDownload
+        blocked.events = []; blocked.counts = [:]
+        blocked.output += "\nFAILED\tcache/a.pkgf\tOneDrive 本地目录尚未跟上服务器元数据\nfailed=3"
+        blocked.finishParsing()
+        assert(!blocked.awaitingDownloadOnly && blocked.needsAttention)
+        var terminated = pendingDownload; terminated.exitCode = 15
+        assert(!terminated.awaitingDownloadOnly && terminated.needsAttention)
         print("History parser checks passed")
     }
 }

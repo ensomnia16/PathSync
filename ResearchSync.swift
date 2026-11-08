@@ -2051,6 +2051,9 @@ struct ResearchSyncApp: App {
             .windowStyle(.titleBar)
             .windowResizability(.contentMinSize)
             .defaultSize(width: 980, height: 680)
+        Window("同步详情", id: "sync-details") { SyncDetailsView(model: model) }
+            .windowResizability(.contentMinSize)
+            .defaultSize(width: 800, height: 570)
     }
 }
 #endif
