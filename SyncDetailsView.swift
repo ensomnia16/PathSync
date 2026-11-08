@@ -62,11 +62,8 @@ struct SyncDetailsView: View {
                         .disabled(!model.canRun(pair))
                 }
                 if model.isPairSyncActive(pair) {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(model.pairProgress[pair.id] ?? (english ? "Syncing. Results refresh when the run finishes." : "正在同步，完成后会自动刷新结果。"))
-                            .font(.callout).lineLimit(2)
-                    }
+                    SyncPairProgressView(progress: model.progressForPair(pair), language: model.config.language,
+                                         fallback: model.pairProgress[pair.id])
                 } else {
                     Text(model.pairStatus(pair).text).font(.callout).foregroundStyle(model.pairStatus(pair).color)
                 }
