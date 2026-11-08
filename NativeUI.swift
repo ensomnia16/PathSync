@@ -91,6 +91,7 @@ extension SyncModel {
         if busy { return t(statusKey == "previewing" ? "previewing" : "syncing") }
         if conflictCount > 0 { return String(format: t("conflictCountShort"), conflictCount) }
         if !hasEnabledPairs { return t("menubarNoPairs") }
+        if menuBarState == .attention { return t("menubarStateAttention") }
         return t("statusReady")
     }
 
@@ -103,10 +104,23 @@ extension SyncModel {
         if let count = conflictsByPair[pair.id]?.count, count > 0 {
             return (String(format: t("pairConflictsShort"), count), .orange)
         }
-        if let record = lastRecord(for: pair), record.hasFailures || record.finishedAt == nil {
-            return (t("pairLastFailed"), .red)
+        if let record = lastRecord(for: pair) {
+            if record.incompleteOrFailed { return (t("pairLastFailed"), .red) }
+            if record.needsAttention { return (t("pairNeedsAttention"), .orange) }
         }
         return (lastRecord(for: pair) == nil ? t("pairOK") : t("pairSynced"), .green)
+    }
+
+    var menuBarIssueSummary: String? {
+        guard menuBarState == .attention else { return nil }
+        if statusKey == "error" { return statusDetail ?? t("error") }
+        if let historyError { return historyError }
+        if conflictCount > 0 { return String(format: t("conflictCountShort"), conflictCount) }
+        let affected = savedConfig.pairs.filter { $0.enabled && lastRecord(for: $0)?.needsAttention == true }
+        guard !affected.isEmpty else { return nil }
+        let names = affected.map(\.name).joined(separator: config.language == "en" ? ", " : "、")
+        let failed = affected.contains { lastRecord(for: $0)?.incompleteOrFailed == true }
+        return names + (config.language == "en" ? (failed ? ": last sync incomplete" : ": needs attention") : (failed ? "：上次同步未完成" : "：有待处理事项"))
     }
 
     /// "已同步 · 16:05" for menu rows, "双向合并 · 上次同步 16:05" for cards.
@@ -458,6 +472,7 @@ struct MenuBarPanel: View {
         if model.isSyncActive { return .accentColor }
         if model.statusKey == "error" { return .red }
         if model.conflictCount > 0 { return .orange }
+        if model.menuBarState == .attention { return .orange }
         return model.menuBarState == .enabled ? .green : .secondary
     }
 
@@ -471,6 +486,10 @@ struct MenuBarPanel: View {
                     Circle().fill(statusColor).frame(width: 5, height: 5)
                     Text(t(model.menuBarState.titleKey))
                         .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if let reason = model.menuBarIssueSummary {
+                    Text(reason).font(.system(size: 10)).foregroundStyle(.orange)
+                        .lineLimit(2).help(reason)
                 }
             }
             Spacer()
@@ -897,6 +916,8 @@ struct ContentView: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 } else if !model.hasEnabledPairs {
                     Image(systemName: "folder.badge.plus").foregroundStyle(.secondary)
+                } else if model.menuBarState == .attention {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 } else {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 }
@@ -1228,6 +1249,18 @@ struct ContentView: View {
 
             Section {
                 Toggle(t("checkCloud"), isOn: $model.config.checkCloudBeforeSync)
+                LabeledContent(model.config.language == "en" ? "OneDrive metadata index" : "OneDrive 元数据索引") {
+                    HStack {
+                        Text(model.oneDriveConnected ? (model.config.language == "en" ? "Connected" : "已连接") : (model.config.language == "en" ? "Not connected" : "尚未连接"))
+                            .foregroundStyle(.secondary)
+                        Button(model.config.language == "en" ? "Connect read-only…" : "连接只读查询…") { model.connectOneDrive() }
+                            .disabled(model.oneDriveConnecting || model.busy)
+                        if model.oneDriveConnecting { ProgressView().controlSize(.small) }
+                    }
+                }
+                if let error = model.oneDriveConnectionError { Text(error).foregroundStyle(.orange) }
+                Text(model.config.language == "en" ? "First connection uses rclone’s Microsoft OAuth app with Files.Read and offline_access. Credentials stay in this Mac’s Keychain. Background sync refreshes silently; it never opens a browser." : "首次连接通过 rclone 的微软授权应用申请 Files.Read 及 offline_access。登录凭据仅存这台 Mac 的钥匙串。后续后台自动续期，不打开浏览器。")
+                    .font(.caption).foregroundStyle(.secondary)
             } footer: {
                 Text(t("checkCloudHint"))
             }

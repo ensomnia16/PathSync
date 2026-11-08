@@ -556,7 +556,10 @@ func syncStatusJSON(_ config: SyncConfig) -> String {
         let record = history.first { record in
             !record.isPreview && (
                 (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
-                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath))
+                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+                || (record.sourcePath.isEmpty && record.destinationPath.isEmpty
+                    && record.pairName == pair.name
+                    && config.pairs.filter { $0.name == pair.name }.count == 1))
         }
         let result: String
         switch record {
@@ -618,7 +621,7 @@ private func centralFilterArguments(_ pair: SyncPair, config: SyncConfig) throws
 private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: Bool,
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
                      plan: Bool = false, backupArguments: [String] = [], language: String,
-                     checkCloud: Bool = false,
+                     checkCloud: Bool = false, oneDriveRoot: String = "",
                      progress: ((UUID, String) -> Void)?) throws -> String {
     if checkCloud, let problem = cloudPrecheckProblem(pair, language: language) {
         // Logged as a run so History shows the skipped pair and its reason.
@@ -645,7 +648,10 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      "--backup-retention-days", String(backupRetentionDays)]
     arguments += syncFilterArguments(pair, excludeLatex: excludeLatex)
     arguments += try cloudOnlyArguments(pair)
-    if checkCloud && cloudStorageProvider(pair.cloudPath) != nil { arguments.append("--hydrate-online-only") }
+    let authHelper = Bundle.main.resourceURL!.appendingPathComponent("OneDriveAuth")
+    if !oneDriveRoot.isEmpty, cloud.hasPrefix(oneDriveRoot + "/"), OneDriveConnection.isConnected {
+        arguments += ["--graph-auth-helper", authHelper.path, "--onedrive-root", oneDriveRoot]
+    }
     if dryRun { arguments.append("--dry-run") }
     if dryRun && plan { arguments.append("--plan-json") }
     arguments += backupArguments
@@ -694,6 +700,8 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
             } else if fields.count == 4, fields[1] == "PREFETCH" {
                 progress(pair.id, String(format: uiText("prefetchProgress", language: language),
                                          pair.name, String(fields[2]), String(fields[3])))
+            } else if fields.count >= 3, fields[1] == "GRAPH" {
+                progress(pair.id, pair.name + (language == "en" ? ": checking cloud index…" : "：正在查询云端增量索引…"))
             } else if fields.count >= 3, fields[1] == "FILE" {
                 progress(pair.id, String(format: uiText("fileProgress", language: language),
                                          pair.name, fields.dropFirst(2).joined(separator: "\t")))
@@ -931,7 +939,7 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
                                 backupRetentionDays: config.backupRetentionDays,
                                 dryRun: dryRun, plan: plan,
                                 backupArguments: config.backupArguments(pair), language: config.language,
-                                checkCloud: config.checkCloudBeforeSync,
+                                checkCloud: config.checkCloudBeforeSync, oneDriveRoot: config.oneDriveRoot,
                                 progress: progress)
                 }
                 if case .failure(let error) = result {
@@ -1062,6 +1070,23 @@ final class SyncModel: ObservableObject {
     @Published var statusKey = "ready"
     @Published var statusDetail: String?
     @Published var busy = false
+    @Published var oneDriveConnected = OneDriveConnection.isConnected
+    @Published var oneDriveConnecting = false
+    @Published var oneDriveConnectionError: String?
+    func connectOneDrive() {
+        guard !oneDriveConnecting else { return }
+        oneDriveConnecting = true; oneDriveConnectionError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let success = OneDriveConnection.perform("--connect")
+            DispatchQueue.main.async {
+                self.oneDriveConnecting = false
+                self.oneDriveConnected = OneDriveConnection.isConnected
+                if !success {
+                    self.oneDriveConnectionError = self.config.language == "en" ? "Connection was cancelled or failed. Try again." : "连接已取消或未成功，请重试。"
+                }
+            }
+        }
+    }
     @Published private(set) var observedSyncRunning = false
     @Published var conflictsByPair: [UUID: [PendingConflict]] = [:]
     @Published var history: [SyncHistoryRecord] = []
@@ -1157,7 +1182,11 @@ final class SyncModel: ObservableObject {
     var menuBarState: SyncMenuBarState {
         .resolve(scheduleEnabled: savedConfig.enabled,
                  hasEnabledPairs: savedConfig.pairs.contains { $0.enabled },
-                 uiBusy: busy, workerRunning: observedSyncRunning)
+                 uiBusy: busy, workerRunning: observedSyncRunning,
+                 hasIssues: statusKey == "error" || historyError != nil || conflictCount > 0
+                    || savedConfig.pairs.filter { $0.enabled }.contains { pair in
+                        lastRecord(for: pair)?.needsAttention == true
+                    })
     }
 
     func refreshSyncActivity() {
@@ -1257,7 +1286,10 @@ final class SyncModel: ObservableObject {
         history.first { record in
             !record.isPreview && (
                 (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
-                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath))
+                || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+                || (record.sourcePath.isEmpty && record.destinationPath.isEmpty
+                    && record.pairName == pair.name
+                    && config.pairs.filter { $0.name == pair.name }.count == 1))
         }
     }
 
@@ -1376,6 +1408,9 @@ final class SyncModel: ObservableObject {
                     pairs.contains { pair in
                         (record.sourcePath == pair.localPath && record.destinationPath == pair.cloudPath)
                         || (record.sourcePath == pair.cloudPath && record.destinationPath == pair.localPath)
+                        || (record.sourcePath.isEmpty && record.destinationPath.isEmpty
+                            && record.pairName == pair.name
+                            && pairs.filter { $0.name == pair.name }.count == 1)
                     }
                 }
             } : nil

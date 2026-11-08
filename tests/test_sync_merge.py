@@ -644,7 +644,7 @@ class MergeTests(unittest.TestCase):
         with self.assertRaisesRegex(OSError, '规则文件仅在线'):
             self.run_in_process('--dry-run', '--plan-json', online=['.pathsyncignore'])
         self.assertEqual(self.snapshot_everything(), before)
-        code, output, hydrated = self.run_in_process(online=['.pathsyncignore'])
+        code, output, hydrated = self.run_in_process('--download-online-content', online=['.pathsyncignore'])
         self.assertEqual(code, 0, output)
         self.assertEqual([Path(path).name for path in hydrated], ['.pathsyncignore'])
         self.assertTrue((self.local / '.pathsyncignore').exists())
@@ -694,13 +694,72 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.run_merge().returncode, 0)
         (self.cloud / 'paper.tex').write_text('cloud edit')
         code, output, hydrated = self.run_in_process(
-            '--hydrate-online-only', online=['paper.tex', 'untouched.tex'])
+            '--hydrate-online-only', '--download-online-content', online=['paper.tex', 'untouched.tex'])
         self.assertEqual(code, 0, output)
         self.assertEqual([Path(item).name for item in hydrated], ['paper.tex'],
                          'only files the merge must read are downloaded')
         self.assertIn('ONLINE_ONLY\t1', output)
         self.assertLess(output.index('PROGRESS\tPREFETCH\t0\t1'), output.index('PROGRESS\tFILE\tpaper.tex'))
         self.assertEqual((self.local / 'paper.tex').read_text(), 'cloud edit')
+
+    def graph_run(self, items, *extra, online=()):
+        def fetch(url):
+            if '/root:/' in url:
+                return {'id': 'root', 'name': 'cloud', 'folder': {}}
+            return {'value': items, '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/drives/d/items/root/delta?cursor=test'}
+        with mock.patch.object(sync_merge.graph_index, 'credentials', return_value={'access_token':'fixture','drive_id':'d'}), \
+             mock.patch.object(sync_merge.graph_index.GraphClient, 'get', side_effect=fetch):
+            return self.run_in_process('--graph-auth-helper', '/fixture', '--onedrive-root', str(self.root), *extra, online=online)
+
+    def graph_file(self, name):
+        path = self.cloud / name
+        return {'id': name, 'name': name, 'parentReference': {'id': 'root'},
+                'size': path.stat().st_size,
+                'file': {'hashes': {'quickXorHash': sync_merge.graph_index.content_hashes(path)['quickXorHash']}},
+                'fileSystemInfo': {'lastModifiedDateTime': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}}
+
+    def test_graph_equal_placeholder_never_reads_cloud_content_and_reuses_hashes(self):
+        (self.local/'a.txt').write_text('same'); shutil.copy2(self.local/'a.txt', self.cloud/'a.txt')
+        item = self.graph_file('a.txt')
+        with mock.patch.object(sync_merge, 'checked_digests', side_effect=AssertionError('cloud content read')):
+            code, output, hydrated = self.graph_run([item], online=['a.txt'])
+            self.assertEqual(code, 0, output); self.assertEqual(hydrated, [])
+            self.assertIn('unchanged=1', output); self.assertIn('"hash_reads": 1', output)
+            code, output, hydrated = self.graph_run([], online=['a.txt'])
+            self.assertEqual(code, 0, output); self.assertEqual(hydrated, [])
+            self.assertIn('"hash_hits": 1', output); self.assertIn('"hash_reads": 0', output)
+        self.assertEqual(json.loads(self.state.read_text())['files']['a.txt']['anchorHash'], hashlib.sha256(b'same').hexdigest())
+
+    def test_graph_remote_mirror_lag_preserves_path_but_allows_independent_upload(self):
+        (self.cloud/'remote.txt').write_text('remote'); item = self.graph_file('remote.txt')
+        (self.cloud/'remote.txt').unlink(); (self.local/'new.txt').write_text('keep')
+        code, output, _ = self.graph_run([item])
+        self.assertEqual(code, 2, output)
+        self.assertIn('尚未跟上服务器', output)
+        self.assertEqual((self.cloud/'new.txt').read_text(), 'keep')
+        self.assertFalse((self.local/'remote.txt').exists())
+
+    def test_graph_lag_inside_missing_anchored_directory_never_deletes_survivors(self):
+        (self.local/'d').mkdir(); (self.local/'d'/'a.txt').write_text('base')
+        self.assertEqual(self.run_merge().returncode,0)
+        stat=(self.cloud/'d'/'a.txt').stat()
+        item={'id':'file','name':'a.txt','parentReference':{'id':'dir'},'size':4,
+              'file':{'hashes':{'quickXorHash':sync_merge.graph_index.content_hashes(self.local/'d'/'a.txt')['quickXorHash']}},
+              'fileSystemInfo':{'lastModifiedDateTime':datetime.fromtimestamp(stat.st_mtime,timezone.utc).isoformat()}}
+        shutil.rmtree(self.cloud/'d')
+        code,output,_=self.graph_run([{'id':'dir','name':'d','folder':{},'parentReference':{'id':'root'}},item])
+        self.assertEqual(code,2,output)
+        self.assertEqual((self.local/'d'/'a.txt').read_text(),'base')
+        self.assertIn('未确认目录删除',output)
+
+    def test_graph_changed_placeholder_preserves_both_files(self):
+        (self.local/'a.txt').write_text('same'); shutil.copy2(self.local/'a.txt', self.cloud/'a.txt')
+        self.graph_run([self.graph_file('a.txt')])
+        (self.cloud/'a.txt').write_text('different cloud edit')
+        code, output, hydrated = self.graph_run([self.graph_file('a.txt')], online=['a.txt'])
+        self.assertEqual(code, 2, output); self.assertEqual(hydrated, [])
+        self.assertEqual((self.local/'a.txt').read_text(), 'same')
+        self.assertEqual((self.cloud/'a.txt').read_text(), 'different cloud edit')
 
     def test_unique_files_and_one_sided_updates(self):
         (self.local / 'paper.tex').write_text('local v1')
@@ -789,14 +848,26 @@ class MergeTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 sync_merge.digest(pipe)
 
-    def test_only_real_sync_opts_into_cloud_materialization(self):
+    def test_materialization_requires_explicit_opt_in_and_preview_still_blocks(self):
         (self.local / 'paper.tex').write_text('research')
-        with mock.patch.object(sync_merge, 'enable_cloud_materialization') as enable:
-            self.run_in_process('--dry-run', '--plan-json')
-            enable.assert_not_called()
-            code, output, _ = self.run_in_process()
-            self.assertEqual(code, 0, output)
-            enable.assert_called_once_with()
+        for extra, expected in [((), False), (('--dry-run',), False),
+                                (('--download-online-content', '--dry-run'), False),
+                                (('--download-online-content',), True)]:
+            with mock.patch.object(sync_merge, 'enable_cloud_materialization') as enable:
+                code, output, _ = self.run_in_process(*extra)
+                self.assertEqual(code, 0, output)
+                enable.assert_called_once_with(expected)
+
+    def test_default_does_not_hydrate_unknown_placeholders(self):
+        (self.local / 'paper.tex').write_text('local')
+        (self.cloud / 'paper.tex').write_text('cloud')
+        before = self.snapshot_everything()
+        code, output, hydrated = self.run_in_process('--hydrate-online-only', online=['paper.tex'])
+        self.assertEqual(code, 2, output)
+        self.assertEqual(hydrated, [])
+        self.assertEqual((self.local / 'paper.tex').read_text(), 'local')
+        self.assertEqual((self.cloud / 'paper.tex').read_text(), 'cloud')
+        self.assertIn('未下载', output)
 
     def test_materialization_policy_failure_leaves_files_and_state_untouched(self):
         (self.local / 'paper.tex').write_text('research')
@@ -816,7 +887,7 @@ library=ctypes.CDLL(None,use_errno=True)
 assert library.setiopolicy_np(3,0,1)==0
 sys.argv[0]='sync_merge.py'
 assert sync_merge.main()==0
-expected=1 if '--dry-run' in sys.argv else 2
+expected=2 if '--download-online-content' in sys.argv and '--dry-run' not in sys.argv else 1
 assert library.getiopolicy_np(3,0)==expected
 reader='import ctypes; print(ctypes.CDLL(None).getiopolicy_np(3,0))'
 assert subprocess.check_output([sys.executable,'-c',reader],text=True).strip()==str(expected)
@@ -893,7 +964,7 @@ print('POLICY_AND_CHILD_OK')
     def test_large_import_copies_before_all_prefetch_results_are_consumed(self):
         for index in range(100):
             (self.cloud / f'file-{index:03}.txt').write_text(str(index))
-        result = self.run_merge(policy='keep-both')
+        result = self.run_merge('--download-online-content', policy='keep-both')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         first_copy = result.stdout.index('PROGRESS\tFILE\tfile-000.txt')
         last_prefetch = result.stdout.index('PROGRESS\tPREFETCH\t100\t100')
