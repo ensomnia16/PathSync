@@ -206,10 +206,13 @@ def indexed_entries(db, root_id, cloud, stats):
         if row[3]:
             continue
         name = relative(identity)
-        # OneDrive can expose a colon as a numeric entity in Graph while
-        # File Provider exposes ':'. Prefer an exact existing mirror name;
-        # translate only this observed encoding and reject every collision.
-        decoded = re.sub(r'&#(?:x0*3a|0*58);', ':', name, flags=re.IGNORECASE)
+        # Graph can expose colons and double quotes as numeric entities while
+        # File Provider exposes the literal characters. Exact mirror names win;
+        # decode only these observed characters, never arbitrary HTML entities
+        # (which could introduce path separators), and reject every collision.
+        decoded = re.sub(r'&#(?:(x0*3a|0*58)|x0*22|0*34);',
+                         lambda match: ':' if match[1] else '"',
+                         name, flags=re.IGNORECASE)
         if decoded != name and not os.path.lexists(cloud / name):
             name = decoded
             stats['mapped_names'] += 1
