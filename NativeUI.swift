@@ -107,9 +107,15 @@ extension SyncModel {
 
     func isPairSyncActive(_ pair: SyncPair) -> Bool {
         guard isSyncActive else { return false }
+        if let progress = progressForPair(pair) { return progress.state == .active }
         if syncingPairIDs.contains(pair.id) { return true }
         guard let record = lastRecord(for: pair) else { return false }
         return record.finishedAt == nil
+    }
+
+    func progressForPair(_ pair: SyncPair) -> SyncPairProgress? {
+        guard isSyncActive else { return nil }
+        return syncProgress?.pairs.first { $0.id == pair.id }
     }
 
     func pairStatus(_ pair: SyncPair) -> (text: String, color: Color) {
@@ -534,7 +540,9 @@ struct MenuBarPanel: View {
     }
 
     private var primaryAction: some View {
-        Button { if model.isSyncActive { model.stopSync() } else { model.syncNow(all: true) } } label: {
+        VStack(alignment: .leading, spacing: 10) {
+            if model.isSyncActive { SyncRunProgressView(snapshot: model.syncProgress, language: model.config.language) }
+            Button { if model.isSyncActive { model.stopSync() } else { model.syncNow(all: true) } } label: {
             HStack(spacing: 7) {
                 if model.isSyncActive {
                     ProgressView().controlSize(.small)
@@ -548,6 +556,7 @@ struct MenuBarPanel: View {
         .buttonStyle(.borderedProminent).controlSize(.large)
         .disabled(model.isSyncActive ? (!model.canStopSync || model.stoppingSync) : (!model.canRun || !model.hasEnabledPairs))
         .help(t("syncAllHint"))
+        }
     }
 
     private func pairRow(_ pair: SyncPair) -> some View {
@@ -561,7 +570,15 @@ struct MenuBarPanel: View {
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.displayName(pair)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                    Text(t(pair.scheduledDirection)).font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(model.progressForPair(pair)?.label(language: model.config.language) ?? t(pair.scheduledDirection))
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                    if model.isPairSyncActive(pair) {
+                        if let value = model.progressForPair(pair)?.fraction {
+                            ProgressView(value: value).progressViewStyle(.linear).frame(width: 100)
+                        } else {
+                            ProgressView().progressViewStyle(.linear).frame(width: 100)
+                        }
+                    }
                 }
                 Spacer(minLength: 8)
                 VStack(alignment: .trailing, spacing: 3) {
@@ -920,6 +937,9 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 overviewHeader
+                if model.isSyncActive {
+                    SyncRunProgressView(snapshot: model.syncProgress, language: model.config.language)
+                }
                 if let banner = model.resultBanner {
                     Label(banner, systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -1038,9 +1058,12 @@ struct ContentView: View {
                     pathLine("laptopcomputer", pair.localPath)
                     pathLine("cloud", pair.cloudPath)
                 }
+                if model.isPairSyncActive(pair) {
+                    SyncPairProgressView(progress: model.progressForPair(pair), language: model.config.language,
+                                         fallback: model.pairProgress[pair.id])
+                }
                 HStack(spacing: 8) {
-                    Text(model.busy && model.pairProgress[pair.id] != nil
-                         ? model.pairProgress[pair.id]! : model.pairFootnote(pair))
+                    Text(model.isPairSyncActive(pair) ? t(pair.scheduledDirection) : model.pairFootnote(pair))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

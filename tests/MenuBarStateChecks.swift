@@ -42,6 +42,15 @@ struct MenuBarStateChecks {
         assert(model.menuBarState == .attention)
         model.statusKey = "ready"
         let pair = config.pairs[0]
+        let progressModel = SyncModel(testConfig: config, workerRunning: true)
+        var progressItem = SyncPairProgress(id: pair.id)
+        progressItem.stage = .files; progressItem.processed = 128; progressItem.total = 256
+        progressModel.syncProgress = SyncProgressSnapshot(runID: UUID().uuidString, pairs: [progressItem])
+        assert(progressModel.isPairSyncActive(pair), "background workers must expose live pair progress")
+        assert(progressModel.progressForPair(pair)?.fraction == 0.5)
+        progressItem.state = .completed
+        progressModel.syncProgress?.pairs = [progressItem]
+        assert(!progressModel.isPairSyncActive(pair), "finished pairs must stop spinning while other pairs run")
         var failed = SyncHistoryRecord(id: 1, startedAt: Date(), pairName: pair.name,
                                       direction: "双向合并", sourcePath: pair.localPath,
                                       destinationPath: pair.cloudPath, isPreview: false)

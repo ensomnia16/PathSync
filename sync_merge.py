@@ -336,8 +336,7 @@ class CloudPrefetch:
         self.futures.pop(name)
         self.fill()
         self.completed += 1
-        if self.completed % 8 == 0 or self.completed == len(self.names):
-            print(f'PROGRESS\tPREFETCH\t{self.completed}\t{len(self.names)}', flush=True)
+        print(f'PROGRESS\tPREFETCH\t{self.completed}\t{len(self.names)}', flush=True)
         return error
 
     def close(self):
@@ -1143,12 +1142,12 @@ def _sync_files(args, local, cloud, files, conflicts):
     prefetch = CloudPrefetch(cloud, [] if args.dry_run or not args.download_online_content or args.direction == 'upload' else import_names, online_only,
                              order=ordered_names)
     args._prefetch = prefetch
-    total_names = len(names)
+    total_names = len(ordered_names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
     for processed, name in enumerate(ordered_names, 1):
         sync_cancel.check()
-        if processed % 128 == 0:
-            print(f'PROGRESS\tPROCESS\t{processed}\t{total_names}', flush=True)
+        if total_names <= 128 or processed % 128 == 0 or name in prefetch.futures:
+            print(f'PROGRESS\tPROCESS\t{processed - 1}\t{total_names}', flush=True)
         if name in tree_record_names:
             continue
         if blocked(name):
@@ -1262,6 +1261,7 @@ def _sync_files(args, local, cloud, files, conflicts):
 
             if not args.download_online_content and cloud_sig is not None and is_dataless(cloud_file):
                 counts['online_only'] += 1
+            print(f'PROGRESS\tPROCESS\t{processed - 1}\t{total_names}', flush=True)
             print(f'PROGRESS\tFILE\t{name}', flush=True)
             local_file = safe_path(local, name)
             cloud_file = safe_path(cloud, name)
@@ -1427,6 +1427,8 @@ def _sync_files(args, local, cloud, files, conflicts):
             planned('failed', name, detail=str(error))
             counts['failed'] += 1
 
+    print(f'PROGRESS\tPROCESS\t{total_names}\t{total_names}', flush=True)
+    print('PROGRESS\tFINALIZE\tpackages', flush=True)
     prefetch.close()
     for remote_name, entry in sorted(packages.items()):
         sync_cancel.check()

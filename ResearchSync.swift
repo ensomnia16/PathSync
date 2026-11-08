@@ -579,7 +579,12 @@ func syncStatusJSON(_ config: SyncConfig) -> String {
         if let record { entry["lastSync"] = formatter.string(from: record.finishedAt ?? record.startedAt) }
         return entry
     }
-    let report: [String: Any] = ["running": syncIsRunning(), "scheduledSync": config.enabled, "pairs": pairs]
+    let running = syncIsRunning()
+    var report: [String: Any] = ["running": running, "scheduledSync": config.enabled, "pairs": pairs]
+    if running, let control = SyncRunControl.active(),
+       let snapshot = SyncProgressSnapshot.read(runID: control.runID),
+       let encoded = try? JSONEncoder().encode(snapshot),
+       let value = try? JSONSerialization.jsonObject(with: encoded) { report["progress"] = value }
     let data = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])) ?? Data()
     return String(decoding: data, as: UTF8.self)
 }
@@ -667,7 +672,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
                      plan: Bool = false, backupArguments: [String] = [], language: String,
                      checkCloud: Bool = false, oneDriveRoot: String = "",
-                     control: SyncRunControl? = nil,
+                     control: SyncRunControl? = nil, progressStore: SyncProgressStore? = nil,
                      progress: ((UUID, String) -> Void)?) throws -> String {
     if control?.stopRequested == true { throw syncStoppedError() }
     if checkCloud, let problem = cloudPrecheckProblem(pair, language: language) {
@@ -726,6 +731,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     defer { watchdog.cancel() }
     var collected = Data()
     var lineBuffer = Data()
+    var progressItem = SyncPairProgress(id: pair.id)
     while true {
         let chunk = output.fileHandleForReading.availableData
         if chunk.isEmpty { break }
@@ -738,25 +744,9 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
             let line = String(decoding: lineBuffer[..<newline], as: UTF8.self)
             lineBuffer.removeSubrange(...newline)
             let fields = line.split(separator: "\t")
-            guard fields.first == "PROGRESS", let progress else { continue }
-            if fields.count == 5, fields[1] == "SCAN" || fields[1] == "SCAN_DONE" {
-                let side = uiText(fields[2] == "cloud" ? "cloud" : "local", language: language)
-                progress(pair.id, String(format: uiText("scanProgress", language: language),
-                                         pair.name, side, String(fields[3]), String(fields[4])))
-            } else if fields.count == 4, fields[1] == "PROCESS" {
-                progress(pair.id, String(format: uiText("processProgress", language: language),
-                                         pair.name, String(fields[2]), String(fields[3])))
-            } else if fields.count == 4, fields[1] == "PREFETCH" {
-                progress(pair.id, String(format: uiText("prefetchProgress", language: language),
-                                         pair.name, String(fields[2]), String(fields[3])))
-            } else if fields.count >= 3, fields[1] == "GRAPH" {
-                progress(pair.id, pair.name + (language == "en" ? ": checking cloud index…" : "：正在查询云端增量索引…"))
-            } else if fields.count >= 3, fields[1] == "FILE" {
-                progress(pair.id, String(format: uiText("fileProgress", language: language),
-                                         pair.name, fields.dropFirst(2).joined(separator: "\t")))
-            } else if fields.count >= 4, fields[1] == "WAIT" {
-                progress(pair.id, String(format: uiText("waitingForCloud", language: language),
-                                         pair.name, String(fields[2]), String(fields[3])))
+            if progressItem.consume(fields) {
+                progressStore?.update(progressItem)
+                progress?(pair.id, progressItem.message(pairName: pair.name, language: language))
             }
         }
     }
@@ -962,6 +952,8 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
         let shared = try OneDriveRules.read(config, requiring: Set(selectedPairs(config, pairID: pairID).map(\.id)))
         let effective = shared.config
         let selected = selectedPairs(effective, pairID: pairID)
+        let progressStore = SyncProgressStore(runID: control.runID, pairIDs: selected.map(\.id))
+        defer { progressStore.finish() }
         if let confirmed, selected != selectedPairs(confirmed, pairID: pairID) ||
             effective.excludeLatexIntermediates != confirmed.excludeLatexIntermediates ||
             effective.oneDriveRulesManagedPaths != confirmed.oneDriveRulesManagedPaths {
@@ -992,8 +984,12 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
                                 dryRun: dryRun, plan: plan,
                                 backupArguments: config.backupArguments(pair), language: config.language,
                                 checkCloud: config.checkCloudBeforeSync, oneDriveRoot: config.oneDriveRoot,
-                                control: control,
+                                control: control, progressStore: progressStore,
                                 progress: progress)
+                }
+                switch result {
+                case .success: progressStore.complete(pair.id, state: .completed)
+                case .failure(let error): progressStore.complete(pair.id, state: (error as NSError).code == 130 ? .stopped : .incomplete)
                 }
                 if case .failure(let error) = result {
                     appendLog("\((error as NSError).code == 130 ? "停止" : "失败") [\(pair.name)]：\(error.localizedDescription)")
@@ -1169,6 +1165,7 @@ final class SyncModel: ObservableObject {
     }
     @Published var syncingPairIDs: Set<UUID> = []
     @Published var pairProgress: [UUID: String] = [:]
+    @Published var syncProgress: SyncProgressSnapshot?
     /// Summed counts of the last finished sync, for the result banner.
     @Published var lastRunCounts: [String: Int]?
     @Published var localBackupSize: Int64?
@@ -1259,6 +1256,8 @@ final class SyncModel: ObservableObject {
 
     func refreshSyncActivity() {
         let control = SyncRunControl.active()
+        let snapshot = control.flatMap { SyncProgressSnapshot.read(runID: $0.runID) }
+        if syncProgress != snapshot { syncProgress = snapshot }
         canStopSync = isSyncActive && control != nil
         stoppingSync = control?.stopRequested == true
         // These in-process jobs also use the lock, but are not an external
@@ -1267,7 +1266,7 @@ final class SyncModel: ObservableObject {
         let running = syncIsRunning()
         guard observedSyncRunning != running else { return }
         observedSyncRunning = running
-        if !running { stoppingSync = false; canStopSync = false; refreshState() }
+        if !running { stoppingSync = false; canStopSync = false; syncProgress = nil; refreshState() }
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
@@ -1702,6 +1701,7 @@ final class SyncModel: ObservableObject {
         let current = config
         syncingPairIDs = Set(selectedPairs(current, pairID: id).map(\.id))
         pairProgress = [:]
+        syncProgress = nil
         DispatchQueue.global(qos: .utility).async {
             let resultKey: String
             let resultDetail: String?
@@ -1736,6 +1736,7 @@ final class SyncModel: ObservableObject {
                 self.canStopSync = false
                 self.syncingPairIDs = []
                 self.pairProgress = [:]
+                self.syncProgress = nil
                 self.refreshState()
                 self.refreshOneDriveRules()
                 if self.config.autoInstallUpdates { self.installAvailableUpdate() }
@@ -1753,6 +1754,7 @@ final class SyncModel: ObservableObject {
         let current = config
         syncingPairIDs = Set(selectedPairs(current, pairID: pairID).map(\.id))
         pairProgress = [:]
+        syncProgress = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let outcome = Result {
                 try previewSync(current, pairID: pairID) { id, message in
@@ -1766,6 +1768,7 @@ final class SyncModel: ObservableObject {
                 self.busy = false
                 self.syncingPairIDs = []
                 self.pairProgress = [:]
+                self.syncProgress = nil
                 switch outcome {
                 case .success(let plan):
                     self.preview = plan
