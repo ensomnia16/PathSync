@@ -36,6 +36,7 @@ struct SyncDetailsView: View {
         .frame(minWidth: 680, minHeight: 430)
         .searchable(text: $state.query, prompt: english ? "Filter affected files" : "筛选文件路径")
         .toolbar {
+            if model.isSyncActive { StopSyncButton(model: model) }
             Button { model.refreshHistory() } label: {
                 Label(english ? "Refresh" : "刷新", systemImage: "arrow.clockwise")
             }.keyboardShortcut("r", modifiers: .command)
@@ -81,6 +82,9 @@ struct SyncDetailsView: View {
                         if record.incompleteOrFailed && !model.isSyncActive {
                             Text(syncIssueSummary(record.output, language: model.config.language))
                                 .textSelection(.enabled)
+                        } else if record.stopped {
+                            Label(english ? "Sync stopped. Completed files are kept; sync again to continue." : "同步已停止。已完成的文件已保留，再次同步可继续。", systemImage: "stop.circle")
+                                .foregroundStyle(.secondary)
                         } else {
                             Label(english ? "No file issues" : "没有需要处理的文件", systemImage: "checkmark.circle")
                                 .foregroundStyle(.secondary)
@@ -142,5 +146,16 @@ struct SyncDetailsView: View {
             model.config.pairs[index].cloudOnlyPaths.append(folder)
             model.save()
         }
+    }
+}
+
+struct StopSyncButton: View {
+    @ObservedObject var model: SyncModel
+    var body: some View {
+        Button { model.stopSync() } label: {
+            Label(model.stoppingSync ? (model.config.language == "en" ? "Stopping…" : "正在停止…") : (model.config.language == "en" ? "Stop sync" : "停止同步"), systemImage: "stop.circle")
+        }
+        .disabled(!model.canStopSync || model.stoppingSync)
+        .help(model.config.language == "en" ? "Keep completed files and stop remaining work." : "保留已完成的文件，停止后续同步。")
     }
 }

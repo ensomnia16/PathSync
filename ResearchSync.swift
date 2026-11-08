@@ -592,6 +592,48 @@ func withSyncLock<T>(_ body: () throws -> T) throws -> T {
     return try body()
 }
 
+struct SyncRunControl: Codable, Equatable {
+    let runID: String
+    let pid: Int32
+    static var activePath: String { supportDirectory + "/active-sync.json" }
+    static var stopPath: String { supportDirectory + "/stop-sync.json" }
+
+    static func active(at path: String = activePath) -> SyncRunControl? {
+        guard let data = fm.contents(atPath: path),
+              let value = try? JSONDecoder().decode(Self.self, from: data),
+              UUID(uuidString: value.runID) != nil, value.pid > 0 else { return nil }
+        return value
+    }
+
+    static func begin() throws -> SyncRunControl {
+        let value = SyncRunControl(runID: UUID().uuidString, pid: getpid())
+        try JSONEncoder().encode(value).write(to: URL(fileURLWithPath: activePath), options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: activePath)
+        return value
+    }
+
+    var stopRequested: Bool {
+        Self.active(at: Self.stopPath)?.runID == runID
+    }
+
+    func requestStop() throws {
+        guard syncIsRunning(), Self.active() == self else {
+            throw NSError(domain: appID, code: 21, userInfo: [NSLocalizedDescriptionKey: "这个同步任务已经结束。"])
+        }
+        try JSONEncoder().encode(self).write(to: URL(fileURLWithPath: Self.stopPath), options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.stopPath)
+    }
+
+    func finish() {
+        if Self.active() == self { try? fm.removeItem(atPath: Self.activePath) }
+        if Self.active(at: Self.stopPath) == self { try? fm.removeItem(atPath: Self.stopPath) }
+    }
+}
+
+private func syncStoppedError() -> NSError {
+    NSError(domain: appID, code: 130, userInfo: [NSLocalizedDescriptionKey: "同步已停止，已完成的文件已保留；下次同步继续处理剩余文件。"])
+}
+
 private func refreshSavedOneDriveRules(at path: String = defaultConfigPath) throws -> SyncConfig {
     try withSyncLock {
         let current = try loadConfig(path)
@@ -622,7 +664,9 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      conflictPolicy: String, backupRetentionDays: Int, dryRun: Bool,
                      plan: Bool = false, backupArguments: [String] = [], language: String,
                      checkCloud: Bool = false, oneDriveRoot: String = "",
+                     control: SyncRunControl? = nil,
                      progress: ((UUID, String) -> Void)?) throws -> String {
+    if control?.stopRequested == true { throw syncStoppedError() }
     if checkCloud, let problem = cloudPrecheckProblem(pair, language: language) {
         // Logged as a run so History shows the skipped pair and its reason.
         appendLog("\(dryRun ? "预览" : "开始") [\(pair.name)] \(direction.label)：\(pair.localPath) → \(pair.cloudPath)")
@@ -655,6 +699,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
     if dryRun { arguments.append("--dry-run") }
     else { arguments.append("--download-online-content") }
     if dryRun && plan { arguments.append("--plan-json") }
+    if let control { arguments += ["--run-id", control.runID, "--stop-file", SyncRunControl.stopPath] }
     arguments += backupArguments
     process.arguments = arguments
     let output = Pipe()
@@ -718,6 +763,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
         .joined(separator: "\n")
     process.waitUntilExit()
     appendLog("结束 [\(pair.name)]，退出码 \(process.terminationStatus)：\(strippingSyncPlan(result).trimmingCharacters(in: .whitespacesAndNewlines))")
+    if process.terminationStatus == 130 { throw syncStoppedError() }
     activityLock.lock()
     let stalled = inactivityTimedOut
     activityLock.unlock()
@@ -907,6 +953,8 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
     }
     for pair in selectedPairs(config, pairID: pairID) { _ = try validatedCloudOnlyPaths(pair.cloudOnlyPaths) }
     return try withSyncLock {
+        let control = try SyncRunControl.begin()
+        defer { control.finish() }
         try validatedPairSet(config.pairs, including: pairID)
         let shared = try OneDriveRules.read(config, requiring: Set(selectedPairs(config, pairID: pairID).map(\.id)))
         let effective = shared.config
@@ -941,10 +989,11 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
                                 dryRun: dryRun, plan: plan,
                                 backupArguments: config.backupArguments(pair), language: config.language,
                                 checkCloud: config.checkCloudBeforeSync, oneDriveRoot: config.oneDriveRoot,
+                                control: control,
                                 progress: progress)
                 }
                 if case .failure(let error) = result {
-                    appendLog("失败 [\(pair.name)]：\(error.localizedDescription)")
+                    appendLog("\((error as NSError).code == 130 ? "停止" : "失败") [\(pair.name)]：\(error.localizedDescription)")
                 }
                 resultsLock.lock()
                 results[index] = result
@@ -965,15 +1014,19 @@ func runSync(_ config: SyncConfig, pairID: UUID? = nil, direction: SyncDirection
                                progress: progress).results
     var outputs: [String] = []
     var errors: [String] = []
+    var stopped = false
     for (pair, result) in results {
         switch result {
         case .success(let output): outputs.append("[\(pair.name)] \(output)")
-        case .failure(let error): errors.append(error.localizedDescription)
+        case .failure(let error):
+            if (error as NSError).code == 130 { stopped = true }
+            else { errors.append(error.localizedDescription) }
         }
     }
     if !errors.isEmpty {
         throw NSError(domain: appID, code: 8, userInfo: [NSLocalizedDescriptionKey: "\(results.count - errors.count)/\(results.count) 组完成；\(errors.joined(separator: "；"))"])
     }
+    if stopped { throw syncStoppedError() }
     return outputs.joined(separator: "\n")
 }
 
@@ -1071,6 +1124,8 @@ final class SyncModel: ObservableObject {
     @Published var statusKey = "ready"
     @Published var statusDetail: String?
     @Published var busy = false
+    @Published var stoppingSync = false
+    @Published var canStopSync = false
     @Published var oneDriveConnected = OneDriveConnection.isConnected
     @Published var oneDriveConnecting = false
     @Published var oneDriveConnectionError: String?
@@ -1180,6 +1235,15 @@ final class SyncModel: ObservableObject {
 
     var isSyncActive: Bool { busy || observedSyncRunning }
 
+    func stopSync() {
+        guard isSyncActive, !stoppingSync, let control = SyncRunControl.active() else { return }
+        do {
+            try control.requestStop()
+            stoppingSync = true
+            statusDetail = config.language == "en" ? "Stopping… Completed files will be kept." : "正在停止…已完成的文件会保留。"
+        } catch { statusDetail = uiError(error, language: config.language) }
+    }
+
     var menuBarState: SyncMenuBarState {
         .resolve(scheduleEnabled: savedConfig.enabled,
                  hasEnabledPairs: savedConfig.pairs.contains { $0.enabled },
@@ -1191,13 +1255,16 @@ final class SyncModel: ObservableObject {
     }
 
     func refreshSyncActivity() {
+        let control = SyncRunControl.active()
+        canStopSync = isSyncActive && control != nil
+        stoppingSync = control?.stopRequested == true
         // These in-process jobs also use the lock, but are not an external
         // scheduled sync. Avoid probing while they hold it.
         guard !busy, !refreshingOneDriveRules, !backupMoveBusy else { return }
         let running = syncIsRunning()
         guard observedSyncRunning != running else { return }
         observedSyncRunning = running
-        if !running { refreshState() }
+        if !running { stoppingSync = false; canStopSync = false; refreshState() }
     }
 
     var hasUnsavedChanges: Bool { config != savedConfig }
@@ -1652,8 +1719,9 @@ final class SyncModel: ObservableObject {
                     ? String(format: uiText("reviewsRemain", language: current.language), reviews)
                     : nil
             } catch {
-                postSyncNotification(config: current, output: "", failed: true)
-                resultKey = "error"
+                let stopped = (error as NSError).code == 130
+                if !stopped { postSyncNotification(config: current, output: "", failed: true) }
+                resultKey = stopped ? "ready" : "error"
                 resultDetail = uiError(error, language: current.language)
             }
             DispatchQueue.main.async {
@@ -1661,6 +1729,8 @@ final class SyncModel: ObservableObject {
                 self.statusDetail = resultDetail
                 self.lastRunCounts = counts
                 self.busy = false
+                self.stoppingSync = false
+                self.canStopSync = false
                 self.syncingPairIDs = []
                 self.pairProgress = [:]
                 self.refreshState()
@@ -1699,7 +1769,7 @@ final class SyncModel: ObservableObject {
                     self.statusKey = "previewReady"
                     self.statusDetail = nil
                 case .failure(let error):
-                    self.statusKey = "error"
+                    self.statusKey = (error as NSError).code == 130 ? "ready" : "error"
                     self.statusDetail = uiError(error, language: current.language)
                 }
                 self.refreshHistory()
@@ -2033,11 +2103,12 @@ struct ResearchSyncApp: App {
                 print(output)
                 exit(0)
             } catch {
-                if !args.contains("--dry-run"), let config = try? loadConfig(configPath) {
+                let stopped = (error as NSError).code == 130
+                if !stopped, !args.contains("--dry-run"), let config = try? loadConfig(configPath) {
                     postSyncNotification(config: config, output: "", failed: true)
                 }
                 fputs(error.localizedDescription + "\n", stderr)
-                exit(1)
+                exit(stopped ? 130 : 1)
             }
         }
         let model = SyncModel()

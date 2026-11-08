@@ -241,6 +241,7 @@ struct HistoryPage: View {
         if record.awaitingDownloadOnly { return usesEnglish(language) ? "Pending download" : "待下载" }
         if record.finishedAt == nil { return t("historyInterrupted") }
         if record.hasFailures { return t("historyFailed") }
+        if record.stopped { return usesEnglish(language) ? "Stopped" : "已停止" }
         if record.counts["pending_delete", default: 0] > 0 { return t("historyPendingDelete") }
         if record.needsManualReview {
             return t("historyReview")
@@ -253,6 +254,7 @@ struct HistoryPage: View {
         if record.awaitingDownloadOnly { return "arrow.down.circle" }
         if record.finishedAt == nil { return "minus.circle" }
         if record.hasFailures { return "xmark.octagon.fill" }
+        if record.stopped { return "stop.circle" }
         if record.needsAttention { return "exclamationmark.triangle.fill" }
         return record.isPreview ? "eye.circle.fill" : "checkmark.circle.fill"
     }
@@ -261,6 +263,7 @@ struct HistoryPage: View {
         if record.awaitingDownloadOnly { return .secondary }
         if record.finishedAt == nil { return .secondary }
         if record.hasFailures { return .red }
+        if record.stopped { return .secondary }
         if record.needsAttention { return .orange }
         return record.isPreview ? .blue : .green
     }
