@@ -316,6 +316,14 @@ struct HistoryPage: View {
             VStack(alignment: .leading, spacing: 10) {
                 LabeledContent(t("historyDirection"), value: directionText(record.direction))
                 LabeledContent(t("historyResult"), value: summary(record))
+                if record.hasFailures {
+                    Text(syncIssueSummary(record.output, language: language))
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
                 if !record.events.isEmpty {
                     Divider()
                     ForEach(record.events) { event in

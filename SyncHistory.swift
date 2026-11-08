@@ -198,7 +198,7 @@ func parseSyncHistory(_ text: String) -> [SyncHistoryRecord] {
     return records.sorted { $0.id > $1.id }
 }
 
-func readSyncHistory(at path: String, maxBytes: UInt64 = 2_000_000) throws -> [SyncHistoryRecord] {
+func readSyncHistory(at path: String, maxBytes: UInt64 = 16_000_000) throws -> [SyncHistoryRecord] {
     guard FileManager.default.fileExists(atPath: path) else { return [] }
     let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
     defer { try? handle.close() }
@@ -222,7 +222,7 @@ final class SyncHistoryReader {
     private var fileID: UInt64?
     private var records: [SyncHistoryRecord] = []
 
-    init(path: String, maxBytes: Int = 2_000_000) {
+    init(path: String, maxBytes: Int = 16_000_000) {
         self.path = path
         self.maxBytes = maxBytes
     }
@@ -263,4 +263,72 @@ final class SyncHistoryReader {
         records = Array(parseSyncHistory(String(decoding: buffer, as: UTF8.self)).prefix(200))
         return records
     }
+}
+
+/// Human-facing diagnosis from file events, never from trailing telemetry.
+func syncIssueSummary(_ output: String, language: String = "zh-Hans") -> String {
+    let english = language == "en"
+    let failures = output.split(whereSeparator: \.isNewline).compactMap { line -> (String, String)? in
+        let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+        guard fields.first == "FAILED", fields.count >= 2 else { return nil }
+        return (String(fields[1]), fields.count > 2 ? String(fields[2]) : String(fields[1]))
+    }
+    let online = failures.filter { $0.1.contains("仅在线文件未下载") }
+    let other = failures.filter { !$0.1.contains("仅在线文件未下载") }
+    var messages: [String] = []
+    if !online.isEmpty {
+        var folders: [String: Int] = [:]
+        for (path, _) in online {
+            let components = path.split(separator: "/")
+            let folder = components.count > 1 ? String(components[0]) : (english ? "Root files" : "根目录文件")
+            folders[folder, default: 0] += 1
+        }
+        let sorted = folders.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+        let locations = sorted.prefix(4).map { "\($0.key)（\($0.value)）" }.joined(separator: "、")
+        let remaining = sorted.count > 4 ? (english ? "; more folders in History" : "；其余目录见同步记录") : ""
+        messages.append(english
+            ? "\(online.count) online-only files need a decision: \(locations)\(remaining). No automatic download. To keep them in the cloud, add the specific subfolder to Cloud only and save; to keep a local copy, download the chosen files in OneDrive, then sync again."
+            : "\(online.count) 个仅在线文件待处理：\(locations)\(remaining)。未自动下载。只需云端保留：将对应子目录加入‘仅云端’并保存（该目录的上传也会暂停）；需要本地副本：在 OneDrive 下载所选文件后重试。")
+    }
+    if let first = other.first {
+        messages.append(english ? "\(other.count) file errors. \(first.0): \(first.1)" : "\(other.count) 项文件错误。\(first.0)：\(first.1)")
+        if other.contains(where: { $0.1.contains("尚未跟上服务器元数据") }) {
+            messages.append(english ? "Wait for OneDrive to finish updating its folder list, then retry. The affected paths were preserved; nothing was overwritten or deleted there." : "请等待 OneDrive 完成目录更新后重试；相关路径已保留，未覆盖或删除。若持续出现，请检查 OneDrive 目录状态。")
+        }
+    }
+    if messages.isEmpty {
+        // Keep actual diagnostic output, excluding protocol, counters and statistics.
+        let diagnostic = output.split(whereSeparator: \.isNewline).last { line in
+            !line.contains("GRAPH_INDEX") && !line.hasPrefix("PROGRESS\t")
+                && !line.hasPrefix("SYNC_PLAN\t") && !line.hasPrefix("uploaded=")
+                && !line.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        messages.append(diagnostic.map(String.init) ?? (english ? "Run did not complete; see History for details." : "本次运行未完成，请查看同步记录。"))
+    }
+    return messages.joined(separator: "\n")
+}
+
+struct SyncIssueGroup: Identifiable {
+    let folder: String
+    let online: Bool
+    let events: [SyncHistoryEvent]
+    var id: String { (online ? "online:" : "error:") + folder }
+    var canPauseFolder: Bool {
+        online && !folder.isEmpty && !folder.hasPrefix("/")
+            && !folder.split(separator: "/").contains("..")
+            && events.allSatisfy { $0.path.hasPrefix(folder + "/") }
+    }
+}
+
+func syncIssueGroups(_ record: SyncHistoryRecord) -> [SyncIssueGroup] {
+    let failures = record.events.filter { $0.kind == "FAILED" }
+    let grouped = Dictionary(grouping: failures) { event -> String in
+        let online = event.detail.contains("仅在线文件未下载")
+        let parts = event.path.split(separator: "/")
+        return (online ? "online:" : "error:") + (parts.count > 1 ? String(parts[0]) : "")
+    }
+    return grouped.map { key, events in
+        SyncIssueGroup(folder: String(key.dropFirst(key.hasPrefix("online:") ? 7 : 6)),
+                       online: key.hasPrefix("online:"), events: events)
+    }.sorted { $0.events.count == $1.events.count ? $0.id < $1.id : $0.events.count > $1.events.count }
 }

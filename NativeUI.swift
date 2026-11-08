@@ -647,9 +647,17 @@ struct MenuBarPanel: View {
 }
 
 
+private final class IssuePanelState: ObservableObject {
+    @Published var expanded = true
+    @Published var pausePairID: UUID?
+    @Published var pauseFolder: String?
+    @Published var confirmingPause = false
+}
+
 struct ContentView: View {
     @ObservedObject var model: SyncModel
     @Environment(\.openWindow) private var openWindow
+    @StateObject private var issueState = IssuePanelState()
 
     private func t(_ key: String) -> String { model.t(key) }
 
@@ -699,6 +707,15 @@ struct ContentView: View {
             Button(t("removeFolder"), role: .destructive) { model.removeSelected() }
         } message: {
             Text(t("removeConfirmHint"))
+        }
+        .confirmationDialog(model.config.language == "en" ? "Pause this folder on this Mac?" : "在这台 Mac 暂停此目录同步？",
+                            isPresented: $issueState.confirmingPause) {
+            Button(model.config.language == "en" ? "Pause and save" : "暂停并保存") { pauseIssueFolder() }
+            Button(t("cancel"), role: .cancel) { }
+        } message: {
+            Text((issueState.pauseFolder ?? "") + (model.config.language == "en"
+                ? "\nUploads and downloads for the entire folder will pause. Existing files stay in place. Restore normal sync in folder settings."
+                : "\n整个目录的上传和下载都会暂停，现有文件保持原位。之后可在目录设置中恢复正常同步。"))
         }
         .background {
             // Separate anchors so the preview and diff sheets never replace each other.
@@ -837,6 +854,9 @@ struct ContentView: View {
 
     private var detail: some View {
         VStack(spacing: 0) {
+            if !issueRecords.isEmpty && model.page != "history" {
+                issuePanel
+            }
             page.frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             statusBar
@@ -853,6 +873,105 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var issueRecords: [SyncHistoryRecord] {
+        let pairs = model.page == "pair" ? model.selectedPair.map { [$0] } ?? [] : model.config.pairs.filter(\.enabled)
+        return pairs.compactMap { model.lastRecord(for: $0) }.filter { $0.incompleteOrFailed }
+    }
+
+    private var issuePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(model.config.language == "en" ? "Sync needs attention" : "同步有待处理事项", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline).foregroundStyle(.orange)
+                Spacer()
+                Button(model.config.language == "en" ? "History and files" : "查看记录与文件") { model.page = "history" }
+                Button { issueState.expanded.toggle() } label: {
+                    Image(systemName: issueState.expanded ? "chevron.up" : "chevron.down")
+                }.help(model.config.language == "en" ? "Expand or collapse details" : "展开或收起问题详情")
+            }
+            if issueState.expanded {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(issueRecords) { record in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(record.pairName).font(.subheadline.weight(.semibold))
+                                if let pair = model.config.pairs.first(where: { model.lastRecord(for: $0)?.id == record.id }) {
+                                    ForEach(syncIssueGroups(record)) { group in
+                                        issueGroupCard(group, pair: pair)
+                                    }
+                                    if syncIssueGroups(record).isEmpty {
+                                        Text(syncIssueSummary(record.output, language: model.config.language))
+                                            .font(.callout).textSelection(.enabled)
+                                    }
+                                    Button(model.config.language == "en" ? "Retry this pair" : "重试这一组") { model.syncNow(pairID: pair.id) }
+                                        .disabled(!model.canRun(pair))
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }.frame(maxHeight: 340)
+            }
+        }
+        .padding(16)
+        .background(Color.orange.opacity(0.08))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func pauseIssueFolder() {
+        guard !model.busy, !model.hasUnsavedChanges, let id = issueState.pausePairID,
+              let folder = issueState.pauseFolder,
+              let normalized = try? normalizeCloudOnlyPath(folder), normalized == folder,
+              let index = model.config.pairs.firstIndex(where: { $0.id == id }) else { return }
+        if !model.config.pairs[index].cloudOnlyPaths.contains(folder) {
+            model.config.pairs[index].cloudOnlyPaths.append(folder)
+            model.save()
+        }
+    }
+
+    private func issueGroupCard(_ group: SyncIssueGroup, pair: SyncPair) -> some View {
+        let english = model.config.language == "en"
+        let paused = pair.cloudOnlyPaths.contains { group.folder == $0 || group.folder.hasPrefix($0 + "/") }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("\(group.folder.isEmpty ? (english ? "Root files" : "根目录文件") : group.folder) · \(group.events.count) \(english ? "files" : "项")")
+                .font(.callout.weight(.semibold)).textSelection(.enabled)
+            Text(group.online
+                ? (english ? "Online-only files remain pending. Existing files were preserved and no automatic downloads started; choose whether to keep this folder only in the cloud or download selected files in OneDrive." : "这些文件的云端版本还没有下载。按当前设置，应用不会自动下载，所以这部分暂未同步。只想放在云端：暂停此目录同步；想在本机使用：打开 OneDrive 目录，选择文件下载后重试。")
+                : group.events.first?.detail ?? "")
+                .font(.callout).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            if !group.online {
+                Text(english ? "Affected paths were preserved. If the OneDrive folder list is stale, wait for OneDrive to finish updating, then retry." : "相关路径已保留。若提示目录与云端索引不一致，请等待 OneDrive 完成目录更新后重试。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button(english ? "Open OneDrive folder" : "打开 OneDrive 目录") {
+                    let folder = group.folder
+                    guard folder.isEmpty || (try? normalizeCloudOnlyPath(folder)) == folder else { return }
+                    NSWorkspace.shared.open(URL(fileURLWithPath: pair.cloudPath).appendingPathComponent(folder))
+                }
+                if group.canPauseFolder {
+                    Button(paused ? (english ? "Paused · retry to refresh" : "已暂停 · 重试后刷新") : (english ? "Pause this folder…" : "暂停此目录同步…")) {
+                        issueState.pausePairID = pair.id
+                        issueState.pauseFolder = group.folder
+                        issueState.confirmingPause = true
+                    }.disabled(paused || model.busy || model.hasUnsavedChanges)
+                }
+            }.controlSize(.small)
+            DisclosureGroup(english ? "Affected files (first 20)" : "查看受影响文件（前 20 项）") {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(group.events.prefix(20))) { event in
+                        Text(event.path).font(.caption).textSelection(.enabled)
+                    }
+                    if group.events.count > 20 {
+                        Button(english ? "See all in History" : "在同步记录查看全部") { model.page = "history" }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+    }
+
     private var statusBar: some View {
         HStack(spacing: 8) {
             if model.busy { ProgressView().controlSize(.small) }
@@ -861,11 +980,16 @@ struct ContentView: View {
             } else if model.conflictCount > 0 {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             } else { Image(systemName: "checkmark.circle").foregroundStyle(.secondary) }
-            Text(model.statusDetail ?? t(model.statusKey))
+            Text((model.statusKey == "error" || !issueRecords.isEmpty) ? (model.config.language == "en" ? "Sync incomplete — view issue details" : "同步未完成，请查看问题详情") : (model.statusDetail ?? t(model.statusKey)))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .help(model.statusDetail ?? t(model.statusKey))
             Spacer()
+            if model.statusKey == "error" || !issueRecords.isEmpty {
+                Button(model.config.language == "en" ? "View issues" : "查看问题") {
+                    if issueRecords.isEmpty { model.page = "history" } else { issueState.expanded = true }
+                }
+            }
             if model.hasUnsavedChanges {
                 Circle().fill(.orange).frame(width: 6, height: 6)
                 Text(t("unsaved"))
