@@ -20,6 +20,7 @@ cp "$source_dir/sync_merge.py" "$app/Contents/Resources/sync_merge.py"
 cp "$source_dir/authbroker/THIRD_PARTY_NOTICES.txt" "$app/Contents/Resources/THIRD_PARTY_NOTICES.txt"
 cp "$source_dir/authbroker/RCLONE-LICENSE" "$app/Contents/Resources/RCLONE-LICENSE"
 cp "$source_dir/graph_index.py" "$app/Contents/Resources/graph_index.py"
+cp "$source_dir/mac_packages.py" "$source_dir/sync_cancel.py" "$app/Contents/Resources/"
 clang -target "$architecture-apple-macosx13.0" -O3 -Wno-deprecated-declarations -dynamiclib "$source_dir/QuickXorHash.c" -o "$app/Contents/Resources/QuickXorHash.dylib"
 (cd "$source_dir/authbroker" && go build -trimpath -ldflags='-s -w' -o "$app/Contents/Resources/OneDriveOAuth" .)
 swiftc -target "$architecture-apple-macosx13.0" -O "$source_dir/OneDriveAuth.swift" -o "$app/Contents/Resources/OneDriveAuth"

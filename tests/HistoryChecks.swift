@@ -186,6 +186,12 @@ struct HistoryChecks {
         assert(!blocked.awaitingDownloadOnly && blocked.needsAttention)
         var terminated = pendingDownload; terminated.exitCode = 15
         assert(!terminated.awaitingDownloadOnly && terminated.needsAttention)
+        let stoppedLog = "2026-11-08T03:12:40Z 开始 [Test] 双向合并：/local → /cloud\n2026-11-08T03:12:44Z 结束 [Test]，退出码 130：STOPPED\t用户停止\nuploaded=0 downloaded=3 failed=0 stopped=1\n2026-11-08T03:12:44Z 停止 [Test]：同步已停止\n"
+        let stopped = parseSyncHistory(stoppedLog)
+        assert(stopped.count == 1 && stopped[0].stopped && !stopped[0].needsAttention)
+        assert(stopped[0].counts["downloaded"] == 3)
+        var stoppedWithFailure = stopped[0]; stoppedWithFailure.counts["failed"] = 1
+        assert(stoppedWithFailure.needsAttention, "stopping must not hide an earlier genuine failure")
         print("History parser checks passed")
     }
 }

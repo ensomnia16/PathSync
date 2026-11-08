@@ -7,7 +7,9 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+import mac_packages
 import graph_index as g
 
 CURSOR='https://graph.microsoft.com/v1.0/drives/drive/items/root/delta?token=one'
@@ -39,6 +41,26 @@ class GraphIndexTests(unittest.TestCase):
  def test_literal_entity_exact_mirror_name_is_preserved(self):
   f=self.file('a&#x3a;b.txt');(self.cloud/f['name']).write_bytes(b'base')
   x=self.seeded([f]);self.assertIn('a&#x3a;b.txt',x.entries)
+ def test_serialized_package_and_ordinary_file_keep_distinct_identities(self):
+  f=self.file('bundle:time',identity='plain');(self.cloud/'bundle:time').write_bytes(b'base')
+  package=self.cloud/'bundle:time 2';package.mkdir()
+  serialized={**f,'id':'package','name':'bundle&#x3a;time.pkgf','size':13312,
+              'fileSystemInfo':{'lastModifiedDateTime':datetime.fromtimestamp(package.stat().st_mtime,timezone.utc).isoformat()}}
+  finder=b'\0'*8+b'\x20\0'+b'\0'*22
+  def attr(path,key):
+   if path!=package:return None
+   return finder if key=='com.apple.FinderInfo' else b'bundle:time\0'
+  with mock.patch.object(mac_packages,'attribute',side_effect=attr):x=self.seeded([f,serialized])
+  self.assertEqual(x.entries['bundle:time']['id'],'plain')
+  self.assertNotIn('kind',x.entries['bundle:time'])
+  self.assertEqual(x.entries['bundle:time.pkgf']['id'],'package')
+  self.assertEqual(x.entries['bundle:time.pkgf']['mirror_name'],'bundle:time 2')
+  self.assertTrue(x.entries['bundle:time.pkgf']['metadata_ready'])
+ def test_two_cloud_items_cannot_claim_one_package(self):
+  f=self.file('package.pkgf');second={**f,'id':'second','name':'other.pkgf'}
+  package=self.cloud/'mapped';package.mkdir()
+  with mock.patch.object(mac_packages,'resolve',return_value='mapped'):
+   with self.assertRaises(g.IndexError):self.seeded([f,second])
  def test_ambiguous_decoded_name_rolls_back(self):
   f=self.file('a:b.txt');other={**f,'id':'second','name':'a&#x3a;b.txt'}
   with self.assertRaises(g.IndexError):self.seeded([f,other])

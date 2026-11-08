@@ -186,6 +186,7 @@ def content_hashes(path):
 
 
 def indexed_entries(db, root_id, cloud, stats):
+    import mac_packages
     rows = {row[0]: row for row in db.execute('SELECT * FROM items')}
     paths = {root_id: ''}
     def relative(identity, seen=None):
@@ -216,6 +217,14 @@ def indexed_entries(db, root_id, cloud, stats):
             raise IndexError('云端目录出现同名记录，索引未推进')
         entries[name] = {'id': identity, 'size': row[4], 'quick': row[5],
                          'mtime': row[6], 'etag': row[7]}
+        package = mac_packages.resolve(cloud, name)
+        if package:
+            info = mac_packages.safe(cloud, package).lstat()
+            entries[name].update(kind='package', mirror_name=package,
+                                 metadata_ready=row[6] is not None and abs(info.st_mtime_ns - row[6]) < 1_000_000_000)
+    mirrors = [entry['mirror_name'] for entry in entries.values() if entry.get('kind') == 'package']
+    if len(mirrors) != len(set(mirrors)) or any(mirror in entries for mirror in mirrors):
+        raise IndexError('多个云端项目对应同一个包目录，已保留所有文件；请核对 OneDrive 重名项目')
     return entries
 
 

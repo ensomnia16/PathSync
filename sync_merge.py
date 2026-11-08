@@ -24,6 +24,8 @@ sys.dont_write_bytecode = True
 from sync_tree import IGNORE_FILE, ExcludeRules, excluded_relative, load_exclude_rules
 import cloud_only
 import graph_index
+import mac_packages
+import sync_cancel
 
 
 SIDECAR_PATTERN = re.compile(r'^(.*) \((cloud|local) conflict ([0-9a-f]{12})\)(\.[^/]*)?$')
@@ -163,6 +165,7 @@ def digest(path):
     try:
         with path.open('rb') as source:
             while chunk := source.read(1024 * 1024):
+                sync_cancel.check()
                 hasher.update(chunk)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -179,6 +182,10 @@ def checked_digests(local_file, cloud_file, local_sig, cloud_sig):
 
 
 def excluded_path(name, args, directory=False):
+    if any(name == root or name.startswith(root + '/') for root in getattr(args, 'package_roots', ())):
+        return True
+    if any(part.endswith('.researchsync-partial') for part in Path(name).parts):
+        return True
     if cloud_only.contains(name, getattr(args, 'cloud_only', ())):
         return True
     if name == IGNORE_FILE and not directory:
@@ -218,9 +225,11 @@ def scan(root, args, errors, symlinks=None):
 
     # File Provider directory reads release the GIL while waiting for OneDrive.
     # A few independent reads avoid making every directory wait behind one slow read.
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    executor = ThreadPoolExecutor(max_workers=4)
+    try:
         pending = {executor.submit(entries, root): root}
         while pending:
+            sync_cancel.check()
             completed, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed:
                 current = pending.pop(future)
@@ -235,6 +244,13 @@ def scan(root, args, errors, symlinks=None):
                     pending[executor.submit(entries, directory)] = directory
             if scanned % 8 == 0:
                 print(f'PROGRESS\tSCAN\t{side}\t{scanned}\t{len(found)}', flush=True)
+    except BaseException:
+        # Directory readers never write user files. On cancellation do not
+        # wait for a stalled File Provider scan before saving the checkpoint.
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
     print(f'PROGRESS\tSCAN_DONE\t{side}\t{scanned}\t{len(found)}', flush=True)
     return found
 
@@ -262,6 +278,7 @@ class CloudPrefetch:
         # Follow merge order and keep only four downloads queued. A file being
         # processed must never sit behind thousands of unrelated placeholders.
         while self.queue and len(self.futures) < 4:
+            sync_cancel.check()
             name = self.queue.popleft()
             self.futures[name] = self.executor.submit(self.hydrate, self.root / name)
 
@@ -278,11 +295,19 @@ class CloudPrefetch:
             # The provider may need to download the complete placeholder. Give
             # large media more time without allowing one file to wait forever.
             timeout = min(300, 120 + path.stat().st_size // 1_000_000)
-            result = subprocess.run([sys.executable, '-c', script, str(path)],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    timeout=timeout, check=False)
+            result = subprocess.Popen([sys.executable, '-c', script, str(path)],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            sync_cancel.reader_started(result)
+            try:
+                _, error = result.communicate(timeout=timeout)
+            except BaseException:
+                result.kill()
+                result.communicate()
+                raise
+            finally:
+                sync_cancel.reader_finished(result)
             if result.returncode != 0:
-                return result.stderr.decode('utf-8', 'replace').strip()[-300:] or '无法读取云端文件'
+                return error.decode('utf-8', 'replace').strip()[-300:] or '无法读取云端文件'
             return None
         except subprocess.TimeoutExpired:
             return f'云端文件读取超过 {timeout} 秒'
@@ -295,12 +320,15 @@ class CloudPrefetch:
             return None
         started = time.monotonic()
         while True:
+            sync_cancel.check()
             try:
-                error = future.result(timeout=20)
+                error = future.result(timeout=0.2)
                 break
             except FutureTimeout:
                 elapsed = int(time.monotonic() - started)
-                print(f'PROGRESS\tWAIT\t{name}\t{elapsed}', flush=True)
+                if elapsed and elapsed % 20 == 0 and elapsed != getattr(self, 'last_wait', None):
+                    print(f'PROGRESS\tWAIT\t{name}\t{elapsed}', flush=True)
+                    self.last_wait = elapsed
                 if elapsed >= 320:
                     future.cancel()
                     error = '云端文件等待超过 320 秒；保留两端文件与基线，下次重试'
@@ -830,12 +858,39 @@ def preserve_both(args, local, cloud, name, local_sig, cloud_sig, hashes,
 
 
 def sync_files(args, local, cloud, files, conflicts):
+    try:
+        return _sync_files(args, local, cloud, files, conflicts)
+    except sync_cancel.Cancelled:
+        sync_cancel.cancel_readers()
+        if not args.dry_run and hasattr(args, '_checkpoint'):
+            save_state(args.state, local, cloud, *args._checkpoint)
+        counts = getattr(args, '_counts', {})
+        print('STOPPED\t已停止同步；已完成的文件已保留，剩余文件下次继续', flush=True)
+        print(' '.join(f'{key}={value}' for key, value in {**counts, 'stopped': 1}.items()), flush=True)
+        return 130
+    finally:
+        if hasattr(args, '_prefetch'):
+            args._prefetch.close()
+
+
+def _sync_files(args, local, cloud, files, conflicts):
     if args.conflict_policy == 'keep-both':
         # Automatic keep-both needs no follow-up: both versions are already on
         # both sides and in the history, so no review stays pending.
         conflicts = {name: record for name, record in conflicts.items() if not is_review(record)}
     next_files = dict(files)
     next_conflicts = dict(conflicts)
+    args._checkpoint = (next_files, next_conflicts)
+    index = getattr(args, 'graph_index', None)
+    args.package_roots = ()
+    all_packages = {name: entry for name, entry in (index.entries.items() if index else ())
+                    if entry.get('kind') == 'package'}
+    packages = {name: entry for name, entry in (index.entries.items() if index else ())
+                if entry.get('kind') == 'package' and not excluded_path(name, args)
+                and not excluded_path(entry['mirror_name'], args, directory=True)}
+    # Package contents, including empty directories, are handled as one unit.
+    # They must never enter ordinary file/deletion inference.
+    args.package_roots = tuple(root for name, entry in all_packages.items() for root in (name, entry['mirror_name']))
     errors = []
     active_files = {name: record for name, record in files.items()
                     if not excluded_path(name, args)}
@@ -844,7 +899,6 @@ def sync_files(args, local, cloud, files, conflicts):
     symlinks = set()
     local_names = scan(local, args, errors, symlinks)
     cloud_names = scan(cloud, args, errors, symlinks)
-    index = getattr(args, 'graph_index', None)
     index_unverified = set()
     if index:
         for name, remote in index.entries.items():
@@ -863,10 +917,13 @@ def sync_files(args, local, cloud, files, conflicts):
     # evidence for deletion. Independent files can still make progress.
     index_unverified_parents = {directory for name in index_unverified
                                 for directory in ancestor_directories(name)}
+    index_unverified_parents.update(directory for entry in packages.values()
+                                    for directory in ancestor_directories(entry['mirror_name']))
     names = local_names | cloud_names | set(active_files) | set(active_conflicts) | index_unverified
     counts = {'uploaded': 0, 'downloaded': 0, 'unchanged': 0,
               'kept_both': 0, 'newest': 0, 'deleted': 0, 'backups': 0,
               'skipped': 0, 'conflicts': 0, 'reviews': 0, 'failed': 0, 'online_only': 0}
+    args._counts = counts
 
     def aligned(path_name, local_sig, cloud_sig, content_hash):
         return {'local': local_sig, 'cloud': cloud_sig, 'anchorHash': content_hash,
@@ -1076,9 +1133,11 @@ def sync_files(args, local, cloud, files, conflicts):
     ordered_names = sorted(names - new_cloud_only) + import_names
     prefetch = CloudPrefetch(cloud, [] if args.dry_run or not args.download_online_content or args.direction == 'upload' else import_names, online_only,
                              order=ordered_names)
+    args._prefetch = prefetch
     total_names = len(names)
     print(f'PROGRESS\tPROCESS\t0\t{total_names}', flush=True)
     for processed, name in enumerate(ordered_names, 1):
+        sync_cancel.check()
         if processed % 128 == 0:
             print(f'PROGRESS\tPROCESS\t{processed}\t{total_names}', flush=True)
         if name in tree_record_names:
@@ -1087,8 +1146,10 @@ def sync_files(args, local, cloud, files, conflicts):
             counts['skipped'] += 1
             continue
         if name in index_unverified:
-            print(f'FAILED\t{name}\tOneDrive 本地目录尚未跟上服务器元数据；保留文件与基线')
-            planned('failed', name, detail='OneDrive 镜像与服务器元数据尚未一致')
+            detail = ('云端包尚无可唯一确认的本机包目录；请在 OneDrive 中查看该包，所有同名文件均已保留'
+                      if name.endswith('.pkgf') else 'OneDrive 本地目录尚未跟上服务器元数据；保留文件与基线')
+            print(f'FAILED\t{name}\t{detail}')
+            planned('failed', name, detail=detail)
             counts['failed'] += 1
             continue
         prefetch_error = prefetch.check(name)
@@ -1358,6 +1419,39 @@ def sync_files(args, local, cloud, files, conflicts):
             counts['failed'] += 1
 
     prefetch.close()
+    for remote_name, entry in sorted(packages.items()):
+        sync_cancel.check()
+        name = entry['mirror_name']
+        try:
+            if not entry.get('metadata_ready', True):
+                raise OSError('OneDrive 包目录的更新时间与服务器不一致；请等待 OneDrive 更新后重试，所有同名文件已保留')
+            if blocked(name):
+                raise OSError('包的上级目录存在冲突；请先处理目录冲突，所有文件已保留')
+            left, right = mac_packages.safe(local, name), mac_packages.safe(cloud, name)
+            if not left.exists():
+                if args.direction == 'upload':
+                    counts['skipped'] += 1
+                else:
+                    planned('download', name, size=entry['size'], kind='package')
+                    if not args.dry_run:
+                        mac_packages.copy_missing(cloud, local, name, digest, sync_cancel.check)
+                    counts['downloaded'] += 1
+                    print(f'DOWNLOAD\t{name}\tMac 包整体复制；同名普通文件保持原位')
+            else:
+                first = mac_packages.snapshot(left, digest, sync_cancel.check)
+                second = mac_packages.snapshot(right, digest, sync_cancel.check)
+                if first != second:
+                    raise OSError('本地和 OneDrive 的包内容不同；已保留两边版本，请打开包目录核对后选择保留的版本')
+                counts['unchanged'] += 1
+            # Do not carry obsolete regular-file anchors for the serialized item.
+            if not args.dry_run:
+                for old in list(next_files):
+                    if old in (remote_name, name) or old.startswith(name + '/'):
+                        next_files.pop(old)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f'FAILED\t{name}\t{error}')
+            planned('failed', name, detail=str(error))
+            counts['failed'] += 1
     for path, error in errors:
         print(f'FAILED\t{path}\t{error}')
         planned('failed', path, detail=error)
@@ -1752,6 +1846,8 @@ def main():
     parser.add_argument('--hydrate-online-only', action='store_true',
                         help='download online-only cloud files the merge must read before comparing')
     parser.add_argument('--graph-auth-helper', type=Path)
+    parser.add_argument('--run-id')
+    parser.add_argument('--stop-file', type=Path)
     parser.add_argument('--onedrive-root', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--plan-json', action='store_true',
@@ -1767,6 +1863,7 @@ def main():
     parser.add_argument('--migrate-backups', action='store_true',
                         help='move existing local backups to --backup-root, verifying each copy')
     args = parser.parse_args()
+    sync_cancel.configure(args.run_id, args.stop_file)
     if (args.backup_root is None) != (args.backup_subpath is None):
         parser.error('--backup-root and --backup-subpath must be given together')
     if args.migrate_backups and (args.backup_root is None or args.resolve or args.acknowledge
@@ -1886,7 +1983,19 @@ def main():
 
 if __name__ == '__main__':
     try:
-        sys.exit(main())
+        result = main()
+        if result == 130:
+            # The checkpoint and transfer cleanup have completed. Read-only
+            # directory threads may still be blocked inside File Provider;
+            # Python's normal executor atexit join would otherwise hang Stop.
+            sys.stdout.flush(); sys.stderr.flush()
+            os._exit(130)
+        sys.exit(result)
+    except sync_cancel.Cancelled:
+        sync_cancel.cancel_readers()
+        print('STOPPED\t已停止同步；未完成的文件下次继续\nstopped=1', flush=True)
+        sys.stderr.flush()
+        os._exit(130)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         print(f'FAILED\t{error}', file=sys.stderr)
         sys.exit(2)

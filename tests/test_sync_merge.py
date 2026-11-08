@@ -973,10 +973,11 @@ print('POLICY_AND_CHILD_OK')
         path = self.cloud / 'video.mp4'
         with path.open('wb') as output:
             output.truncate(200_000_000)
-        with mock.patch.object(sync_merge.subprocess, 'run') as run:
+        with mock.patch.object(sync_merge.subprocess, 'Popen') as run:
             run.return_value.returncode = 0
+            run.return_value.communicate.return_value = (None, b'')
             self.assertIsNone(sync_merge.CloudPrefetch.hydrate(path))
-            self.assertEqual(run.call_args.kwargs['timeout'], 300)
+            self.assertEqual(run.return_value.communicate.call_args.kwargs['timeout'], 300)
 
     def test_large_import_copies_before_all_prefetch_results_are_consumed(self):
         for index in range(100):

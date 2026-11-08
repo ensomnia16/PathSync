@@ -93,11 +93,15 @@ extension SyncModel {
     }
 
     var statusHeadline: String {
+        if stoppingSync { return config.language == "en" ? "Stopping…" : "正在停止…" }
         if isSyncActive { return t(statusKey == "previewing" ? "previewing" : "syncing") }
         if conflictCount > 0 { return String(format: t("conflictCountShort"), conflictCount) }
         if !hasEnabledPairs { return t("menubarNoPairs") }
         if menuBarState == .attention { return t("menubarStateAttention") }
         if hasPendingDownloads { return config.language == "en" ? "Downloads pending" : "有文件待下载" }
+        if savedConfig.pairs.contains(where: { $0.enabled && lastRecord(for: $0)?.stopped == true }) {
+            return config.language == "en" ? "Sync stopped" : "同步已停止"
+        }
         return t("statusReady")
     }
 
@@ -121,6 +125,7 @@ extension SyncModel {
             if record.awaitingDownloadOnly { return (config.language == "en" ? "Pending download" : "待下载", .secondary) }
             if record.incompleteOrFailed { return (t("pairLastFailed"), .red) }
             if record.needsAttention { return (t("pairNeedsAttention"), .orange) }
+            if record.stopped { return (config.language == "en" ? "Stopped" : "已停止", .secondary) }
         }
         return (lastRecord(for: pair) == nil ? t("pairOK") : t("pairSynced"), .green)
     }
@@ -529,19 +534,19 @@ struct MenuBarPanel: View {
     }
 
     private var primaryAction: some View {
-        Button { model.syncNow(all: true) } label: {
+        Button { if model.isSyncActive { model.stopSync() } else { model.syncNow(all: true) } } label: {
             HStack(spacing: 7) {
                 if model.isSyncActive {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
-                Text(t(model.isSyncActive ? "syncing" : "syncNow")).fontWeight(.medium)
+                Text(model.isSyncActive ? (model.stoppingSync ? (model.config.language == "en" ? "Stopping…" : "正在停止…") : (model.config.language == "en" ? "Stop sync" : "停止同步")) : t("syncNow")).fontWeight(.medium)
             }
             .frame(maxWidth: .infinity, minHeight: 24)
         }
         .buttonStyle(.borderedProminent).controlSize(.large)
-        .disabled(!model.canRun || !model.hasEnabledPairs)
+        .disabled(model.isSyncActive ? (!model.canStopSync || model.stoppingSync) : (!model.canRun || !model.hasEnabledPairs))
         .help(t("syncAllHint"))
     }
 
@@ -795,6 +800,7 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            if model.isSyncActive { StopSyncButton(model: model) }
             if model.page == "pair", let pair = model.selectedPair {
                 Button { model.previewNow(pairID: pair.id) } label: {
                     Label(t("previewPair"), systemImage: "eye")
@@ -961,6 +967,7 @@ struct ContentView: View {
                     .lineLimit(2)
             }
             Spacer(minLength: 12)
+            if model.isSyncActive { StopSyncButton(model: model).controlSize(.large) }
             Button { model.previewNow() } label: {
                 Label(t("previewAll"), systemImage: "eye")
             }

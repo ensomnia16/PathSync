@@ -31,8 +31,10 @@ struct SyncHistoryRecord: Identifiable {
     }
 
     var incompleteOrFailed: Bool {
-        finishedAt == nil || exitCode != .some(0) || hasFailures
+        finishedAt == nil || (exitCode != .some(0) && !stopped) || hasFailures
     }
+
+    var stopped: Bool { finishedAt != nil && exitCode == 130 }
 
     var awaitingDownloadOnly: Bool {
         finishedAt != nil && exitCode == 2 && counts["online_only", default: 0] > 0
@@ -42,7 +44,7 @@ struct SyncHistoryRecord: Identifiable {
     }
 
     var needsAttention: Bool {
-        (incompleteOrFailed && !awaitingDownloadOnly) || needsManualReview || counts["pending_delete", default: 0] > 0
+        (incompleteOrFailed && !awaitingDownloadOnly) || needsManualReview || counts["pending_delete", default: 0] > 0 || counts["conflicts", default: 0] > 0
     }
 
     var hasFailures: Bool {

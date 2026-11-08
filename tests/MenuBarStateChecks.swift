@@ -71,6 +71,14 @@ struct MenuBarStateChecks {
         assert(model.menuBarState == .enabled, "a newer successful run clears the old warning")
         assert(model.pairStatus(pair).text == model.t("pairSynced"))
         assert(model.menuBarIssueSummary == nil)
+        var stopped = recovered; stopped.exitCode = 130; stopped.counts = ["stopped": 1]
+        model.history = [stopped]
+        assert(model.menuBarState == .enabled)
+        assert(model.pairStatus(pair).text == "已停止")
+        assert(model.statusHeadline == "同步已停止")
+        model.stoppingSync = true
+        assert(model.statusHeadline == "正在停止…")
+        model.stoppingSync = false
         let truncated = parseSyncHistory("2026-11-07T14:55:26Z 失败 [Test]：uploaded=0 failed=14448 online_only=14448")
         assert(truncated.count == 1 && truncated[0].needsAttention)
         model.history = truncated
