@@ -257,6 +257,85 @@ def cached_snapshot(database, local_root, cloud_root):
         db.close()
 
 
+def resolve_serialized_collisions(entries, cloud, excluded, materialize=None):
+    """Map native archive representations by a one-to-one hash assignment.
+
+    This runs only in sync/preview, never in the metadata-only size reader.
+    File Provider collision order differs across Macs, so neither the original
+    name nor its ' 2' variant proves which Graph item it represents. Keep all
+    user paths in place; only remap the in-memory metadata keys.
+    """
+    import mac_packages
+    result = dict(entries)
+    protected = set()
+    used_targets = set()
+    updates = {}
+    for name, entry in entries.items():
+        if not name.endswith('.pkgf') or entry.get('kind') == 'package':
+            continue
+        original = name[:-5]
+        group = {key: entries[key] for key in (name, original) if key in entries}
+        if all(excluded(key) for key in group):
+            continue
+        candidates = mac_packages.serialized_candidates(cloud, name)
+        if not candidates:
+            continue
+        if any(excluded(key) for key in (*group, *candidates)):
+            # A filename exclusion can hide one identity in this collision
+            # group. Preserve the whole group instead of reading excluded data.
+            protected.update((*group, *candidates))
+            continue
+        signatures = {}
+        hashes = {}
+        for candidate in candidates:
+            path = mac_packages.safe(cloud, candidate)
+            before = path.lstat()
+            plausible = [remote for remote in group.values()
+                         if remote.get('quick') and remote.get('mtime') is not None
+                         and remote['size'] == before.st_size
+                         and abs(remote['mtime'] - before.st_mtime_ns) < 1_000_000_000]
+            if not plausible:
+                continue
+            if getattr(before, 'st_flags', 0) & 0x40000000:
+                if materialize is None:
+                    raise IndexError('重名包仍仅在线，预览未下载；正常同步时会下载并通过云端哈希确认对应关系：' + candidate)
+                materialize(path)
+                before = path.lstat()
+            signatures[candidate] = fingerprint(before)
+            value = content_hashes(path)
+            if value['signature'] != signatures[candidate]:
+                raise IndexError('重名包在身份核验期间发生变化，所有同名文件已保留：' + candidate)
+            hashes[candidate] = value['quickXorHash']
+        assignments = {}
+        for key, remote in group.items():
+            matches = [candidate for candidate, quick in hashes.items()
+                       if quick == remote.get('quick') and signatures[candidate][2] == remote['size']
+                       and remote.get('mtime') is not None
+                       and abs(signatures[candidate][3] - remote['mtime']) < 1_000_000_000]
+            if len(matches) != 1:
+                raise IndexError('重名包无法通过云端哈希唯一匹配；所有版本已保留，请核对 OneDrive 重名项目：' + key)
+            assignments[key] = matches[0]
+        targets = list(assignments.values())
+        if (len(set(targets)) != len(targets) or used_targets.intersection(targets)
+                or any(target in entries and target not in group for target in targets)):
+            raise IndexError('多个云端项目对应同一个本机文件，所有版本已保留：' + name)
+        for candidate, signature in signatures.items():
+            if fingerprint(mac_packages.safe(cloud, candidate).lstat()) != signature:
+                raise IndexError('重名包在身份核验后发生变化，请重试：' + candidate)
+        used_targets.update(targets)
+        for key, target in assignments.items():
+            updates[key] = (target, {**entries[key], 'remote_name': key, 'provider_alias': True})
+    # Apply the entire permutation together: swapping the two identities must
+    # never overwrite an entry while another identity still refers to its key.
+    for key in updates:
+        result.pop(key)
+    for key, (target, value) in updates.items():
+        if target in result:
+            raise IndexError('云端别名与其他项目发生冲突，未修改文件：' + target)
+        result[target] = value
+    return result, protected
+
+
 class GraphIndex:
     def __init__(self, database, local_root, cloud_root, drive_id, remote_path, fetch, progress=None):
         self.path = Path(database)

@@ -34,6 +34,31 @@ def is_package(path):
     return bool(finder and len(finder) == 32 and int.from_bytes(finder[8:10], 'big') & 0x2000)
 
 
+def serialized_candidates(root, name):
+    """Some File Providers expose the package archive as a regular file.
+
+    Both the serialized item and a colliding ordinary file can carry Finder's
+    bundle flag. This yields candidates only; their identities require hashes.
+    """
+    raw = safe(root, name)
+    if not name.endswith('.pkgf') or os.path.lexists(raw) or not raw.parent.is_dir():
+        return []
+    original = raw.name[:-5]
+    found = []
+    with os.scandir(raw.parent) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            path = raw.parent / entry.name
+            before = attribute(path, 'com.apple.fileprovider.before-bounce#PX')
+            if entry.name != original and before != original.encode('utf-8') + b'\0':
+                continue
+            finder = attribute(path, 'com.apple.FinderInfo')
+            if finder and len(finder) == 32 and int.from_bytes(finder[8:10], 'big') & 0x2000:
+                found.append(path.relative_to(root).as_posix())
+    return sorted(found)
+
+
 def safe(root, name):
     parts = Path(name).parts
     if not parts or Path(name).is_absolute() or '..' in parts:

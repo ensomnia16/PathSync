@@ -883,6 +883,15 @@ def _sync_files(args, local, cloud, files, conflicts):
     args._checkpoint = (next_files, next_conflicts)
     index = getattr(args, 'graph_index', None)
     args.package_roots = ()
+    protected_aliases = set()
+    if index:
+        def materialize_package(path):
+            error = CloudPrefetch.hydrate(path)
+            if error:
+                raise OSError('重名包读取失败，所有版本已保留：' + str(path) + '：' + error)
+        index.entries, protected_aliases = graph_index.resolve_serialized_collisions(
+            index.entries, cloud, lambda name: excluded_path(name, args),
+            materialize_package if args.download_online_content and not args.dry_run else None)
     all_packages = {name: entry for name, entry in (index.entries.items() if index else ())
                     if entry.get('kind') == 'package'}
     packages = {name: entry for name, entry in (index.entries.items() if index else ())
@@ -890,7 +899,7 @@ def _sync_files(args, local, cloud, files, conflicts):
                 and not excluded_path(entry['mirror_name'], args, directory=True)}
     # Package contents, including empty directories, are handled as one unit.
     # They must never enter ordinary file/deletion inference.
-    args.package_roots = tuple(root for name, entry in all_packages.items() for root in (name, entry['mirror_name']))
+    args.package_roots = tuple(protected_aliases) + tuple(root for name, entry in all_packages.items() for root in (name, entry['mirror_name']))
     errors = []
     active_files = {name: record for name, record in files.items()
                     if not excluded_path(name, args)}
