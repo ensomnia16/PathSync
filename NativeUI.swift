@@ -83,6 +83,7 @@ extension SyncModel {
     var overviewSummary: String {
         var parts = [String(format: t("enabledCount"), enabledPairCount)]
         if conflictCount > 0 { parts.append(String(format: t("conflictCountShort"), conflictCount)) }
+        if isSyncActive { return parts.joined(separator: " · ") }
         parts.append(String(format: "%@ %@", t("lastSync"), lastSyncDate.map(shortDate) ?? t("never")))
         return parts.joined(separator: " · ")
     }
@@ -100,10 +101,17 @@ extension SyncModel {
         return t("statusReady")
     }
 
+    func isPairSyncActive(_ pair: SyncPair) -> Bool {
+        guard isSyncActive else { return false }
+        if syncingPairIDs.contains(pair.id) { return true }
+        guard let record = lastRecord(for: pair) else { return false }
+        return record.finishedAt == nil
+    }
+
     func pairStatus(_ pair: SyncPair) -> (text: String, color: Color) {
         if !pair.enabled { return (t("disabled"), .secondary) }
         if pair.localPath.isEmpty || pair.cloudPath.isEmpty { return (t("pairNotConfigured"), .secondary) }
-        if busy && syncingPairIDs.contains(pair.id) {
+        if isPairSyncActive(pair) {
             return (t(statusKey == "previewing" ? "previewing" : "pairSyncing"), .accentColor)
         }
         if let count = conflictsByPair[pair.id]?.count, count > 0 {
@@ -131,13 +139,14 @@ extension SyncModel {
 
     /// "已同步 · 16:05" for menu rows, "双向合并 · 上次同步 16:05" for cards.
     func pairDetail(_ pair: SyncPair) -> String {
-        if busy, let progress = pairProgress[pair.id] { return progress }
+        if isPairSyncActive(pair) { return pairProgress[pair.id] ?? t("pairSyncing") }
         let status = pairStatus(pair).text
         guard pair.enabled, let date = lastSync(for: pair) else { return status }
         return "\(status) · \(shortDate(date))"
     }
 
     func pairFootnote(_ pair: SyncPair) -> String {
+        if isPairSyncActive(pair) { return pairProgress[pair.id] ?? t("pairSyncing") }
         let direction = t(pair.scheduledDirection)
         guard let date = lastSync(for: pair) else { return "\(direction) · \(t("lastSync")) \(t("never"))" }
         return "\(direction) · \(t("lastSync")) \(shortDate(date))"

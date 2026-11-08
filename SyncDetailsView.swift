@@ -60,7 +60,7 @@ struct SyncDetailsView: View {
                     Button(english ? "Sync" : "同步") { model.syncNow(pairID: pair.id) }
                         .disabled(!model.canRun(pair))
                 }
-                if model.isSyncActive {
+                if model.isPairSyncActive(pair) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text(model.pairProgress[pair.id] ?? (english ? "Syncing. Results refresh when the run finishes." : "正在同步，完成后会自动刷新结果。"))
