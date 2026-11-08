@@ -163,6 +163,14 @@ struct HistoryChecks {
         assert(!groups.first { $0.folder.isEmpty }!.canPauseFolder)
         assert(!groups.first { $0.folder == ".." }!.canPauseFolder)
         assert(groups.first { $0.folder == "cache" }!.online == false)
+        let largeLog = temporary.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".log")
+        defer { try? FileManager.default.removeItem(at: largeLog) }
+        let manyFailures = (0..<12858).map { "FAILED\tCityU Meeting/archive/item-\($0).pdf\t仅在线文件未下载；保留文件和基线，当前设置不会自动下载云端文件。请在界面选择保留云端还是下载到本地。" }.joined(separator: "\n")
+        let largeRun = "2026-11-08T03:12:40Z 开始 [大目录] 双向合并：/local → /cloud\n2026-11-08T03:12:44Z 结束 [大目录]，退出码 2：" + manyFailures + "\nuploaded=0 downloaded=0 failed=12858 online_only=12858\nGRAPH_INDEX\t{}\n2026-11-08T03:12:44Z 失败 [大目录]：未完全成功：GRAPH_INDEX\t{}\n"
+        assert(largeRun.utf8.count > 2_000_000)
+        try largeRun.write(to: largeLog, atomically: true, encoding: .utf8)
+        assert(syncIssueGroups(try readSyncHistory(at: largeLog.path)[0])[0].events.count == 12858)
+        assert(syncIssueGroups(try SyncHistoryReader(path: largeLog.path).read()[0])[0].events.count == 12858)
         print("History parser checks passed")
     }
 }
