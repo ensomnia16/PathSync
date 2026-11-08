@@ -45,15 +45,32 @@ struct MenuBarStateChecks {
         var failed = SyncHistoryRecord(id: 1, startedAt: Date(), pairName: pair.name,
                                       direction: "双向合并", sourcePath: pair.localPath,
                                       destinationPath: pair.cloudPath, isPreview: false)
+        failed.finishedAt = Date()
         failed.exitCode = 2
         failed.counts = ["failed": 4]
         model.history = [failed]
         assert(model.menuBarState == .attention, "an unrelated ready status must not hide a failed folder")
+        var timedOut = failed
+        timedOut.counts = [:]
+        timedOut.events = []
+        timedOut.exitCode = 1
+        model.history = [timedOut]
+        assert(model.menuBarState == .attention)
+        assert(model.pairStatus(pair).text == model.t("pairLastFailed"), "timeout without per-file counts must not be shown as Synced")
+        assert(model.menuBarIssueSummary?.contains(pair.name) == true)
+        var pending = timedOut
+        pending.exitCode = 0
+        pending.counts = ["pending_delete": 1]
+        model.history = [pending]
+        assert(model.menuBarState == .attention)
+        assert(model.pairStatus(pair).text == model.t("pairNeedsAttention"))
         var recovered = failed
         recovered.exitCode = 0
         recovered.counts = [:]
         model.history = [recovered, failed]
         assert(model.menuBarState == .enabled, "a newer successful run clears the old warning")
+        assert(model.pairStatus(pair).text == model.t("pairSynced"))
+        assert(model.menuBarIssueSummary == nil)
         let truncated = parseSyncHistory("2026-11-07T14:55:26Z 失败 [Test]：uploaded=0 failed=14448 online_only=14448")
         assert(truncated.count == 1 && truncated[0].needsAttention)
         model.history = truncated

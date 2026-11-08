@@ -351,6 +351,7 @@ private let translations: [String: (zh: String, en: String)] = [
     "pendingMore": ("另有 %d 项，在主窗口查看", "%d more in the main window"),
     "enabledCount": ("%d 组启用", "%d enabled"),
     "conflictCountShort": ("%d 个冲突待处理", "%d conflicts pending"),
+    "pairNeedsAttention": ("待处理", "Needs attention"),
     "pairSynced": ("已同步", "Synced"),
     "pairSyncing": ("正在同步…", "Syncing…"),
     "pairConflictsShort": ("%d 个冲突", "%d conflicts"),

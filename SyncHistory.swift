@@ -30,11 +30,12 @@ struct SyncHistoryRecord: Identifiable {
             || (!isPreview && counts["reviews"] == nil && counts["kept_both", default: 0] > 0)
     }
 
+    var incompleteOrFailed: Bool {
+        finishedAt == nil || exitCode != .some(0) || hasFailures
+    }
+
     var needsAttention: Bool {
-        exitCode != nil && (counts["failed", default: 0] > 0 || exitCode != 0
-            || needsManualReview
-            || counts["pending_delete", default: 0] > 0
-        )
+        incompleteOrFailed || needsManualReview || counts["pending_delete", default: 0] > 0
     }
 
     var hasFailures: Bool {
