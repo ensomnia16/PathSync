@@ -7,8 +7,15 @@ import UserNotifications
 private let appID = "com.ensom.ResearchSync"
 private let fm = FileManager.default
 private let home = fm.homeDirectoryForCurrentUser.path
-private let supportDirectory = home + "/Library/Application Support/ResearchSync"
+#if PATHSYNC_UI_PREVIEW
+let pathSyncUIPreview = true
+#else
+let pathSyncUIPreview = false
+#endif
+
+private let supportDirectory = home + "/Library/Application Support/" + (pathSyncUIPreview ? "PathSync UIPreview" : "ResearchSync")
 private let defaultConfigPath = supportDirectory + "/config.json"
+private let syncProgressPath = supportDirectory + "/sync-progress.json"
 let logPath = supportDirectory + "/sync.log"
 private let agentPath = home + "/Library/LaunchAgents/" + appID + ".plist"
 
@@ -582,7 +589,7 @@ func syncStatusJSON(_ config: SyncConfig) -> String {
     let running = syncIsRunning()
     var report: [String: Any] = ["running": running, "scheduledSync": config.enabled, "pairs": pairs]
     if running, let control = SyncRunControl.active(),
-       let snapshot = SyncProgressSnapshot.read(runID: control.runID),
+       let snapshot = SyncProgressSnapshot.read(runID: control.runID, at: syncProgressPath),
        let encoded = try? JSONEncoder().encode(snapshot),
        let value = try? JSONSerialization.jsonObject(with: encoded) { report["progress"] = value }
     let data = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])) ?? Data()
@@ -952,7 +959,7 @@ private func runPairs(_ config: SyncConfig, pairID: UUID?, direction: SyncDirect
         let shared = try OneDriveRules.read(config, requiring: Set(selectedPairs(config, pairID: pairID).map(\.id)))
         let effective = shared.config
         let selected = selectedPairs(effective, pairID: pairID)
-        let progressStore = SyncProgressStore(runID: control.runID, pairIDs: selected.map(\.id))
+        let progressStore = SyncProgressStore(runID: control.runID, pairIDs: selected.map(\.id), path: syncProgressPath)
         defer { progressStore.finish() }
         if let confirmed, selected != selectedPairs(confirmed, pairID: pairID) ||
             effective.excludeLatexIntermediates != confirmed.excludeLatexIntermediates ||
@@ -1071,6 +1078,7 @@ func scheduleNeedsIdentityMigration(_ plist: [String: Any], binary: String) -> B
 }
 
 func installSchedule(_ config: SyncConfig) throws {
+    guard !pathSyncUIPreview else { return }
     try fm.createDirectory(atPath: home + "/Library/LaunchAgents", withIntermediateDirectories: true)
     let binary = Bundle.main.executablePath ?? CommandLine.arguments[0]
     let domain = "gui/\(getuid())"
@@ -1256,7 +1264,7 @@ final class SyncModel: ObservableObject {
 
     func refreshSyncActivity() {
         let control = SyncRunControl.active()
-        let snapshot = control.flatMap { SyncProgressSnapshot.read(runID: $0.runID) }
+        let snapshot = control.flatMap { SyncProgressSnapshot.read(runID: $0.runID, at: syncProgressPath) }
         if syncProgress != snapshot { syncProgress = snapshot }
         canStopSync = isSyncActive && control != nil
         stoppingSync = control?.stopRequested == true
@@ -1272,7 +1280,7 @@ final class SyncModel: ObservableObject {
     var hasUnsavedChanges: Bool { config != savedConfig }
 
     private func migrateScheduleIdentityIfNeeded() {
-        guard !isSyncActive, !syncIsRunning(), fm.fileExists(atPath: agentPath),
+        guard !pathSyncUIPreview, !isSyncActive, !syncIsRunning(), fm.fileExists(atPath: agentPath),
               let data = try? Data(contentsOf: URL(fileURLWithPath: agentPath)),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let binary = Bundle.main.executablePath,
@@ -1369,7 +1377,7 @@ final class SyncModel: ObservableObject {
 
     /// Automatic checks honour the setting and run at most once a day; manual checks always run.
     func checkForUpdates(automatic: Bool = false) {
-        if update == .checking { return }
+        guard !pathSyncUIPreview, update != .checking else { return }
         if automatic {
             guard config.checkForUpdates else { return }
             let checkedVersion = UserDefaults.standard.string(forKey: "lastUpdateAttemptAppVersion")
@@ -1400,7 +1408,7 @@ final class SyncModel: ObservableObject {
     }
 
     func installAvailableUpdate() {
-        guard let release = availableRelease, release.signatureURL != nil,
+        guard !pathSyncUIPreview, let release = availableRelease, release.signatureURL != nil,
               !busy, !hasUnsavedChanges else { return }
         if case .downloading = updateInstallPhase { return }
         if case .verifying = updateInstallPhase { return }
@@ -1968,6 +1976,42 @@ final class SyncModel: ObservableObject {
     }
 }
 
+private let previewDemoRoot = URL(fileURLWithPath: supportDirectory).appendingPathComponent("Demo")
+
+func isPathSyncPreviewSample(_ pair: SyncPair) -> Bool {
+    guard pathSyncUIPreview else { return false }
+    return [(pair.localPath, "Mac"), (pair.cloudPath, "Cloud")].allSatisfy { path, name in
+        let expected = previewDemoRoot.appendingPathComponent(name).path
+        return path == expected && URL(fileURLWithPath: path).resolvingSymlinksInPath().path == expected
+    }
+}
+
+#if PATHSYNC_UI_PREVIEW
+private func preparePreviewFolders() throws {
+    try withSyncLock {
+        guard !fm.fileExists(atPath: defaultConfigPath) else { return }
+        let local = previewDemoRoot.appendingPathComponent("Mac")
+        let cloud = previewDemoRoot.appendingPathComponent("Cloud")
+        for folder in [local, cloud] {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        for (folder, name) in [(local, "From Mac"), (cloud, "From Cloud")] {
+            let file = folder.appendingPathComponent(name + ".txt")
+            if !fm.fileExists(atPath: file.path) {
+                try (name + "\n").write(to: file, atomically: true, encoding: .utf8)
+            }
+        }
+        var config = SyncConfig()
+        config.language = "system"
+        config.enabled = false
+        config.checkForUpdates = false
+        let name = uiText("previewDemoFolder", language: config.language)
+        config.pairs = [SyncPair(name: name, localPath: local.path, cloudPath: cloud.path, enabled: true)]
+        try saveConfig(config)
+    }
+}
+#endif
+
 #if !APP_TESTS
 @main
 struct ResearchSyncApp: App {
@@ -1984,6 +2028,7 @@ struct ResearchSyncApp: App {
             } catch { fputs(error.localizedDescription + "\n", stderr); exit(1) }
         }
         if args.contains("--install") {
+            guard !pathSyncUIPreview else { fputs("PathSync Preview only supports manual sync.\n", stderr); exit(1) }
             do {
                 let config = try loadConfig()
                 for pair in config.pairs { _ = try validatedCloudOnlyPaths(pair.cloudOnlyPaths) }
@@ -2117,6 +2162,10 @@ struct ResearchSyncApp: App {
                 exit(stopped ? 130 : 1)
             }
         }
+        #if PATHSYNC_UI_PREVIEW
+        do { try preparePreviewFolders() }
+        catch { NSLog("PathSync Preview: could not create sample folders: %@", error.localizedDescription) }
+        #endif
         let model = SyncModel()
         URLCommandRouter.model = model
         self._model = StateObject(wrappedValue: model)
@@ -2124,13 +2173,10 @@ struct ResearchSyncApp: App {
     }
 
     var body: some Scene {
-        Window("路径同步", id: "main") { ContentView(model: model) }
+        Window(pathSyncUIPreview ? model.appDisplayName : "路径同步", id: "main") { ContentView(model: model) }
             .windowStyle(.titleBar)
             .windowResizability(.contentMinSize)
             .defaultSize(width: 980, height: 680)
-        Window("同步详情", id: "sync-details") { SyncDetailsView(model: model) }
-            .windowResizability(.contentMinSize)
-            .defaultSize(width: 800, height: 570)
     }
 }
 #endif

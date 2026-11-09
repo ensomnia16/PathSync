@@ -61,6 +61,7 @@ extension SyncModel {
 
     /// Next run of the saved schedule, or why there is none.
     var nextRunValue: String {
+        if pathSyncUIPreview { return t("previewManualSync") }
         guard savedConfig.enabled else { return t("scheduleOff") }
         guard savedConfig.scheduleMode == "daily" else { return scheduleSummary }
         var parts = DateComponents()
@@ -79,13 +80,29 @@ extension SyncModel {
 
     var enabledPairCount: Int { config.pairs.filter(\.enabled).count }
 
-    /// "2 组启用 · 1 个冲突待处理 · 上次同步 16:05"
-    var overviewSummary: String {
-        var parts = [String(format: t("enabledCount"), enabledPairCount)]
-        if conflictCount > 0 { parts.append(String(format: t("conflictCountShort"), conflictCount)) }
-        if isSyncActive { return parts.joined(separator: " · ") }
-        parts.append(String(format: "%@ %@", t("lastSync"), lastSyncDate.map(shortDate) ?? t("never")))
-        return parts.joined(separator: " · ")
+    var appDisplayName: String { t(pathSyncUIPreview ? "previewAppName" : "appName") }
+    var lastSyncValue: String { lastSyncDate.map(shortDate) ?? t("never") }
+    var canRunAll: Bool { canRun && hasEnabledPairs }
+
+    var syncStatusNote: String? {
+        if isSyncActive { return statusDetail }
+        if hasUnsavedChanges { return t("menubarSaveHint") }
+        return menuBarIssueSummary
+    }
+
+    var syncStatusSymbol: String {
+        if statusKey == "error" { return "xmark.octagon.fill" }
+        if conflictCount > 0 || menuBarState == .attention { return "exclamationmark.triangle.fill" }
+        if !hasEnabledPairs { return "folder.badge.plus" }
+        if hasPendingDownloads { return "arrow.down.circle" }
+        return "checkmark.circle.fill"
+    }
+
+    var syncStatusColor: Color {
+        if isSyncActive { return .accentColor }
+        if statusKey == "error" { return .red }
+        if conflictCount > 0 || menuBarState == .attention { return .orange }
+        return !hasEnabledPairs || hasPendingDownloads ? .secondary : .green
     }
 
     var hasPendingDownloads: Bool {
@@ -93,7 +110,7 @@ extension SyncModel {
     }
 
     var statusHeadline: String {
-        if stoppingSync { return config.language == "en" ? "Stopping…" : "正在停止…" }
+        if stoppingSync { return t("stoppingSync") }
         if isSyncActive { return t(statusKey == "previewing" ? "previewing" : "syncing") }
         if conflictCount > 0 { return String(format: t("conflictCountShort"), conflictCount) }
         if !hasEnabledPairs { return t("menubarNoPairs") }
@@ -479,6 +496,40 @@ struct ConflictRow: View {
     }
 }
 
+private struct SyncSummaryMetric: View {
+    let title: String
+    let value: String
+    let symbol: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(title, systemImage: symbol)
+                .font(.caption).foregroundStyle(.secondary)
+            Text(value)
+                .font(.callout.weight(.semibold))
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct SyncStatusGlyph: View {
+    @ObservedObject var model: SyncModel
+
+    var body: some View {
+        Group {
+            if model.isSyncActive {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: model.syncStatusSymbol)
+                    .foregroundStyle(model.syncStatusColor)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
 struct MenuBarPanel: View {
     @ObservedObject var model: SyncModel
     var closeMenuBar: () -> Void = {}
@@ -494,69 +545,72 @@ struct MenuBarPanel: View {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private var statusColor: Color {
-        if model.isSyncActive { return .accentColor }
-        if model.statusKey == "error" { return .red }
-        if model.conflictCount > 0 { return .orange }
-        if model.menuBarState == .attention { return .orange }
-        return model.menuBarState == .enabled ? .green : .secondary
-    }
-
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 9) {
             Image(nsImage: NSApp.applicationIconImage)
-                .resizable().frame(width: 42, height: 42)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(t("appName")).font(.system(size: 15, weight: .semibold))
-                HStack(spacing: 5) {
-                    Circle().fill(statusColor).frame(width: 5, height: 5)
-                    Text(t(model.menuBarState.titleKey))
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                if let reason = model.menuBarIssueSummary {
-                    Text(reason).font(.system(size: 10)).foregroundStyle(.orange)
-                        .lineLimit(2).help(reason)
-                }
-            }
+                .resizable().frame(width: 32, height: 32)
+                .accessibilityHidden(true)
+            Text(model.appDisplayName).font(.headline)
             Spacer()
             Button { showWindow("settings") } label: {
-                Image(systemName: "gearshape").font(.system(size: 14))
-                    .frame(width: 28, height: 28)
-                    .background(Color.primary.opacity(0.05), in: Circle())
+                Image(systemName: "gearshape").frame(width: 26, height: 25)
             }
-            .buttonStyle(.plain).help(t("settings")).accessibilityLabel(t("settings"))
+            .buttonStyle(.borderless).help(t("settings")).accessibilityLabel(t("settings"))
         }
     }
 
-    private func summaryItem(_ title: String, value: String, symbol: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(title, systemImage: symbol).font(.system(size: 10)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 12, weight: .medium))
-                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, minHeight: 42, alignment: .topLeading)
-        .padding(10)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private var primaryAction: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if model.isSyncActive { SyncRunProgressView(snapshot: model.syncProgress, language: model.config.language) }
-            Button { if model.isSyncActive { model.stopSync() } else { model.syncNow(all: true) } } label: {
-            HStack(spacing: 7) {
-                if model.isSyncActive {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.triangle.2.circlepath")
+    private var syncStatus: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 8) {
+                SyncStatusGlyph(model: model)
+                    .font(.body.weight(.semibold)).frame(width: 18)
+                Text(model.statusHeadline).font(.headline)
+            }
+            if let note = model.syncStatusNote {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(2).help(note)
+            }
+            if model.isSyncActive {
+                SyncRunProgressView(snapshot: model.syncProgress, language: model.config.language)
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    SyncSummaryMetric(title: t("lastSync"), value: model.lastSyncValue, symbol: "clock")
+                    SyncSummaryMetric(title: t("nextSync"), value: model.nextRunValue, symbol: "calendar")
                 }
-                Text(model.isSyncActive ? (model.stoppingSync ? (model.config.language == "en" ? "Stopping…" : "正在停止…") : (model.config.language == "en" ? "Stop sync" : "停止同步")) : t("syncNow")).fontWeight(.medium)
             }
-            .frame(maxWidth: .infinity, minHeight: 24)
         }
-        .buttonStyle(.borderedProminent).controlSize(.large)
-        .disabled(model.isSyncActive ? (!model.canStopSync || model.stoppingSync) : (!model.canRun || !model.hasEnabledPairs))
-        .help(t("syncAllHint"))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            if model.isSyncActive {
+                Button(role: .destructive) { model.stopSync() } label: {
+                    Label(t(model.stoppingSync ? "stoppingSync" : "stopSync"), systemImage: "stop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!model.canStopSync || model.stoppingSync)
+            } else {
+                Button {
+                    showWindow("overview")
+                    model.previewNow()
+                } label: {
+                    Label(t("previewAll"), systemImage: "eye")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                Button { model.syncNow(all: true) } label: {
+                    Label(t("syncNow"), systemImage: "arrow.triangle.2.circlepath")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
         }
+        .controlSize(.large)
+        .disabled(!model.isSyncActive && !model.canRunAll)
     }
 
     private func pairRow(_ pair: SyncPair) -> some View {
@@ -626,18 +680,12 @@ struct MenuBarPanel: View {
     }
 
     @ViewBuilder private var notice: some View {
-        if model.hasUnsavedChanges {
+        if model.conflictCount > 0 {
             Button { showWindow("overview") } label: {
-                Label(t("menubarSaveHint"), systemImage: "pencil.circle")
-            }.buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
-        } else if model.conflictCount > 0 {
-            Button { showWindow("overview") } label: {
-                Label(String(format: t("conflictCountShort"), model.conflictCount),
-                      systemImage: "exclamationmark.triangle.fill")
-            }.buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
-        } else if let detail = model.statusDetail, model.busy || model.statusKey == "error" {
-            Text(detail).font(.caption).foregroundStyle(model.statusKey == "error" ? Color.red : Color.secondary)
-                .lineLimit(2)
+                Label(t("reviewConflicts"), systemImage: "exclamationmark.triangle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.link).font(.caption)
         } else if let result = model.resultBanner {
             Text(result).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
@@ -660,14 +708,13 @@ struct MenuBarPanel: View {
         .font(.system(size: 11)).buttonStyle(.borderless).foregroundStyle(.secondary)
     }
 
+    static let width: CGFloat = 372
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             header
-            HStack(alignment: .top, spacing: 8) {
-                summaryItem(t("lastSync"), value: model.lastSyncDate.map(model.shortDate) ?? t("never"), symbol: "clock")
-                summaryItem(t("nextSync"), value: model.nextRunValue, symbol: "calendar")
-            }
-            primaryAction
+            syncStatus
+            actions
             notice
             folders
             if let release = model.availableRelease {
@@ -677,7 +724,7 @@ struct MenuBarPanel: View {
             Divider()
             footer
         }
-        .padding(16).frame(width: 356)
+        .padding(14).frame(width: Self.width)
         .background(Color(nsColor: .windowBackgroundColor))
         .environment(\.locale, model.config.language == "system" ? .current : Locale(identifier: model.config.language))
     }
@@ -687,6 +734,8 @@ struct MenuBarPanel: View {
 struct ContentView: View {
     @ObservedObject var model: SyncModel
     @Environment(\.openWindow) private var openWindow
+    @State private var detailsExpanded = false
+    @State private var detailsRequest = UUID()
 
     private func t(_ key: String) -> String { model.t(key) }
 
@@ -717,6 +766,12 @@ struct ContentView: View {
     private func openPair(_ pair: SyncPair) {
         model.selectedID = pair.id
         model.page = "pair"
+    }
+
+    private func showSyncDetails() {
+        model.page = "overview"
+        detailsExpanded = true
+        detailsRequest = UUID()
     }
 
     // MARK: - Layout
@@ -841,10 +896,10 @@ struct ContentView: View {
                 .help(t("syncAllHint"))
                 .disabled(!model.canRun || !model.hasEnabledPairs)
             }
-            Button { openWindow(id: "sync-details") } label: {
-                Label(model.config.language == "en" ? "Sync Details" : "同步详情", systemImage: "list.bullet.rectangle")
+            Button(action: showSyncDetails) {
+                Label(t("syncDetails"), systemImage: "list.bullet.rectangle")
             }
-            .help(model.config.language == "en" ? "Show activity and issues" : "查看同步活动与需要处理的文件")
+            .help(t("syncDetailsHint"))
             Button { model.save() } label: {
                 Label(t("save"), systemImage: "checkmark.circle")
             }
@@ -913,9 +968,7 @@ struct ContentView: View {
                 .help(model.statusDetail ?? t(model.statusKey))
             Spacer()
             if hasSyncIssues {
-                Button(model.config.language == "en" ? "Details…" : "查看详情…") {
-                    openWindow(id: "sync-details")
-                }
+                Button(t("viewSyncDetails"), action: showSyncDetails)
             }
             if model.hasUnsavedChanges {
                 Circle().fill(.orange).frame(width: 6, height: 6)
@@ -934,72 +987,107 @@ struct ContentView: View {
     // MARK: - Overview
 
     private var overview: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                overviewHeader
-                if model.isSyncActive {
-                    SyncRunProgressView(snapshot: model.syncProgress, language: model.config.language)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    overviewHeader
+                    DisclosureGroup(isExpanded: $detailsExpanded) {
+                        SyncDetailsView(model: model)
+                            .padding(.top, 12)
+                    } label: {
+                        Label(t("syncDetails"), systemImage: "list.bullet.rectangle").font(.headline)
+                    }
+                    .padding(14)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+                    .id("sync-details")
+                    if let banner = model.resultBanner {
+                        Label(banner, systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
+                    }
+                    if model.conflictCount > 0 { pendingSection }
+                    if let release = model.availableRelease { updateBanner(release) }
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text(t("syncPairs")).font(.headline)
+                            Spacer()
+                            Button { model.addPair() } label: {
+                                Label(t("addFolder"), systemImage: "plus")
+                            }
+                            .disabled(model.isSyncActive)
+                        }
+                        if model.config.pairs.isEmpty {
+                            Text(t("empty"))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
+                        } else {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 14, alignment: .top)],
+                                      alignment: .leading, spacing: 14) {
+                                ForEach(model.config.pairs) { pair in pairCard(pair) }
+                            }
+                        }
+                    }
+                    if model.conflictCount == 0 { pendingSection }
                 }
-                if let banner = model.resultBanner {
-                    Label(banner, systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
-                }
-                if let release = model.availableRelease { updateBanner(release) }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 14, alignment: .top)],
-                          alignment: .leading, spacing: 14) {
-                    ForEach(model.config.pairs) { pair in pairCard(pair) }
-                }
-                if model.config.pairs.isEmpty { emptyState.frame(height: 200) }
-                pendingSection
+                .padding(24)
             }
-            .padding(24)
+            .onChange(of: detailsRequest) { _ in
+                withAnimation { proxy.scrollTo("sync-details", anchor: .top) }
+            }
         }
     }
 
     private var overviewHeader: some View {
-        HStack(alignment: .center, spacing: 14) {
-            Group {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 13) {
+                SyncStatusGlyph(model: model)
+                    .font(.title2)
+                    .frame(width: 42, height: 42)
+                    .background(model.syncStatusColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 11))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(t("syncStatus")).font(.caption).foregroundStyle(.secondary)
+                    Text(model.statusHeadline).font(.title2.weight(.semibold))
+                }
+                Spacer(minLength: 8)
                 if model.isSyncActive {
-                    ProgressView()
-                } else if model.statusKey == "error" {
-                    Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
-                } else if model.conflictCount > 0 {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                } else if !model.hasEnabledPairs {
-                    Image(systemName: "folder.badge.plus").foregroundStyle(.secondary)
-                } else if model.menuBarState == .attention {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                } else if model.hasPendingDownloads {
-                    Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
+                    StopSyncButton(model: model).controlSize(.large)
                 } else {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    HStack(spacing: 8) {
+                        Button { model.previewNow() } label: {
+                            Label(t("previewAll"), systemImage: "eye")
+                        }
+                        .buttonStyle(.bordered)
+                        Button { model.syncNow(all: true) } label: {
+                            Label(t("syncNow"), systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .controlSize(.large)
+                    .disabled(!model.canRunAll)
                 }
             }
-            .font(.system(size: 30))
-            .frame(width: 40)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(model.statusHeadline).font(.title2.weight(.semibold))
-                Text(model.busy ? (model.statusDetail ?? model.overviewSummary) : model.overviewSummary)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            if let note = model.syncStatusNote {
+                Text(note).font(.callout).foregroundStyle(.secondary).lineLimit(3).help(note)
             }
-            Spacer(minLength: 12)
-            if model.isSyncActive { StopSyncButton(model: model).controlSize(.large) }
-            Button { model.previewNow() } label: {
-                Label(t("previewAll"), systemImage: "eye")
+            if model.isSyncActive {
+                SyncRunProgressView(snapshot: model.syncProgress, language: model.config.language)
+            } else {
+                Divider()
+                HStack(alignment: .top, spacing: 12) {
+                    SyncSummaryMetric(title: t("lastSync"), value: model.lastSyncValue, symbol: "clock")
+                    SyncSummaryMetric(title: t("nextSync"), value: model.nextRunValue, symbol: "calendar")
+                    SyncSummaryMetric(title: t("folders"), value: String(format: t("enabledCount"), model.enabledPairCount),
+                                      symbol: "folder")
+                }
             }
-            .controlSize(.large)
-            .disabled(!model.canRun || !model.hasEnabledPairs)
-            Button { model.syncNow(all: true) } label: {
-                Label(t("syncNow"), systemImage: "arrow.triangle.2.circlepath")
+            if pathSyncUIPreview {
+                Text(t("previewDemoHint")).font(.caption).foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!model.canRun || !model.hasEnabledPairs)
         }
+        .padding(16)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func updateBanner(_ release: AppRelease) -> some View {
@@ -1280,47 +1368,52 @@ struct ContentView: View {
 
     private var settingsForm: some View {
         Form {
-            Section {
-                Toggle(t("background"), isOn: $model.config.enabled)
-                Group {
-                    Picker(t("runMode"), selection: $model.config.scheduleMode) {
-                        Text(t("daily")).tag("daily")
-                        Text(t("interval")).tag("interval")
-                    }
-                    .pickerStyle(.segmented)
-                    if model.config.scheduleMode == "daily" {
-                        DatePicker(t("runTime"), selection: dailyTime, displayedComponents: .hourAndMinute)
-                            .datePickerStyle(.field)
-                    } else {
-                        Stepper(value: $model.config.intervalHours, in: SyncConfig.intervalHourRange) {
-                            LabeledContent(t("intervalHours"), value: "\(model.config.intervalHours) \(t("hours"))")
+            if !pathSyncUIPreview {
+                Section {
+                    Toggle(t("background"), isOn: $model.config.enabled)
+                    Group {
+                        Picker(t("runMode"), selection: $model.config.scheduleMode) {
+                            Text(t("daily")).tag("daily")
+                            Text(t("interval")).tag("interval")
+                        }
+                        .pickerStyle(.segmented)
+                        if model.config.scheduleMode == "daily" {
+                            DatePicker(t("runTime"), selection: dailyTime, displayedComponents: .hourAndMinute)
+                                .datePickerStyle(.field)
+                        } else {
+                            Stepper(value: $model.config.intervalHours, in: SyncConfig.intervalHourRange) {
+                                LabeledContent(t("intervalHours"), value: "\(model.config.intervalHours) \(t("hours"))")
+                            }
                         }
                     }
+                    .disabled(!model.config.enabled)
+                } header: {
+                    Text(t("schedule"))
+                } footer: {
+                    Text(t("backgroundHint") + " "
+                         + (model.config.scheduleMode == "daily" ? t("dailyHint") : String(
+                             format: t("intervalRangeHint"), SyncConfig.intervalHourRange.lowerBound,
+                             SyncConfig.intervalHourRange.upperBound)))
                 }
-                .disabled(!model.config.enabled)
-            } header: {
-                Text(t("schedule"))
-            } footer: {
-                Text(t("backgroundHint") + " "
-                     + (model.config.scheduleMode == "daily" ? t("dailyHint") : String(
-                         format: t("intervalRangeHint"), SyncConfig.intervalHourRange.lowerBound,
-                         SyncConfig.intervalHourRange.upperBound)))
+
             }
 
             Section {
                 Toggle(t("checkCloud"), isOn: $model.config.checkCloudBeforeSync)
-                LabeledContent(model.config.language == "en" ? "OneDrive metadata index" : "OneDrive 元数据索引") {
-                    HStack {
-                        Text(model.oneDriveConnected ? (model.config.language == "en" ? "Connected" : "已连接") : (model.config.language == "en" ? "Not connected" : "尚未连接"))
-                            .foregroundStyle(.secondary)
-                        Button(model.config.language == "en" ? "Connect read-only…" : "连接只读查询…") { model.connectOneDrive() }
-                            .disabled(model.oneDriveConnecting || model.busy)
-                        if model.oneDriveConnecting { ProgressView().controlSize(.small) }
+                if !pathSyncUIPreview {
+                    LabeledContent(model.config.language == "en" ? "OneDrive metadata index" : "OneDrive 元数据索引") {
+                        HStack {
+                            Text(model.oneDriveConnected ? (model.config.language == "en" ? "Connected" : "已连接") : (model.config.language == "en" ? "Not connected" : "尚未连接"))
+                                .foregroundStyle(.secondary)
+                            Button(model.config.language == "en" ? "Connect read-only…" : "连接只读查询…") { model.connectOneDrive() }
+                                .disabled(model.oneDriveConnecting || model.busy)
+                            if model.oneDriveConnecting { ProgressView().controlSize(.small) }
+                        }
                     }
+                    if let error = model.oneDriveConnectionError { Text(error).foregroundStyle(.orange) }
+                    Text(model.config.language == "en" ? "First connection uses rclone’s Microsoft OAuth app with Files.Read and offline_access. Credentials stay in this Mac’s Keychain. Background sync refreshes silently; it never opens a browser." : "首次连接通过 rclone 的微软授权应用申请 Files.Read 及 offline_access。登录凭据仅存这台 Mac 的钥匙串。后续后台自动续期，不打开浏览器。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                if let error = model.oneDriveConnectionError { Text(error).foregroundStyle(.orange) }
-                Text(model.config.language == "en" ? "First connection uses rclone’s Microsoft OAuth app with Files.Read and offline_access. Credentials stay in this Mac’s Keychain. Background sync refreshes silently; it never opens a browser." : "首次连接通过 rclone 的微软授权应用申请 Files.Read 及 offline_access。登录凭据仅存这台 Mac 的钥匙串。后续后台自动续期，不打开浏览器。")
-                    .font(.caption).foregroundStyle(.secondary)
             } footer: {
                 Text(t("checkCloudHint"))
             }
@@ -1359,17 +1452,19 @@ struct ContentView: View {
                     Text(t("english")).tag("en")
                 }
                 .pickerStyle(.menu)
-                Toggle(t("launchAtLogin"), isOn: Binding(
-                    get: { model.launchAtLoginStatus == .enabled || model.launchAtLoginStatus == .requiresApproval },
-                    set: { model.setLaunchAtLogin($0) }
-                ))
-                if model.launchAtLoginStatus == .requiresApproval {
-                    Label(t("launchAtLoginApproval"), systemImage: "exclamationmark.circle")
-                        .foregroundStyle(.orange)
-                }
-                if let error = model.launchAtLoginError {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
+                if !pathSyncUIPreview {
+                    Toggle(t("launchAtLogin"), isOn: Binding(
+                        get: { model.launchAtLoginStatus == .enabled || model.launchAtLoginStatus == .requiresApproval },
+                        set: { model.setLaunchAtLogin($0) }
+                    ))
+                    if model.launchAtLoginStatus == .requiresApproval {
+                        Label(t("launchAtLoginApproval"), systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.orange)
+                    }
+                    if let error = model.launchAtLoginError {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    }
                 }
             } header: {
                 Text(t("general"))
@@ -1377,7 +1472,7 @@ struct ContentView: View {
                 Text(t("notificationHint"))
             }
 
-            updatesSection
+            if !pathSyncUIPreview { updatesSection }
             oneDriveRulesSection
             configRollbackSection
             aboutSection
@@ -1516,7 +1611,7 @@ struct ContentView: View {
                     .resizable()
                     .frame(width: 48, height: 48)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(t("appName")).font(.headline)
+                    Text(model.appDisplayName).font(.headline)
                     Text("\(t("version")) \(model.currentVersion)").foregroundStyle(.secondary)
                     Text(t("aboutSubtitle")).font(.caption).foregroundStyle(.secondary)
                 }

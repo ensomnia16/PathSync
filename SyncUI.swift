@@ -2,6 +2,19 @@ import AppKit
 import SwiftUI
 
 private let translations: [String: (zh: String, en: String)] = [
+    "previewAppName": ("路径同步 · 试跑版", "PathSync Preview"),
+    "previewDemoFolder": ("示例文件夹", "Sample folders"),
+    "previewDemoHint": ("试跑版带有一组本机示例文件夹，可直接预览和同步。", "Try previewing and syncing the sample folders on this Mac."),
+    "previewManualSync": ("仅手动同步", "Manual sync only"),
+    "reviewConflicts": ("查看冲突", "Review conflicts"),
+    "refreshHistory": ("刷新记录", "Refresh history"),
+    "syncDetails": ("同步详情", "Sync details"),
+    "syncDetailsHint": ("查看同步活动与需要处理的文件", "Show sync activity and affected files"),
+    "viewSyncDetails": ("查看详情", "View details"),
+    "syncStatus": ("同步状态", "Sync status"),
+    "syncPairs": ("同步路径", "Sync folders"),
+    "stopSync": ("停止同步", "Stop sync"),
+    "stoppingSync": ("正在停止…", "Stopping…"),
     "appName": ("路径同步", "PathSync"),
     "schedule": ("默认计划", "Default schedule"),
     "scheduleSubtitle": ("所有已启用路径共用这项计划；每组可单独选择同步方向。", "All enabled folders follow this schedule. Each folder has its own sync direction."),

@@ -238,6 +238,11 @@ struct OneDriveRules {
             config.pairs[index].syncClaudeFiles = true
             config.pairs[index].syncTemporaryFiles = false
         }
+        // The preview's built-in demo runs only between its two local sample directories.
+        if pathSyncUIPreview, !required.isEmpty,
+           config.pairs.filter({ required.contains($0.id) }).allSatisfy(isPathSyncPreviewSample) {
+            return (config, [])
+        }
         guard isOneDriveRoot(config.oneDriveRoot) else {
             if required.isEmpty { return (config, []) }
             throw Failure.rootUnavailable

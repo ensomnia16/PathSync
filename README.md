@@ -55,7 +55,11 @@
 
 生成的应用位于 `.build/路径同步.app`。复制到 `/Applications` 后打开，在应用中选择目录并点击“保存设置”。定时任务以当前登录用户身份通过 `launchd` 运行；无需管理员权限运行同步。
 
-当前图标源图是 `PathSyncIcon.png`，采用白底双层抽屉柜：蓝色抽屉、白色拉手，主体在底板内留出更多空间；`app-icon/provenance.json` 记录最终图标来源，`tools/package-legacy-icon.swift` 为现有 `.icns` 打包路径生成圆角及留白。原始方形源图保留；旧版 `GenerateIcon.swift` 仅保留作历史参考。应用内“关于”页面可以选择界面语言。
+图标原画是 `PathSyncIcon.png`。Xcode 26 或更新版本会编译 `PathSync.icon`，在蓝色双层抽屉原画上加入银白渐变底板和玻璃高光。仅安装命令行工具时，构建脚本使用原有的 `.icns` 打包流程。
+
+### 界面试跑版
+
+在 Xcode 26 或更新版本下运行 `PATHSYNC_UI_PREVIEW=1 ./build.sh .build/ui-preview`，打开生成的 `PathSync Preview.app`。首次启动创建一对本机示例目录，可以从总览或菜单栏预览并手动同步。试跑版用独立的配置与同步状态目录，后台计划、自动更新和 OneDrive 元数据索引仅在常规构建中提供。
 
 ## 快捷指令
 
