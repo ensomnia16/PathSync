@@ -84,12 +84,12 @@ final class MenuBarController: NSObject {
         guard let host = hosting else { return }
         host.view.layoutSubtreeIfNeeded()
         let size = host.view.fittingSize
-        popover.contentSize = NSSize(width: 356, height: max(80, size.height))
+        popover.contentSize = NSSize(width: MenuBarPanel.width, height: max(80, size.height))
     }
 
     private func update() {
         let state = model.menuBarState
-        let title = model.t("appName") + " — " + model.t(state.titleKey)
+        let title = model.appDisplayName + " — " + model.t(state.titleKey)
         statusItem?.button?.image = menuBarIcon(for: state, phase: phase)
         statusItem?.button?.toolTip = title
         statusItem?.button?.setAccessibilityLabel(title)

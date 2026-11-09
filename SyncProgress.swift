@@ -78,9 +78,8 @@ struct SyncProgressSnapshot: Codable, Equatable {
     let runID: String
     var pairs: [SyncPairProgress]
     var finishedCount: Int { pairs.filter { $0.state != .active }.count }
-    static var path: String { FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support/ResearchSync/sync-progress.json" }
 
-    static func read(runID: String, at path: String = path) -> Self? {
+    static func read(runID: String, at path: String) -> Self? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               attrs[.type] as? FileAttributeType == .typeRegular,
               let size = attrs[.size] as? NSNumber, size.intValue <= 1_048_576,
@@ -99,7 +98,7 @@ final class SyncProgressStore {
     private let path: String
     private var lastWrite = Date.distantPast
 
-    init(runID: String, pairIDs: [UUID], path: String = SyncProgressSnapshot.path) {
+    init(runID: String, pairIDs: [UUID], path: String) {
         self.path = path
         snapshot = SyncProgressSnapshot(runID: runID, pairs: pairIDs.map { SyncPairProgress(id: $0) })
         write(force: true)
