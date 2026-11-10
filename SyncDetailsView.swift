@@ -89,6 +89,7 @@ struct SyncDetailsView: View {
     }
 
     private func groupRows(_ group: SyncIssueGroup, pair: SyncPair) -> some View {
+        let authentication = group.events.allSatisfy { $0.reason == "onedrive_auth" }
         let filtered = group.events.filter { state.query.isEmpty || $0.path.localizedCaseInsensitiveContains(state.query) }
         let paused = pair.cloudOnlyPaths.contains { group.folder == $0 || group.folder.hasPrefix($0 + "/") }
         return GroupBox {
@@ -99,28 +100,31 @@ struct SyncDetailsView: View {
                          : (group.events.first?.detail ?? ""))
                         .font(.callout).textSelection(.enabled)
                 }
-                HStack {
-                    Button(english ? "Open folder" : "打开目录") { openFolder(group, pair: pair) }
-                    if group.canPauseFolder {
-                        Button(paused ? (english ? "Folder paused" : "此目录已暂停") : (english ? "Pause folder…" : "暂停此目录…")) {
-                            state.pauseFolder = group.folder
-                            state.confirmingPause = true
-                        }.disabled(paused || !canChangePolicy)
-                    }
-                }.controlSize(.small)
-                DisclosureGroup(english ? "Files (\(filtered.count))" : "文件（\(filtered.count) 项）") {
-                    ForEach(Array(filtered.prefix(50))) { event in
-                        Text(event.path).font(.caption).textSelection(.enabled)
-                    }
-                    if filtered.count > 50 {
-                        Text(english ? "Showing the first 50. Search above to narrow the list." : "显示前 50 项，可用上方的搜索框筛选。")
-                            .font(.caption).foregroundStyle(.secondary)
+                if !authentication {
+                    HStack {
+                        Button(english ? "Open folder" : "打开目录") { openFolder(group, pair: pair) }
+                        if group.canPauseFolder {
+                            Button(paused ? (english ? "Folder paused" : "此目录已暂停") : (english ? "Pause folder…" : "暂停此目录…")) {
+                                state.pauseFolder = group.folder
+                                state.confirmingPause = true
+                            }.disabled(paused || !canChangePolicy)
+                        }
+                    }.controlSize(.small)
+                    DisclosureGroup(english ? "Files (\(filtered.count))" : "文件（\(filtered.count) 项）") {
+                        ForEach(Array(filtered.prefix(50))) { event in
+                            Text(event.path).font(.caption).textSelection(.enabled)
+                        }
+                        if filtered.count > 50 {
+                            Text(english ? "Showing the first 50. Search above to narrow the list." : "显示前 50 项，可用上方的搜索框筛选。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
-            Label("\(group.folder.isEmpty ? (english ? "Root files" : "根目录文件") : group.folder) · \(group.events.count) \(english ? "files" : "项")",
+            Label(authentication ? (english ? "OneDrive connection" : "OneDrive 登录") :
+                  "\(group.folder.isEmpty ? (english ? "Root files" : "根目录文件") : group.folder) · \(group.events.count) \(english ? "files" : "项")",
                   systemImage: group.online ? "arrow.down.circle" : "exclamationmark.circle")
                 .foregroundStyle(group.online ? Color.secondary : Color.orange)
         }

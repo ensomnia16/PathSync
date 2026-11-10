@@ -34,6 +34,10 @@ class GraphIndexTests(unittest.TestCase):
    if '/root:/' in url:return {'id':'root','name':'test','folder':{}}
    return {'value':items,'@odata.deltaLink':CURSOR}
   x=self.index(fetch);x.refresh();return x
+ def test_keychain_access_denial_is_not_reported_as_login_timeout(self):
+  with mock.patch.object(g.subprocess, 'run', return_value=mock.Mock(returncode=11)):
+   with self.assertRaisesRegex(g.AuthenticationRequired, '钥匙串'):
+    g.credentials('/helper')
  def test_colon_entity_matches_file_provider_name(self):
   f=self.file('a:b.txt');f['name']='a&#x3a;b.txt'
   (self.cloud/'a:b.txt').write_bytes(b'base')

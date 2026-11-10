@@ -2007,6 +2007,9 @@ if __name__ == '__main__':
         print('STOPPED\t已停止同步；未完成的文件下次继续\nstopped=1', flush=True)
         sys.stderr.flush()
         os._exit(130)
+    except graph_index.AuthenticationRequired as error:
+        print(f'FAILED\t\t{error}\treason=onedrive_auth', file=sys.stderr)
+        sys.exit(2)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         print(f'FAILED\t{error}', file=sys.stderr)
         sys.exit(2)

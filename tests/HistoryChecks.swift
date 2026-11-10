@@ -149,6 +149,7 @@ struct HistoryChecks {
         assert(diagnosis.contains("CityU Meeting（1）") && diagnosis.contains("KTH（1）"))
         assert(diagnosis.contains("上传也会暂停"))
         assert(!diagnosis.contains("GRAPH_INDEX"))
+        assert(syncIssueSummary("FAILED\t\t钥匙串拒绝访问\treason=onedrive_auth") == "钥匙串拒绝访问")
         let mismatch = syncIssueSummary("FAILED\tcache/a.pkgf\tOneDrive 本地目录尚未跟上服务器元数据；保留文件与基线\nGRAPH_INDEX\t{}")
         assert(mismatch.contains("cache/a.pkgf"))
         assert(mismatch.contains("等待 OneDrive"))

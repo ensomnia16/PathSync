@@ -280,7 +280,8 @@ func syncIssueSummary(_ output: String, language: String = "zh-Hans") -> String 
     let failures = output.split(whereSeparator: \.isNewline).compactMap { line -> (String, String)? in
         let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
         guard fields.first == "FAILED", fields.count >= 2 else { return nil }
-        return (String(fields[1]), fields.count > 2 ? String(fields[2]) : String(fields[1]))
+        let detail = fields.count > 2 ? fields[2].split(separator: "\t", maxSplits: 1).first.map(String.init) : nil
+        return (String(fields[1]), detail ?? String(fields[1]))
     }
     let online = failures.filter { $0.1.contains("仅在线文件未下载") }
     let other = failures.filter { !$0.1.contains("仅在线文件未下载") }
@@ -300,7 +301,11 @@ func syncIssueSummary(_ output: String, language: String = "zh-Hans") -> String 
             : "\(online.count) 个仅在线文件待处理：\(locations)\(remaining)。未自动下载。只需云端保留：将对应子目录加入‘仅云端’并保存（该目录的上传也会暂停）；需要本地副本：在 OneDrive 下载所选文件后重试。")
     }
     if let first = other.first {
-        messages.append(english ? "\(other.count) file errors. \(first.0): \(first.1)" : "\(other.count) 项文件错误。\(first.0)：\(first.1)")
+        if first.0.isEmpty {
+            messages.append(first.1)
+        } else {
+            messages.append(english ? "\(other.count) file errors. \(first.0): \(first.1)" : "\(other.count) 项文件错误。\(first.0)：\(first.1)")
+        }
         if other.contains(where: { $0.1.contains("尚未跟上服务器元数据") }) {
             messages.append(english ? "Wait for OneDrive to finish updating its folder list, then retry. The affected paths were preserved; nothing was overwritten or deleted there." : "请等待 OneDrive 完成目录更新后重试；相关路径已保留，未覆盖或删除。若持续出现，请检查 OneDrive 目录状态。")
         }
