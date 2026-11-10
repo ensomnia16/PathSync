@@ -38,7 +38,15 @@ if [[ "${PATHSYNC_UI_PREVIEW:-0}" != 1 ]]; then
     cp "$source_dir/pathsync_cli.py" "$app/Contents/Resources/"
     cp "$source_dir/tools/install-agent-cli.py" "$source_dir/docs/agent-instructions.md" "$app/Contents/Resources/"
     (cd "$source_dir/authbroker" && go build -trimpath -ldflags='-s -w' -o "$app/Contents/Resources/OneDriveOAuth" .)
-    swiftc -target "$architecture-apple-macosx13.0" -O "$source_dir/OneDriveAuth.swift" -o "$app/Contents/Resources/OneDriveAuth"
+    if [[ "${PATHSYNC_SIGNING_MODE:-stable}" == stable ]]; then
+        trusted_helper="${PATHSYNC_AUTH_HELPER:-/Applications/路径同步.app/Contents/Resources/OneDriveAuth}"
+        cp "$trusted_helper" "$app/Contents/Resources/OneDriveAuth"
+        compatibility_helper="${PATHSYNC_AUTH_HELPER_2193:-/Applications/路径同步.app/Contents/Resources/OneDriveAuth-2.19.3}"
+        cp "$compatibility_helper" "$app/Contents/Resources/OneDriveAuth-2.19.3"
+        swiftc -target "$architecture-apple-macosx13.0" -O "$source_dir/OneDriveAuthGate.swift" -o "$app/Contents/Resources/OneDriveAuthGate"
+    else
+        swiftc -target "$architecture-apple-macosx13.0" -O "$source_dir/OneDriveAuth.swift" -o "$app/Contents/Resources/OneDriveAuth"
+    fi
 fi
 cp "$source_dir/cloud_only.py" "$app/Contents/Resources/cloud_only.py"
 cp "$source_dir/storage_analysis.py" "$app/Contents/Resources/storage_analysis.py"

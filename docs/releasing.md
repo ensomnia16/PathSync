@@ -10,8 +10,16 @@ The macOS application and its update helper use the persistent certificate in
 dedicated `PathSync-code-signing.keychain-db` keychain. The default build uses
 `tools/sign-app.py` and fails if that identity is unavailable. It never generates
 a replacement certificate. `PATHSYNC_SIGNING_MODE=adhoc ./build.sh OUTPUT` is
-available for local development. Before packaging such a build, sign it on the
-signing Mac with `python3 tools/sign-app.py /path/to/路径同步.app`.
+available for local development.
+
+For a signed release, use the original signed credential helpers. If the
+installed app does not already bundle both, set `PATHSYNC_AUTH_HELPER` and
+`PATHSYNC_AUTH_HELPER_2193` to `Contents/Resources/OneDriveAuth` extracted from
+the verified v2.19.2 and v2.19.3 archives respectively. The build copies both
+byte for byte and builds `OneDriveAuthGate` separately. The signing tool verifies
+each helper's pinned certificate and CDHash and leaves its signature intact.
+The gate selects the helper matching the device's existing login keychain
+partition list. A rebuild with the same certificate changes the CDHash.
 
 Both update verification and the replacement helper require the pinned
 certificate and application identifier. The designated requirement stays the

@@ -15,15 +15,33 @@ func query() -> [String: Any] {
             kSecAttrService as String: service, kSecAttrAccount as String: account,
             kSecUseAuthenticationContext as String: context]
 }
-func fail() -> Never {
-    fputs("OneDrive connection unavailable; reconnect from PathSync settings.\n", stderr)
-    exit(2)
+enum AuthFailure: Int32 {
+    case invalid = 2
+    case missing = 10
+    case keychainInteraction = 11
+    case keychainFailure = 12
+    case refresh = 13
+}
+
+func fail(_ reason: AuthFailure = .invalid) -> Never {
+    // The caller translates these codes. Do not print token or provider data.
+    exit(reason.rawValue)
+}
+
+func checkKeychain(_ status: OSStatus) {
+    switch status {
+    case errSecSuccess: return
+    case errSecItemNotFound: fail(.missing)
+    case errSecInteractionNotAllowed, errSecInteractionRequired, errSecAuthFailed, errSecUserCanceled:
+        fail(.keychainInteraction)
+    default: fail(.keychainFailure)
+    }
 }
 func read() -> Data {
     var q = query(); q[kSecReturnData as String] = true
     var result: CFTypeRef?
-    guard SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess,
-          let data = result as? Data else { fail() }
+    checkKeychain(SecItemCopyMatching(q as CFDictionary, &result))
+    guard let data = result as? Data else { fail() }
     return data
 }
 func save(_ data: Data) {
@@ -33,8 +51,8 @@ func save(_ data: Data) {
         var q = query(); q.removeValue(forKey: kSecUseAuthenticationContext as String)
         q[kSecValueData as String] = data
         q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(q as CFDictionary, nil) == errSecSuccess else { fail() }
-    } else if code != errSecSuccess { fail() }
+        checkKeychain(SecItemAdd(q as CFDictionary, nil))
+    } else { checkKeychain(code) }
 }
 func object(_ data: Data) -> [String: Any] {
     guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { fail() }
@@ -54,7 +72,8 @@ func run(_ args: [String], input: Data? = nil) -> Data {
         do { try task.run(); try pipe.fileHandleForWriting.write(contentsOf: input); try pipe.fileHandleForWriting.close() } catch { fail() }
     } else { task.standardInput = FileHandle.nullDevice; do { try task.run() } catch { fail() } }
     let data = output.fileHandleForReading.readDataToEndOfFile(); task.waitUntilExit()
-    guard task.terminationStatus == 0 else { fail() };return data
+    guard task.terminationStatus == 0 else { fail(args.first == "refresh-memory" ? .refresh : .invalid) }
+    return data
 }
 func decodeBlob(_ value: String) -> Data? {
     Data(base64Encoded: value + String(repeating: "=", count: (4 - value.count % 4) % 4))
@@ -75,13 +94,16 @@ func driveID(_ token: String) -> String {
     guard let drive else { fail() }; return drive
 }
 let command = CommandLine.arguments.dropFirst().first ?? "--status"
+// The existing item is in the file-based login keychain. LAContext alone
+// does not suppress its SecurityAgent prompts. Keep the ACL enforced.
+checkKeychain(SecKeychainSetUserInteractionAllowed(false))
 switch command {
 case "--status":
     var q = query(); q[kSecReturnAttributes as String] = true
-    exit(SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess ? 0 : 1)
+    checkKeychain(SecItemCopyMatching(q as CFDictionary, nil))
 case "--disconnect":
     let result = SecItemDelete(query() as CFDictionary)
-    exit(result == errSecSuccess || result == errSecItemNotFound ? 0 : 2)
+    if result != errSecItemNotFound { checkKeychain(result) }
 case "--connect":
     // Genuine rclone authorize. A browser opens only for this explicit command.
     let blob = json(["access_scopes": "Files.Read offline_access"]).base64EncodedString().replacingOccurrences(of: "=", with: "")
@@ -94,6 +116,8 @@ case "--connect":
     let token = object(data)
     guard let access = token["access_token"] as? String, token["refresh_token"] as? String != nil else { fail() }
     save(json(["token": token, "drive_id": driveID(access)]))
+case "--check-access":
+    _ = read()
 case "--token":
     // Concurrent pairs share one rotating refresh token; refresh sequentially.
     let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("PathSync/Auth", isDirectory: true)

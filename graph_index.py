@@ -34,10 +34,19 @@ def credentials(helper):
     try:
         result = subprocess.run([str(helper), '--token'], stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, timeout=45, check=False)
-    except subprocess.SubprocessError:
-        raise AuthenticationRequired('OneDrive 后台登录超时；本次同步已停止，不会打开浏览器。') from None
+    except subprocess.TimeoutExpired:
+        raise AuthenticationRequired('OneDrive 后台凭据刷新超时，请稍后重试。') from None
+    except OSError:
+        raise AuthenticationRequired('无法启动 OneDrive 登录组件，请检查 PathSync 安装。') from None
     if result.returncode:
-        raise AuthenticationRequired('OneDrive 尚未连接或登录已失效；请在设置中连接。后台任务不会打开浏览器。')
+        messages = {
+            10: 'OneDrive 尚未连接，请查看 PathSync 的 OneDrive 设置。',
+            11: 'macOS 钥匙串暂不允许 PathSync 读取或保存 OneDrive 登录凭据。请解锁这台 Mac 后重试。',
+            12: '无法访问 macOS 钥匙串中的 OneDrive 凭据，请查看 PathSync 的 OneDrive 设置。',
+            13: 'OneDrive 未能刷新已有登录。请检查网络后重试。',
+            14: '已有钥匙串授权与当前 OneDrive 登录组件不匹配。请检查 PathSync 更新。',
+        }
+        raise AuthenticationRequired(messages.get(result.returncode, 'OneDrive 登录信息不可用，请查看 PathSync 的 OneDrive 设置。'))
     try:
         value = json.loads(result.stdout)
         if not isinstance(value, dict) or not value.get('access_token') or not value.get('drive_id'):
