@@ -8,6 +8,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_ID = 'com.ensom.ResearchSync'
+ONEDRIVE_AUTH_CDHASH = 'dfca18ab2bfa4da69164e32b3aa8b3e9f928dbb9'
 
 
 def sign_app(app, adhoc=False):
@@ -36,7 +37,17 @@ def sign_app(app, adhoc=False):
             raise ValueError('Could not unlock the dedicated PathSync signing keychain.')
         options += ['--keychain', str(keychain)]
     nested = [(helper, BUNDLE_ID + '.UpdateApply')]
-    for name in ('QuickXorHash.dylib', 'OneDriveOAuth', 'OneDriveAuth'):
+    # Re-signing or rebuilding the credential owner can invalidate the
+    # existing login keychain partition list even with the same certificate.
+    names = ['QuickXorHash.dylib', 'OneDriveOAuth']
+    if adhoc:
+        names.append('OneDriveAuth')
+    else:
+        auth = app / 'Contents/Resources/OneDriveAuth'
+        requirement = '=identifier "' + BUNDLE_ID + '.OneDriveAuth" and certificate leaf = H"' + pin + '" and cdhash H"' + ONEDRIVE_AUTH_CDHASH + '"'
+        subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', requirement, str(auth)], check=True)
+        names.append('OneDriveAuthGate')
+    for name in names:
         path = app / 'Contents/Resources' / name
         if path.exists():
             nested.append((path, BUNDLE_ID + '.' + name.replace('.', '_')))

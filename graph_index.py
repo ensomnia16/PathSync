@@ -44,6 +44,7 @@ def credentials(helper):
             11: 'macOS 钥匙串暂不允许 PathSync 读取或保存 OneDrive 登录凭据。请解锁这台 Mac 后重试。',
             12: '无法访问 macOS 钥匙串中的 OneDrive 凭据，请查看 PathSync 的 OneDrive 设置。',
             13: 'OneDrive 未能刷新已有登录。请检查网络后重试。',
+            14: '已有钥匙串授权与当前 OneDrive 登录组件不匹配。请检查 PathSync 更新。',
         }
         raise AuthenticationRequired(messages.get(result.returncode, 'OneDrive 登录信息不可用，请查看 PathSync 的 OneDrive 设置。'))
     try:

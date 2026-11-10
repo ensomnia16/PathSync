@@ -707,7 +707,7 @@ private func syncOne(_ pair: SyncPair, direction: SyncDirection, excludeLatex: B
                      "--backup-retention-days", String(backupRetentionDays)]
     arguments += syncFilterArguments(pair, excludeLatex: excludeLatex)
     arguments += try cloudOnlyArguments(pair)
-    let authHelper = Bundle.main.resourceURL!.appendingPathComponent("OneDriveAuth")
+    let authHelper = OneDriveConnection.helper
     if !oneDriveRoot.isEmpty, cloud.hasPrefix(oneDriveRoot + "/"), OneDriveConnection.shouldUseCloudIndex {
         arguments += ["--graph-auth-helper", authHelper.path, "--onedrive-root", oneDriveRoot]
     }

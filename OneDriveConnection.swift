@@ -1,7 +1,11 @@
 import Foundation
 
 enum OneDriveConnection {
-    static var helper: URL { Bundle.main.resourceURL!.appendingPathComponent("OneDriveAuth") }
+    static var helper: URL {
+        let resources = Bundle.main.resourceURL!
+        let gate = resources.appendingPathComponent("OneDriveAuthGate")
+        return FileManager.default.isExecutableFile(atPath: gate.path) ? gate : resources.appendingPathComponent("OneDriveAuth")
+    }
     private static func status(_ command: String) -> Int32 {
         let process = Process(); process.executableURL = helper; process.arguments = [command]
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
