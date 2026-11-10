@@ -4,7 +4,10 @@ import Security
 
 // The original helper's CDHash is part of the login keychain partition ACL.
 // Check access metadata without prompting before invoking that exact binary.
-let trustedHash = "dfca18ab2bfa4da69164e32b3aa8b3e9f928dbb9"
+let trustedHelpers = [
+    (name: "OneDriveAuth", hash: "dfca18ab2bfa4da69164e32b3aa8b3e9f928dbb9"),
+    (name: "OneDriveAuth-2.19.3", hash: "0b2088de41f178f74a0bf38164c8e8ef2bfe2969"),
+]
 let service = "com.ensom.PathSync.OneDrive.ReadOnly.v1"
 
 func check(_ status: OSStatus) {
@@ -36,7 +39,7 @@ func partitionList(_ description: String) -> [String]? {
     return dictionary["Partitions"] as? [String]
 }
 
-func checkAccess(_ item: SecKeychainItem, helper: URL) {
+func authorizedPartitions(_ item: SecKeychainItem, resources: URL) -> [String] {
     var keychain: SecKeychain?
     check(SecKeychainItemCopyKeychain(item, &keychain))
     guard let keychain else { exit(12) }
@@ -49,7 +52,7 @@ func checkAccess(_ item: SecKeychainItem, helper: URL) {
     check(SecAccessCopyACLList(access, &list))
     guard let entries = list as? [SecACL] else { exit(12) }
     var trusted = false
-    var partitionMatches = false
+    var partitions: [String] = []
     for entry in entries {
         let tags = SecACLCopyAuthorizations(entry) as? [String] ?? []
         guard tags.contains("ACLAuthorizationDecrypt") || tags.contains("ACLAuthorizationPartitionID") else { continue }
@@ -57,7 +60,7 @@ func checkAccess(_ item: SecKeychainItem, helper: URL) {
         var prompt = SecKeychainPromptSelector()
         check(SecACLCopyContents(entry, &apps, &description, &prompt))
         if tags.contains("ACLAuthorizationPartitionID"), let description = description as String? {
-            partitionMatches = partitionList(description)?.contains("cdhash:" + trustedHash) == true
+            partitions.append(contentsOf: partitionList(description) ?? [])
         }
         if tags.contains("ACLAuthorizationDecrypt"), prompt.rawValue == 0,
            let applications = apps as? [SecTrustedApplication] {
@@ -65,23 +68,19 @@ func checkAccess(_ item: SecKeychainItem, helper: URL) {
                 var data: CFData?
                 guard SecTrustedApplicationCopyData(application, &data) == errSecSuccess,
                       let bytes = data as Data?, let path = String(data: bytes, encoding: .utf8) else { return false }
-                return path.trimmingCharacters(in: .controlCharacters) == helper.path
+                let approvedPath = path.trimmingCharacters(in: .controlCharacters)
+                return trustedHelpers.contains { resources.appendingPathComponent($0.name).path == approvedPath }
             }
         }
     }
-    guard trusted && partitionMatches else { exit(14) }
+    guard trusted else { exit(14) }
+    return partitions
 }
 
 check(SecKeychainSetUserInteractionAllowed(false))
 let command = CommandLine.arguments.dropFirst().first ?? "--status"
 guard ["--status", "--check-access", "--token", "--connect", "--disconnect"].contains(command) else { exit(2) }
-let helper = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-    .deletingLastPathComponent().appendingPathComponent("OneDriveAuth")
-var code: SecStaticCode?
-check(SecStaticCodeCreateWithPath(helper as CFURL, [], &code))
-var requirement: SecRequirement?
-check(SecRequirementCreateWithString(("cdhash H\"" + trustedHash + "\"") as CFString, [], &requirement))
-guard let code, let requirement, SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess else { exit(12) }
+let resources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.deletingLastPathComponent()
 
 let query: [String: Any] = [
     kSecClass as String: kSecClassGenericPassword,
@@ -91,16 +90,27 @@ let query: [String: Any] = [
 ]
 var result: CFTypeRef?
 let status = SecItemCopyMatching(query as CFDictionary, &result)
+let selected: (name: String, hash: String)
+if status == errSecItemNotFound, command == "--disconnect" { exit(0) }
 if status == errSecItemNotFound, command == "--connect" {
     var keychain: SecKeychain?
     check(SecKeychainCopyDefault(&keychain))
     guard let keychain else { exit(12) }
     unlocked(keychain)
+    selected = trustedHelpers[0]
 } else {
     check(status)
     guard let result, CFGetTypeID(result) == SecKeychainItemGetTypeID() else { exit(12) }
-    checkAccess(result as! SecKeychainItem, helper: helper)
+    let partitions = authorizedPartitions(result as! SecKeychainItem, resources: resources)
+    guard let match = trustedHelpers.first(where: { partitions.contains("cdhash:" + $0.hash) }) else { exit(14) }
+    selected = match
 }
+let helper = resources.appendingPathComponent(selected.name)
+var code: SecStaticCode?
+check(SecStaticCodeCreateWithPath(helper as CFURL, [], &code))
+var requirement: SecRequirement?
+check(SecRequirementCreateWithString(("cdhash H\"" + selected.hash + "\"") as CFString, [], &requirement))
+guard let code, let requirement, SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess else { exit(12) }
 if command == "--status" || command == "--check-access" { exit(0) }
 
 let arguments = [helper.path, command].map { strdup($0) } + [nil]

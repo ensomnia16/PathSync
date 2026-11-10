@@ -8,7 +8,10 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE_ID = 'com.ensom.ResearchSync'
-ONEDRIVE_AUTH_CDHASH = 'dfca18ab2bfa4da69164e32b3aa8b3e9f928dbb9'
+ONEDRIVE_AUTH_CDHASHES = {
+    'OneDriveAuth': 'dfca18ab2bfa4da69164e32b3aa8b3e9f928dbb9',
+    'OneDriveAuth-2.19.3': '0b2088de41f178f74a0bf38164c8e8ef2bfe2969',
+}
 
 
 def sign_app(app, adhoc=False):
@@ -43,9 +46,15 @@ def sign_app(app, adhoc=False):
     if adhoc:
         names.append('OneDriveAuth')
     else:
-        auth = app / 'Contents/Resources/OneDriveAuth'
-        requirement = '=identifier "' + BUNDLE_ID + '.OneDriveAuth" and certificate leaf = H"' + pin + '" and cdhash H"' + ONEDRIVE_AUTH_CDHASH + '"'
-        subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', requirement, str(auth)], check=True)
+        for name, cdhash in ONEDRIVE_AUTH_CDHASHES.items():
+            auth = app / 'Contents/Resources' / name
+            requirement = (
+                '=identifier "' + BUNDLE_ID + '.OneDriveAuth" and certificate leaf = H"'
+                + pin + '" and cdhash H"' + cdhash + '"'
+            )
+            subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', requirement, str(auth)], check=True)
+        if not (app / 'Contents/Resources/OneDriveAuthGate').is_file():
+            raise ValueError('The release is missing the OneDrive keychain gate.')
         names.append('OneDriveAuthGate')
     for name in names:
         path = app / 'Contents/Resources' / name

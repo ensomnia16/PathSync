@@ -12,13 +12,14 @@ dedicated `PathSync-code-signing.keychain-db` keychain. The default build uses
 a replacement certificate. `PATHSYNC_SIGNING_MODE=adhoc ./build.sh OUTPUT` is
 available for local development.
 
-For a signed release, set `PATHSYNC_AUTH_HELPER` to the original signed
-`Contents/Resources/OneDriveAuth` from the verified v2.19.2 release if the
-installed copy does not match. The build copies it byte for byte and builds
-`OneDriveAuthGate` separately. The signing tool verifies the helper's pinned
-certificate and CDHash and leaves its signature intact. The macOS login
-keychain partition list can bind an existing approval to this exact CDHash.
-A rebuild with the same certificate is not sufficient.
+For a signed release, use the original signed credential helpers. If the
+installed app does not already bundle both, set `PATHSYNC_AUTH_HELPER` and
+`PATHSYNC_AUTH_HELPER_2193` to `Contents/Resources/OneDriveAuth` extracted from
+the verified v2.19.2 and v2.19.3 archives respectively. The build copies both
+byte for byte and builds `OneDriveAuthGate` separately. The signing tool verifies
+each helper's pinned certificate and CDHash and leaves its signature intact.
+The gate selects the helper matching the device's existing login keychain
+partition list. A rebuild with the same certificate changes the CDHash.
 
 Both update verification and the replacement helper require the pinned
 certificate and application identifier. The designated requirement stays the

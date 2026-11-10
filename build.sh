@@ -41,6 +41,8 @@ if [[ "${PATHSYNC_UI_PREVIEW:-0}" != 1 ]]; then
     if [[ "${PATHSYNC_SIGNING_MODE:-stable}" == stable ]]; then
         trusted_helper="${PATHSYNC_AUTH_HELPER:-/Applications/路径同步.app/Contents/Resources/OneDriveAuth}"
         cp "$trusted_helper" "$app/Contents/Resources/OneDriveAuth"
+        compatibility_helper="${PATHSYNC_AUTH_HELPER_2193:-/Applications/路径同步.app/Contents/Resources/OneDriveAuth-2.19.3}"
+        cp "$compatibility_helper" "$app/Contents/Resources/OneDriveAuth-2.19.3"
         swiftc -target "$architecture-apple-macosx13.0" -O "$source_dir/OneDriveAuthGate.swift" -o "$app/Contents/Resources/OneDriveAuthGate"
     else
         swiftc -target "$architecture-apple-macosx13.0" -O "$source_dir/OneDriveAuth.swift" -o "$app/Contents/Resources/OneDriveAuth"
